@@ -515,13 +515,22 @@ def watch(
     *,
     index: bool,
     generation_provider: GenerationProvider | None,
+    import_existing: bool,
 ) -> None:
     files = _transcripts(codex_homes)
     known = {
         path: (path.stat().st_mtime_ns, path.stat().st_size)
         for path in files
     }
-    if files:
+    if import_existing:
+        for path in files:
+            sync_one(
+                path,
+                settings,
+                index=index,
+                generation_provider=generation_provider,
+            )
+    elif files:
         latest = files[-1]
         sync_one(
             latest,
@@ -584,6 +593,7 @@ def main() -> int:
     parser.add_argument("--transcript", type=Path)
     parser.add_argument("--hook-stdin", action="store_true")
     parser.add_argument("--watch", action="store_true")
+    parser.add_argument("--import-existing", action="store_true")
     parser.add_argument("--codex-home", type=Path, action="append")
     parser.add_argument("--poll-seconds", type=float)
     parser.add_argument("--index", action="store_true")
@@ -592,15 +602,36 @@ def main() -> int:
     settings = get_settings()
     generation_provider = build_generation_provider(settings) if args.enrich else None
     try:
+        configured_homes = args.codex_home or settings.codex_home_list
+        codex_homes = [path.resolve(strict=True) for path in configured_homes]
+        if args.import_existing and not args.watch:
+            results = [
+                sync_one(
+                    path,
+                    settings,
+                    index=args.index,
+                    generation_provider=generation_provider,
+                )
+                for path in _transcripts(codex_homes)
+            ]
+            print(
+                json.dumps(
+                    {
+                        "sessions_seen": len(results),
+                        "pages_changed": sum(item.changed for item in results),
+                        "pages_indexed": sum(item.indexed for item in results),
+                    }
+                )
+            )
+            return 0
         if args.watch:
-            configured_homes = args.codex_home or settings.codex_home_list
-            codex_homes = [path.resolve(strict=True) for path in configured_homes]
             watch(
                 settings,
                 codex_homes,
                 args.poll_seconds or settings.codex_capture_poll_seconds,
                 index=args.index,
                 generation_provider=generation_provider,
+                import_existing=args.import_existing,
             )
             return 0
         path = _hook_path() if args.hook_stdin else args.transcript

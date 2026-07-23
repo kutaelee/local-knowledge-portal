@@ -1,16 +1,17 @@
-[CmdletBinding(DefaultParameterSetName = 'Watch')]
+[CmdletBinding()]
 param(
-  [Parameter(ParameterSetName = 'Once')]
   [string]$Transcript,
-  [Parameter(ParameterSetName = 'Watch')]
   [switch]$Watch,
+  [switch]$ImportExisting,
   [switch]$Index
 )
 $ErrorActionPreference = 'Stop'
 $Repo = Split-Path -Parent $PSScriptRoot
 $Arguments = @('run', '--project', $Repo, 'python', '-m', 'lkp_indexer.codex_capture')
-if ($PSCmdlet.ParameterSetName -eq 'Once') {
+if ($Transcript) {
   $Arguments += @('--transcript', $Transcript)
+} elseif ($ImportExisting) {
+  $Arguments += '--import-existing'
 } else {
   $Arguments += @('--watch', '--enrich')
 }

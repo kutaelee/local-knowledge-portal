@@ -31,6 +31,9 @@ repositories. A WSL CLI has a separate home unless configured to share the Windo
 extra exposed homes through semicolon-separated `LKP_CODEX_ADDITIONAL_HOMES`; each root must
 contain a `sessions` directory.
 
+Run `scripts\codex-sync.ps1 -ImportExisting -Index` once to backfill all existing sessions from
+every configured home. The normal watcher does not silently backfill history during installation.
+
 ### Enable a local generation model
 
 Set `LKP_GENERATION_PROVIDER=ollama`, `LKP_GENERATION_MODEL`, and optionally a known

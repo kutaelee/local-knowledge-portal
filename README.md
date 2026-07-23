@@ -69,6 +69,15 @@ observes all new or changed transcripts under the configured Codex home. If a WS
 its own Linux `~/.codex`, expose that path to Windows and add it to
 `LKP_CODEX_ADDITIONAL_HOMES` as a semicolon-separated root.
 
+Backfill every existing session explicitly:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-sync.ps1 `
+  -ImportExisting -Index
+```
+
+Backfill is explicit so installing the portal never silently copies historical conversations.
+
 Start live capture with lexical indexing. Semantic embeddings stay explicitly pending when Ollama
 is unavailable:
 

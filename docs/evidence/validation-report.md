@@ -48,6 +48,10 @@ Date: 2026-07-23, Asia/Seoul
 - Mocked the official Ollama `/api/tags` and `/api/chat` contracts: JSON-schema output,
   non-streaming mode, disabled thinking, temperature zero, structured response validation, model
   digest recording, and fail-closed digest mismatch all passed.
+- `scripts\codex-sync.ps1 -ImportExisting -Index` saw 19 existing sessions, generated 16 pages
+  not already current, and indexed all 16 successfully.
+- Verified 19 managed Codex pages and 19 active Codex documents in PostgreSQL. A scan across the
+  generated pages found zero known system/reasoning/tool-output markers.
 
 ## Failed and corrected during validation
 
@@ -77,11 +81,11 @@ Date: 2026-07-23, Asia/Seoul
 
 - PostgreSQL, FastAPI on `127.0.0.1:8010`, and Next.js on `127.0.0.1:3010` were running at the end of validation.
 - Ollama readiness is false.
-- Production DB contains the isolated validation fixture and the managed active Codex session.
+- Production DB contains the isolated validation fixture and 19 managed Codex sessions.
   No existing project or transcript source was modified.
 - Embedding test data is revision `validation-deterministic-d1024-v1`; the configured production revision remains `ollama-qwen3-embedding-0.6b-d1024-v1`.
-- Codex capture is running and polls every five seconds. It reads existing transcript files but
-  initially imports only the most recently active one; historical sessions are not bulk imported.
+- Codex capture is running and polls every five seconds. Existing history was explicitly
+  backfilled once; future new and changed sessions are captured globally.
 
 ## Rollback
 
