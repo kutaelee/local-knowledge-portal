@@ -2,7 +2,10 @@
 
 Run `scripts/backup.ps1`. It creates a new timestamped directory, a PostgreSQL custom-format dump, SHA-256, database/schema/pgvector versions, and the source configuration hash. It never overwrites or prunes an existing backup.
 
-Models and regenerable caches are excluded. Managed vault pages, application configuration, and model/pipeline manifests should be copied into their corresponding timestamped backup area before production use; source repositories are not backup payloads.
+Models and regenerable caches are excluded. The script copies portal-managed Vault pages,
+raw hook event envelopes, non-secret configuration, and model/pipeline manifests into matching
+immutable timestamp directories. It records environment variable names but never their values.
+Source repositories are not backup payloads.
 
 Validate a dump with:
 

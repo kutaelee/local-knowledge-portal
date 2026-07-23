@@ -10,7 +10,7 @@ import {
   Activity, AlertTriangle, Blocks, BookOpen, ChevronDown, ChevronRight,
   CircleCheck, Clock3, Command, Database, FileCode2, Files, Folder,
   GitBranch, HeartPulse, LayoutDashboard, Moon, Network, PanelRightClose,
-  RefreshCcw, Search, ServerCog, Sun, TerminalSquare,
+  RefreshCcw, Search, ServerCog, Sun, TerminalSquare, BookCheck,
 } from "lucide-react";
 import gsap from "gsap";
 import {
@@ -20,10 +20,12 @@ import {
   Area, AreaChart, ResponsiveContainer, Tooltip, XAxis,
 } from "recharts";
 import { api, Metrics, SearchResult, TreeItem } from "@/lib/api";
+import { ActivityHistory, DocumentViewer, KnowledgeCases } from "./knowledge-views";
 
 gsap.registerPlugin(useGSAP);
 
-type View = "overview" | "explorer" | "search" | "operations" | "timeline" | "graph";
+type View = "overview" | "explorer" | "document" | "search" | "activities" |
+  "knowledge" | "operations" | "timeline" | "graph";
 type Job = {
   id: string; status: string; job_type: string; path: string; attempt_count: number;
   max_attempts: number; error_type: string | null; error_message: string | null; created_at: string;
@@ -33,6 +35,8 @@ const nav: { id: View; label: string; icon: React.ComponentType<{ size?: number 
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "explorer", label: "Explorer", icon: Folder },
   { id: "search", label: "Search", icon: Search },
+  { id: "activities", label: "Activity", icon: Activity },
+  { id: "knowledge", label: "Knowledge cases", icon: BookCheck },
   { id: "operations", label: "Operations", icon: ServerCog },
   { id: "timeline", label: "Timeline", icon: Clock3 },
   { id: "graph", label: "Knowledge graph", icon: Network },
@@ -59,6 +63,7 @@ export function Portal() {
   const [view, setView] = useState<View>("overview");
   const [contextOpen, setContextOpen] = useState(true);
   const [selected, setSelected] = useState<SearchResult | null>(null);
+  const [documentId, setDocumentId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const { theme, toggle } = useTheme();
   const main = useRef<HTMLElement>(null);
@@ -140,14 +145,17 @@ export function Portal() {
         <div className="view-enter" key={view}>
           {view === "overview" && <Overview onNavigate={setView} />}
           {view === "explorer" && <Explorer onOpen={(item) => {
-            setQuery(item.path); setView("search");
+            setDocumentId(item.id); setView("document");
           }} />}
+          {view === "document" && documentId && <DocumentViewer documentId={documentId} />}
           {view === "search" && (
             <SearchView initialQuery={query} onSelect={(item) => {
               setSelected(item); setContextOpen(true);
             }} />
           )}
           {view === "operations" && <Operations />}
+          {view === "activities" && <ActivityHistory />}
+          {view === "knowledge" && <KnowledgeCases />}
           {view === "timeline" && <Timeline />}
           {view === "graph" && <GraphNotice />}
         </div>
@@ -226,7 +234,7 @@ function Overview({ onNavigate }: { onNavigate: (view: View) => void }) {
 }
 
 function Explorer({ onOpen }: { onOpen: (item: TreeItem) => void }) {
-  const tree = useQuery({ queryKey: ["tree"], queryFn: () => api<{ items: TreeItem[]; truncated: boolean }>("/api/v1/tree?limit=2000") });
+  const tree = useQuery({ queryKey: ["tree"], queryFn: () => api<{ items: TreeItem[]; truncated: boolean }>("/api/v1/tree?limit=20000") });
   const [open, setOpen] = useState<Set<string>>(new Set());
   const grouped = useMemo(() => {
     const map = new Map<string, TreeItem[]>();
@@ -326,7 +334,36 @@ function SearchView({ initialQuery, onSelect }: { initialQuery: string; onSelect
 
 function Operations() {
   const queryClient = useQueryClient();
-  const jobs = useQuery({ queryKey: ["jobs"], queryFn: () => api<{ items: Job[] }>("/api/v1/jobs?page_size=100"), refetchInterval: 5000 });
+  const [tab, setTab] = useState<"jobs" | "workers" | "backups">("jobs");
+  const jobs = useQuery({
+    queryKey: ["jobs"],
+    queryFn: async () => {
+      const [recent, failed, dead] = await Promise.all([
+        api<{ items: Job[] }>("/api/v1/jobs?page_size=80"),
+        api<{ items: Job[] }>("/api/v1/jobs?status=failed&page_size=20"),
+        api<{ items: Job[] }>("/api/v1/jobs?status=dead_letter&page_size=20"),
+      ]);
+      const unique = new Map<string, Job>();
+      for (const item of [...failed.items, ...dead.items, ...recent.items]) unique.set(item.id, item);
+      return { items: [...unique.values()] };
+    },
+    refetchInterval: 5000,
+  });
+  const workers = useQuery({
+    queryKey: ["workers"],
+    queryFn: () => api<Array<{
+      worker_id: string; hostname: string; state: string; last_seen_at: string;
+      current_job_id: string | null; processed_count: number; failed_count: number;
+    }>>("/api/v1/workers"),
+    refetchInterval: 5000,
+  });
+  const backups = useQuery({
+    queryKey: ["backups"],
+    queryFn: () => api<Array<{
+      id: string; path: string; status: string; created_at: string;
+      manifest: { sha256?: string; file_size?: number; schema_revision?: string };
+    }>>("/api/v1/backups"),
+  });
   const retry = useMutation({
     mutationFn: (id: string) => api(`/api/v1/jobs/${id}/retry`, { method: "POST" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["jobs"] }),
@@ -346,8 +383,13 @@ function Operations() {
       <div className="page-title compact"><div><p className="eyebrow">OPERATIONS</p><h1>Durable queue</h1>
         <p>Retries create a new auditable job; original history is retained.</p></div>
         <button className="secondary" onClick={() => jobs.refetch()}><RefreshCcw size={15} /> Refresh</button></div>
-      <div className="tabs"><button className="active">Jobs</button><button>Workers</button><button>Source roots</button><button>Backups</button></div>
-      <div className="panel table-wrap">
+      <div className="tabs"><button className={tab === "jobs" ? "active" : ""}
+        onClick={() => setTab("jobs")}>Jobs</button><button
+        className={tab === "workers" ? "active" : ""}
+        onClick={() => setTab("workers")}>Workers</button><button
+        className={tab === "backups" ? "active" : ""}
+        onClick={() => setTab("backups")}>Backups</button></div>
+      {tab === "jobs" && <div className="panel table-wrap">
         <table>
           <thead>{table.getHeaderGroups().map((group) => <tr key={group.id}>{group.headers.map((header) =>
             <th key={header.id}>{flexRender(header.column.columnDef.header, header.getContext())}</th>)}</tr>)}</thead>
@@ -355,7 +397,32 @@ function Operations() {
             <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>)}</tbody>
         </table>
         {!jobs.isLoading && !jobs.data?.items.length && <EmptyState title="Queue is empty" detail="No ingest jobs have been created yet." />}
-      </div>
+      </div>}
+      {tab === "workers" && <div className="panel table-wrap">
+        <table><thead><tr><th>Worker</th><th>Host</th><th>State</th>
+          <th>Heartbeat</th><th>Processed</th><th>Failed</th></tr></thead>
+          <tbody>{workers.data?.map((worker) => <tr key={worker.worker_id}>
+            <td className="mono">{worker.worker_id}</td><td>{worker.hostname}</td>
+            <td><Status value={worker.state} /></td>
+            <td>{new Date(worker.last_seen_at).toLocaleString()}</td>
+            <td>{worker.processed_count}</td><td>{worker.failed_count}</td>
+          </tr>)}</tbody></table>
+        {!workers.isLoading && !workers.data?.length &&
+          <EmptyState title="No worker heartbeat" detail="Start the indexer worker." />}
+      </div>}
+      {tab === "backups" && <div className="panel table-wrap">
+        <table><thead><tr><th>Status</th><th>Created</th><th>Path</th>
+          <th>Revision</th><th>SHA-256</th></tr></thead>
+          <tbody>{backups.data?.map((backup) => <tr key={backup.id}>
+            <td><Status value={backup.status} /></td>
+            <td>{new Date(backup.created_at).toLocaleString()}</td>
+            <td className="table-path">{backup.path}</td>
+            <td className="mono">{backup.manifest.schema_revision ?? "—"}</td>
+            <td className="mono">{backup.manifest.sha256?.slice(0, 12) ?? "—"}</td>
+          </tr>)}</tbody></table>
+        {!backups.isLoading && !backups.data?.length &&
+          <EmptyState title="No backup evidence" detail="Run scripts/backup.ps1." />}
+      </div>}
     </section>
   );
 }

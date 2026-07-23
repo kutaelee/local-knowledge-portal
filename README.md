@@ -27,7 +27,7 @@ All paths are configuration values. Committed files contain examples only.
 - Docker Desktop
 - Python 3.13.14 managed by `uv` 0.11.30
 - Node.js 24 LTS and `pnpm` 11.9.0
-- Optional Ollama for semantic ingestion/search
+- Ollama 0.32.1 for production semantic ingestion/search
 
 The repository pins Python packages in `uv.lock`, JavaScript packages in `pnpm-lock.yaml`, and PostgreSQL/pgvector by exact tag and OCI digest.
 
@@ -56,48 +56,33 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\scan.ps1
 uv run python -m lkp_indexer.cli work-once
 ```
 
-## Codex session capture
+## Global Codex activity capture
 
-Codex transcripts remain read-only under `%USERPROFILE%\.codex\sessions`. The capture process
-extracts only displayed user and assistant messages, redacts common secret shapes, and writes
-managed Markdown below `E:\LocalKnowledgePortal\vault\_generated\codex-sessions`. It excludes
-system/developer instructions, internal reasoning, and tool inputs/outputs.
+The user-level `%USERPROFILE%\.codex\hooks.json` records activity from every trusted Codex
+workspace, not only this repository. `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`,
+`SubagentStart`, and `SubagentStop` invoke a small PowerShell wrapper that only writes an atomic
+JSON envelope to `E:\LocalKnowledgePortal\ingest\codex-spool\pending`. It never calls the API or
+database. A bounded fallback spool, deterministic event IDs, secret redaction, malformed and
+oversized quarantine, and collector-side idempotency keep capture available during portal or
+database outages.
 
-This is a user-global Codex integration, not a hook for only this repository. The user-level
-`%USERPROFILE%\.codex\hooks.json` applies across trusted Codex projects, and the polling process
-observes all new or changed transcripts under the configured Codex home. If a WSL Codex CLI uses
-its own Linux `~/.codex`, expose that path to Windows and add it to
-`LKP_CODEX_ADDITIONAL_HOMES` as a semicolon-separated root.
-
-Backfill every existing session explicitly:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-sync.ps1 `
-  -ImportExisting -Index
-```
-
-Backfill is explicit so installing the portal never silently copies historical conversations.
-
-Start live capture with lexical indexing. Semantic embeddings stay explicitly pending when Ollama
-is unavailable:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-codex-capture.ps1 -Index
-```
-
-For turn-completion capture without polling, install the user-level Codex `Stop` hook. The
-installer refuses to overwrite an existing hook file. A new Codex session must review and trust
-non-managed hooks using `/hooks`, as required by Codex:
+Ordinary Codex work is activity history only. It does not create or overwrite wiki pages.
+Knowledge cases are created only through the evidence-gated candidate workflow. The installer
+backs up the existing Codex configuration, merges only this portal's managed hooks, and is safe to
+run repeatedly:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-codex-hook.ps1
 ```
 
-### Optional local LLM enrichment
+Codex requires a human trust review for non-managed hooks. Start a new session, run `/hooks`, and
+approve the displayed commands. Until then the installation status is
+`MANUAL_APPROVAL_REQUIRED`; no script attempts to bypass this boundary.
 
-Raw capture and search never require an LLM. A separate provider adapter can create managed
-sidecar summaries under `_generated\codex-summaries`; it never rewrites the captured transcript
-page. Ollama is implemented and disabled by default:
+### Optional local LLM generation
+
+Ingestion, activity capture, evidence gates, and keyword search do not require an LLM. Optional
+generation is isolated behind a provider interface and disabled by default:
 
 ```dotenv
 LKP_GENERATION_PROVIDER=ollama
@@ -106,13 +91,16 @@ LKP_GENERATION_MODEL=your-local-chat-model:tag
 LKP_GENERATION_MODEL_DIGEST=unresolved
 ```
 
-Restart capture after changing the provider. The adapter uses Ollama `/api/chat` structured
-outputs with temperature zero, stores the actual model digest, and separates observed facts,
-extracted information, and inferences requiring confirmation. After the first successful run,
-pin the returned digest; a later digest change then fails closed. Other local runtimes can be
-added behind the `GenerationProvider` interface without changing scanner, queue, or search models.
+The adapter uses Ollama `/api/chat` structured outputs with temperature zero and fails closed on a
+digest change. Other local runtimes can be added behind `GenerationProvider` without changing the
+scanner, queue, evidence, or retrieval data models. Generated text is never accepted as verified
+evidence by itself.
 
-Production embedding defaults to Ollama model `qwen3-embedding:0.6b`, dimension 1024. A provider response with a different dimension fails closed. Model changes require a new `LKP_EMBEDDING_REVISION`; vectors are never silently mixed.
+Production embedding uses Ollama `qwen3-embedding:0.6b`, digest
+`ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d`, dimension
+1024, and revision `ollama-qwen3-embedding-0.6b-ac6da0df-d1024-v1`. A dimension or
+digest mismatch fails closed. Model changes require a new revision; vectors are never silently
+mixed. Tests use a separate deterministic revision.
 
 ## Tests
 
@@ -126,7 +114,9 @@ $env:PLAYWRIGHT_BROWSERS_PATH = "E:\Cache\ms-playwright"
 pnpm --filter @lkp/web test
 ```
 
-The integration test uses a dedicated PostgreSQL database and a deterministic 1024-dimensional test embedder. It never pretends that Ollama was exercised.
+Integration and retrieval tests refuse to target the production database. Unit/integration tests
+use a deterministic revision; retrieval evaluation uses the real configured Ollama model against
+a dedicated bilingual/code corpus.
 
 ## API surface
 

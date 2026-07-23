@@ -12,6 +12,8 @@ from lkp.models import (
     Document,
     DocumentChunk,
     DocumentVersion,
+    IngestJob,
+    JobStatus,
     SourceRoot,
 )
 from lkp.settings import Settings
@@ -19,7 +21,7 @@ from lkp_indexer.embedding import DeterministicTestEmbedder
 from lkp_indexer.queue import lease
 from lkp_indexer.scanner import scan_root
 from lkp_indexer.worker import process_job
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.orm import Session
 
 pytestmark = pytest.mark.integration
@@ -66,6 +68,14 @@ def test_fixture_pipeline_is_idempotent(database_url: str, tmp_path: Path):
         session.add(root)
         session.commit()
         assert scan_root(session, root, settings.max_file_bytes).queued == 1
+        session.execute(
+            update(IngestJob)
+            .where(
+                IngestJob.source_root_id == root.id,
+                IngestJob.status == JobStatus.pending,
+            )
+            .values(priority=-100)
+        )
         session.commit()
         job = lease(session, "test-worker", 30)
         assert job is not None

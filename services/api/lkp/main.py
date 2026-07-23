@@ -1,6 +1,7 @@
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from difflib import unified_diff
 
 import httpx
 import structlog
@@ -8,6 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from lkp_indexer.embedding import OllamaEmbedder
+from lkp_indexer.knowledge import create_candidate, evaluate_gate, publish_candidate
 from lkp_indexer.queue import retry_as_new
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -15,17 +17,26 @@ from sqlalchemy.orm import Session
 from .db import get_db
 from .logging import configure_logging
 from .models import (
+    ActivityEvent,
+    BackupRun,
     Document,
     DocumentChunk,
     DocumentLink,
     DocumentState,
     DocumentVersion,
+    EvidenceRecord,
     IngestEvent,
     IngestJob,
     JobStatus,
+    KnowledgeCandidate,
+    KnowledgeCase,
+    KnowledgeCaseRelation,
+    KnowledgeCaseRevision,
+    KnowledgeOccurrence,
+    SourceRoot,
     WorkerHeartbeat,
 )
-from .schemas import RagRequest, SearchRequest, SearchResponse
+from .schemas import CandidateCreate, RagRequest, SearchRequest, SearchResponse
 from .search import search
 from .settings import get_settings
 
@@ -185,13 +196,19 @@ def documents(
 ) -> dict:
     statement = (
         select(Document)
-        .where(Document.state == state)
+        .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+        .where(Document.state == state, SourceRoot.data_scope == "production")
         .order_by(Document.modified_at_fs.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
     rows = db.scalars(statement).all()
-    total = db.scalar(select(func.count()).select_from(Document).where(Document.state == state))
+    total = db.scalar(
+        select(func.count())
+        .select_from(Document)
+        .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+        .where(Document.state == state, SourceRoot.data_scope == "production")
+    )
     return {"items": [_document_json(row) for row in rows], "page": page, "total": total}
 
 
@@ -263,6 +280,56 @@ def versions(document_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dict
     ]
 
 
+def _version_text(db: Session, version_id: uuid.UUID) -> str:
+    chunks = db.scalars(
+        select(DocumentChunk)
+        .where(DocumentChunk.document_version_id == version_id)
+        .order_by(DocumentChunk.chunk_index)
+    ).all()
+    if not chunks:
+        return ""
+    lines: dict[int, str] = {}
+    for chunk in chunks:
+        for offset, value in enumerate(chunk.content.splitlines(), start=chunk.start_line):
+            lines.setdefault(offset, value)
+    return "\n".join(lines[number] for number in sorted(lines))
+
+
+@app.get("/api/v1/documents/{document_id}/diff")
+def document_diff(
+    document_id: uuid.UUID,
+    from_version: uuid.UUID,
+    to_version: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    rows = db.scalars(
+        select(DocumentVersion).where(
+            DocumentVersion.document_id == document_id,
+            DocumentVersion.id.in_([from_version, to_version]),
+        )
+    ).all()
+    if {row.id for row in rows} != {from_version, to_version}:
+        raise HTTPException(404, "document version not found")
+    before = _version_text(db, from_version)
+    after = _version_text(db, to_version)
+    diff = list(
+        unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=str(from_version),
+            tofile=str(to_version),
+            lineterm="",
+        )
+    )
+    return {
+        "document_id": str(document_id),
+        "from_version": str(from_version),
+        "to_version": str(to_version),
+        "lines": diff,
+        "changed": before != after,
+    }
+
+
 @app.get("/api/v1/documents/{document_id}/backlinks")
 def backlinks(document_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(
@@ -282,18 +349,313 @@ def backlinks(document_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dic
 def projects(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(
         select(Document.project_key, func.count(Document.id))
-        .where(Document.state == DocumentState.active)
+        .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+        .where(
+            Document.state == DocumentState.active,
+            SourceRoot.data_scope == "production",
+        )
         .group_by(Document.project_key)
         .order_by(func.count(Document.id).desc())
     ).all()
     return [{"key": name, "document_count": count} for name, count in rows]
 
 
+def _activity_json(row: ActivityEvent) -> dict:
+    return {
+        "id": str(row.id),
+        "event_key": row.event_key,
+        "session_id": row.session_id,
+        "turn_id": row.turn_id,
+        "event_type": row.event_type,
+        "occurred_at": row.occurred_at,
+        "project": row.project_key,
+        "cwd": row.cwd,
+        "instruction": row.instruction,
+        "tool_name": row.tool_name,
+        "command": row.command,
+        "exit_code": row.exit_code,
+        "changed_files": row.changed_files,
+        "document_version_ids": [str(value) for value in row.document_version_ids],
+        "reported_result": row.reported_result,
+        "verified_result": row.verified_result,
+        "verification_status": row.verification_status,
+        "metadata": row.metadata_json,
+    }
+
+
+@app.get("/api/v1/activities")
+def activities(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    event_type: str | None = None,
+    verification_status: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    statement = select(ActivityEvent)
+    count_statement = select(func.count()).select_from(ActivityEvent)
+    if event_type:
+        statement = statement.where(ActivityEvent.event_type == event_type)
+        count_statement = count_statement.where(ActivityEvent.event_type == event_type)
+    if verification_status:
+        statement = statement.where(
+            ActivityEvent.verification_status == verification_status
+        )
+        count_statement = count_statement.where(
+            ActivityEvent.verification_status == verification_status
+        )
+    rows = db.scalars(
+        statement.order_by(ActivityEvent.occurred_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "items": [_activity_json(row) for row in rows],
+        "page": page,
+        "total": db.scalar(count_statement),
+    }
+
+
+@app.get("/api/v1/activities/{activity_id}")
+def activity_detail(activity_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+    row = db.get(ActivityEvent, activity_id)
+    if not row:
+        raise HTTPException(404, "activity not found")
+    evidence = db.scalars(
+        select(EvidenceRecord)
+        .where(EvidenceRecord.activity_id == activity_id)
+        .order_by(EvidenceRecord.created_at)
+    ).all()
+    return {
+        **_activity_json(row),
+        "evidence": [_evidence_json(item) for item in evidence],
+    }
+
+
+def _evidence_json(row: EvidenceRecord) -> dict:
+    return {
+        "id": str(row.id),
+        "activity_id": str(row.activity_id) if row.activity_id else None,
+        "candidate_id": str(row.candidate_id) if row.candidate_id else None,
+        "type": row.evidence_type,
+        "claim": row.claim,
+        "locator": row.locator,
+        "reported_value": row.reported_value,
+        "verified_value": row.verified_value,
+        "exit_code": row.exit_code,
+        "verified": row.verified,
+        "metadata": row.metadata_json,
+        "created_at": row.created_at,
+    }
+
+
+def _candidate_json(row: KnowledgeCandidate) -> dict:
+    return {
+        "id": str(row.id),
+        "category": row.category,
+        "title": row.title,
+        "problem": row.problem,
+        "symptom": row.symptom,
+        "root_cause": row.root_cause,
+        "solution": row.solution,
+        "status": row.status,
+        "evidence_gate_status": row.evidence_gate_status,
+        "reported_result": row.reported_result,
+        "verified_result": row.verified_result,
+        "metadata": row.metadata_json,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+@app.get("/api/v1/knowledge/candidates")
+def candidates(
+    status: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict:
+    statement = select(KnowledgeCandidate)
+    count_statement = select(func.count()).select_from(KnowledgeCandidate)
+    if status:
+        statement = statement.where(KnowledgeCandidate.status == status)
+        count_statement = count_statement.where(KnowledgeCandidate.status == status)
+    rows = db.scalars(
+        statement.order_by(KnowledgeCandidate.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "items": [_candidate_json(row) for row in rows],
+        "page": page,
+        "total": db.scalar(count_statement),
+    }
+
+
+@app.post("/api/v1/knowledge/candidates")
+def add_candidate(request: CandidateCreate, db: Session = Depends(get_db)) -> dict:
+    row = create_candidate(
+        db,
+        **request.model_dump(mode="python", exclude={"evidence"}),
+        evidence=[item.model_dump(mode="python") for item in request.evidence],
+    )
+    gate = evaluate_gate(db, row)
+    db.commit()
+    return {**_candidate_json(row), "evidence_gate_status": gate}
+
+
+def _candidate_or_404(db: Session, candidate_id: uuid.UUID) -> KnowledgeCandidate:
+    row = db.get(KnowledgeCandidate, candidate_id)
+    if not row:
+        raise HTTPException(404, "candidate not found")
+    return row
+
+
+@app.get("/api/v1/knowledge/candidates/{candidate_id}")
+def candidate_detail(candidate_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+    row = _candidate_or_404(db, candidate_id)
+    evidence = db.scalars(
+        select(EvidenceRecord)
+        .where(EvidenceRecord.candidate_id == row.id)
+        .order_by(EvidenceRecord.created_at)
+    ).all()
+    return {**_candidate_json(row), "evidence": [_evidence_json(item) for item in evidence]}
+
+
+@app.post("/api/v1/knowledge/candidates/{candidate_id}/evaluate")
+def evaluate_candidate(candidate_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+    row = _candidate_or_404(db, candidate_id)
+    result = evaluate_gate(db, row)
+    db.commit()
+    return {"id": str(row.id), "evidence_gate_status": result, "status": row.status}
+
+
+@app.post("/api/v1/knowledge/candidates/{candidate_id}/publish")
+def publish(candidate_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+    row = _candidate_or_404(db, candidate_id)
+    case, outcome = publish_candidate(db, row)
+    db.commit()
+    return {
+        "candidate_id": str(row.id),
+        "case_id": str(case.id) if case else None,
+        "outcome": outcome,
+        "status": row.status,
+    }
+
+
+def _case_json(row: KnowledgeCase) -> dict:
+    return {
+        "id": str(row.id),
+        "category": row.category,
+        "title": row.title,
+        "problem": row.problem,
+        "symptom": row.symptom,
+        "root_cause": row.root_cause,
+        "solution": row.solution,
+        "status": row.status,
+        "occurrence_count": row.occurrence_count,
+        "current_revision_id": str(row.current_revision_id)
+        if row.current_revision_id
+        else None,
+        "first_seen_at": row.first_seen_at,
+        "last_seen_at": row.last_seen_at,
+        "metadata": row.metadata_json,
+    }
+
+
+@app.get("/api/v1/knowledge/cases")
+def knowledge_cases(
+    category: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict:
+    statement = select(KnowledgeCase).where(KnowledgeCase.status == "verified")
+    count_statement = (
+        select(func.count())
+        .select_from(KnowledgeCase)
+        .where(KnowledgeCase.status == "verified")
+    )
+    if category:
+        statement = statement.where(KnowledgeCase.category == category)
+        count_statement = count_statement.where(KnowledgeCase.category == category)
+    rows = db.scalars(
+        statement.order_by(KnowledgeCase.last_seen_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "items": [_case_json(row) for row in rows],
+        "page": page,
+        "total": db.scalar(count_statement),
+    }
+
+
+@app.get("/api/v1/knowledge/cases/{case_id}")
+def knowledge_case_detail(case_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+    row = db.get(KnowledgeCase, case_id)
+    if not row or row.status != "verified":
+        raise HTTPException(404, "verified knowledge case not found")
+    revisions = db.scalars(
+        select(KnowledgeCaseRevision)
+        .where(KnowledgeCaseRevision.case_id == case_id)
+        .order_by(KnowledgeCaseRevision.revision_number.desc())
+    ).all()
+    occurrences = db.scalars(
+        select(KnowledgeOccurrence)
+        .where(KnowledgeOccurrence.case_id == case_id)
+        .order_by(KnowledgeOccurrence.occurred_at.desc())
+    ).all()
+    relations = db.scalars(
+        select(KnowledgeCaseRelation).where(
+            (KnowledgeCaseRelation.source_case_id == case_id)
+            | (KnowledgeCaseRelation.target_case_id == case_id)
+        )
+    ).all()
+    return {
+        **_case_json(row),
+        "revisions": [
+            {
+                "id": str(item.id),
+                "number": item.revision_number,
+                "content": item.content_json,
+                "evidence_summary": item.evidence_summary,
+                "created_at": item.created_at,
+            }
+            for item in revisions
+        ],
+        "occurrences": [
+            {
+                "id": str(item.id),
+                "candidate_id": str(item.candidate_id),
+                "activity_id": str(item.activity_id) if item.activity_id else None,
+                "evidence": item.evidence_json,
+                "occurred_at": item.occurred_at,
+            }
+            for item in occurrences
+        ],
+        "relations": [
+            {
+                "source_case_id": str(item.source_case_id),
+                "target_case_id": str(item.target_case_id),
+                "type": item.relation_type,
+            }
+            for item in relations
+        ],
+    }
+
+
 @app.get("/api/v1/tree")
 def tree(
-    project: str | None = None, limit: int = Query(2000, le=5000), db: Session = Depends(get_db)
+    project: str | None = None, limit: int = Query(5000, le=20000), db: Session = Depends(get_db)
 ) -> dict:
-    statement = select(Document).where(Document.state == DocumentState.active)
+    statement = (
+        select(Document)
+        .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+        .where(
+            Document.state == DocumentState.active,
+            SourceRoot.data_scope == "production",
+        )
+    )
     if project:
         statement = statement.where(Document.project_key == project)
     rows = db.scalars(statement.order_by(Document.relative_path).limit(limit)).all()
@@ -387,6 +749,24 @@ def workers(db: Session = Depends(get_db)) -> list[dict]:
     ]
 
 
+@app.get("/api/v1/backups")
+def backups(db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.scalars(
+        select(BackupRun).order_by(BackupRun.created_at.desc()).limit(100)
+    ).all()
+    return [
+        {
+            "id": str(row.id),
+            "path": row.backup_path,
+            "status": row.status,
+            "manifest": row.manifest,
+            "created_at": row.created_at,
+            "finished_at": row.finished_at,
+        }
+        for row in rows
+    ]
+
+
 @app.get("/api/v1/timeline")
 def timeline(limit: int = Query(100, le=500), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(
@@ -415,11 +795,31 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
         )
     )
     return {
-        "projects": db.scalar(select(func.count(func.distinct(Document.project_key)))),
-        "documents": db.scalar(
-            select(func.count()).select_from(Document).where(Document.state == DocumentState.active)
+        "projects": db.scalar(
+            select(func.count(func.distinct(Document.project_key)))
+            .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+            .where(SourceRoot.data_scope == "production")
         ),
-        "chunks": db.scalar(select(func.count()).select_from(DocumentChunk)),
+        "documents": db.scalar(
+            select(func.count())
+            .select_from(Document)
+            .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+            .where(
+                Document.state == DocumentState.active,
+                SourceRoot.data_scope == "production",
+            )
+        ),
+        "chunks": db.scalar(
+            select(func.count())
+            .select_from(DocumentChunk)
+            .join(
+                DocumentVersion,
+                DocumentVersion.id == DocumentChunk.document_version_id,
+            )
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+            .where(SourceRoot.data_scope == "production")
+        ),
         "jobs": {key.value: value for key, value in counts.items()},
         "oldest_pending_seconds": float(oldest or 0),
         "workers": len(workers(db)),

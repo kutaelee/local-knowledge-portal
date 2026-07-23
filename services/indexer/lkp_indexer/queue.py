@@ -16,6 +16,8 @@ def enqueue(
     canonical_path: str,
     job_type: str = "index",
     max_attempts: int = 5,
+    details: dict | None = None,
+    priority: int = 100,
 ) -> IngestJob | None:
     statement = (
         insert(IngestJob)
@@ -26,6 +28,8 @@ def enqueue(
             job_type=job_type,
             status=JobStatus.pending,
             max_attempts=max_attempts,
+            error_details=details or {},
+            priority=priority,
         )
         .on_conflict_do_nothing(index_elements=["idempotency_key"])
         .returning(IngestJob.id)

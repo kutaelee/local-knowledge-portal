@@ -21,7 +21,7 @@ LEXICAL_SQL = text(
     JOIN document_version v ON v.id = c.document_version_id
     JOIN document d ON d.current_version_id = v.id
     JOIN source_root r ON r.id = d.source_root_id
-    WHERE d.state = 'active'
+    WHERE d.state = 'active' AND r.data_scope = 'production'
       AND (CAST(:source_root_id AS uuid) IS NULL
            OR d.source_root_id = CAST(:source_root_id AS uuid))
       AND (CAST(:project AS text) IS NULL OR d.project_key = CAST(:project AS text))
@@ -50,7 +50,8 @@ VECTOR_SQL = text(
     JOIN document_version v ON v.id = c.document_version_id
     JOIN document d ON d.current_version_id = v.id
     JOIN source_root r ON r.id = d.source_root_id
-    WHERE d.state = 'active' AND e.embedding_revision = :revision
+    WHERE d.state = 'active' AND r.data_scope = 'production'
+      AND e.embedding_revision = :revision
       AND (CAST(:source_root_id AS uuid) IS NULL
            OR d.source_root_id = CAST(:source_root_id AS uuid))
       AND (CAST(:project AS text) IS NULL OR d.project_key = CAST(:project AS text))

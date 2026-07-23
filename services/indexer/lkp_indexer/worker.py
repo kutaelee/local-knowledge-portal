@@ -136,6 +136,30 @@ def process_job(
                 Document.canonical_path == str(path),
             )
         )
+        rename_from = (job.error_details or {}).get("rename_from")
+        if rename_from and existing is None:
+            renamed = session.scalar(
+                select(Document).where(
+                    Document.source_root_id == root.id,
+                    Document.canonical_path == rename_from,
+                )
+            )
+            if renamed:
+                renamed.canonical_path = str(path)
+                renamed.relative_path = path.relative_to(root_path).as_posix()
+                renamed.filename = path.name
+                renamed.extension = path.suffix.lower()
+                renamed.parent_path = path.parent.relative_to(root_path).as_posix()
+                existing = renamed
+                session.add(
+                    IngestEvent(
+                        source_root_id=root.id,
+                        document_id=renamed.id,
+                        event_type="renamed",
+                        path=str(path),
+                        details={"from": rename_from, "to": str(path)},
+                    )
+                )
         if not path.exists():
             if existing:
                 existing.state = DocumentState.deleted

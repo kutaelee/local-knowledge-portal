@@ -15,5 +15,6 @@ config/settings.yaml
 runtime/
 *.log
 *.dump
+*.tsbuildinfo
 .DS_Store
 Thumbs.db

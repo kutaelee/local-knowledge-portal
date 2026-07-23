@@ -37,6 +37,7 @@ def register_roots(session: Session, config_path: Path) -> list[SourceRoot]:
                 name=item.get("name", item["id"]),
                 canonical_path=canonical,
                 source_type=item["type"],
+                data_scope=item.get("data_scope", "production"),
                 read_only=item.get("read_only", True),
                 enabled=True,
                 include_patterns=item.get("include_patterns", ["**/*"]),

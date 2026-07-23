@@ -35,6 +35,12 @@ try {
   docker compose --env-file $EnvFile -f $Compose exec -T postgres psql -U lkp `
     -d $TestDb -v ON_ERROR_STOP=1 -c `
     "SELECT count(*) FROM document_chunk WHERE content ILIKE '%PostgreSQL%';"
+  docker compose --env-file $EnvFile -f $Compose exec -T postgres psql -U lkp `
+    -d $TestDb -v ON_ERROR_STOP=1 -c `
+    'DO $$ BEGIN IF EXISTS (SELECT dedup_key FROM knowledge_case GROUP BY dedup_key HAVING count(*) > 1) THEN RAISE EXCEPTION ''duplicate canonical case''; END IF; END $$;'
+  docker compose --env-file $EnvFile -f $Compose exec -T postgres psql -U lkp `
+    -d $TestDb -v ON_ERROR_STOP=1 -c `
+    'SELECT count(*) activities, count(*) FILTER (WHERE verification_status = ''UNVERIFIED'') unverified FROM activity_event;'
   Write-Host "Restore test succeeded for temporary database $TestDb"
 }
 finally {

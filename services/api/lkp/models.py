@@ -53,6 +53,7 @@ class SourceRoot(Base):
     name: Mapped[str] = mapped_column(String(200))
     canonical_path: Mapped[str] = mapped_column(Text, unique=True)
     source_type: Mapped[str] = mapped_column(String(32))
+    data_scope: Mapped[str] = mapped_column(String(32), default="production")
     read_only: Mapped[bool] = mapped_column(Boolean, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     include_patterns: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
@@ -252,3 +253,138 @@ class SystemSetting(Base):
     key: Mapped[str] = mapped_column(String(200), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSONB)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class HookSpoolEvent(Base):
+    __tablename__ = "hook_spool_event"
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(100), index=True)
+    turn_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    event_name: Mapped[str] = mapped_column(String(50), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    cwd: Mapped[str | None] = mapped_column(Text)
+    tool_name: Mapped[str | None] = mapped_column(String(200))
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    spool_path: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="processed")
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ActivityEvent(Base):
+    __tablename__ = "activity_event"
+    __table_args__ = (
+        UniqueConstraint("event_key", name="uq_activity_event_key"),
+        Index("ix_activity_session_occurred", "session_id", "occurred_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_key: Mapped[str] = mapped_column(String(128))
+    session_id: Mapped[str] = mapped_column(String(100))
+    turn_id: Mapped[str | None] = mapped_column(String(100))
+    event_type: Mapped[str] = mapped_column(String(50), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    project_key: Mapped[str | None] = mapped_column(String(200), index=True)
+    cwd: Mapped[str | None] = mapped_column(Text)
+    instruction: Mapped[str | None] = mapped_column(Text)
+    tool_name: Mapped[str | None] = mapped_column(String(200))
+    command: Mapped[str | None] = mapped_column(Text)
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    changed_files: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    document_version_ids: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), default=list
+    )
+    reported_result: Mapped[str | None] = mapped_column(Text)
+    verified_result: Mapped[str | None] = mapped_column(Text)
+    verification_status: Mapped[str] = mapped_column(String(32), default="UNVERIFIED")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeCandidate(Base):
+    __tablename__ = "knowledge_candidate"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    category: Mapped[str] = mapped_column(String(50), index=True)
+    title: Mapped[str] = mapped_column(Text)
+    problem: Mapped[str] = mapped_column(Text)
+    symptom: Mapped[str] = mapped_column(Text)
+    root_cause: Mapped[str] = mapped_column(Text)
+    solution: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
+    evidence_gate_status: Mapped[str] = mapped_column(
+        String(32), default="NEEDS_EVIDENCE", index=True
+    )
+    dedup_key: Mapped[str] = mapped_column(String(64), index=True)
+    similarity_key: Mapped[str] = mapped_column(String(64), index=True)
+    reported_result: Mapped[str | None] = mapped_column(Text)
+    verified_result: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class EvidenceRecord(Base):
+    __tablename__ = "evidence_record"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    activity_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("activity_event.id"))
+    candidate_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("knowledge_candidate.id"))
+    evidence_type: Mapped[str] = mapped_column(String(50), index=True)
+    claim: Mapped[str] = mapped_column(Text)
+    locator: Mapped[str | None] = mapped_column(Text)
+    reported_value: Mapped[str | None] = mapped_column(Text)
+    verified_value: Mapped[str | None] = mapped_column(Text)
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeCase(Base):
+    __tablename__ = "knowledge_case"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    category: Mapped[str] = mapped_column(String(50), index=True)
+    title: Mapped[str] = mapped_column(Text)
+    problem: Mapped[str] = mapped_column(Text)
+    symptom: Mapped[str] = mapped_column(Text, index=True)
+    root_cause: Mapped[str] = mapped_column(Text)
+    solution: Mapped[str] = mapped_column(Text)
+    dedup_key: Mapped[str] = mapped_column(String(64), unique=True)
+    status: Mapped[str] = mapped_column(String(32), default="verified", index=True)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
+    current_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+
+
+class KnowledgeCaseRevision(Base):
+    __tablename__ = "knowledge_case_revision"
+    __table_args__ = (UniqueConstraint("case_id", "revision_number"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_case.id"))
+    revision_number: Mapped[int] = mapped_column(Integer)
+    content_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    evidence_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeOccurrence(Base):
+    __tablename__ = "knowledge_occurrence"
+    __table_args__ = (UniqueConstraint("case_id", "candidate_id"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_case.id"))
+    candidate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_candidate.id"))
+    activity_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("activity_event.id"))
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeCaseRelation(Base):
+    __tablename__ = "knowledge_case_relation"
+    __table_args__ = (UniqueConstraint("source_case_id", "target_case_id", "relation_type"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_case.id"))
+    target_case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_case.id"))
+    relation_type: Mapped[str] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

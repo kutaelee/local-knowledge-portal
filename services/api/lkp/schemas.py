@@ -52,3 +52,33 @@ class RagRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=30)
     max_chars: int = Field(default=12000, ge=1000, le=100000)
     filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvidenceInput(BaseModel):
+    evidence_type: str = Field(min_length=1, max_length=50)
+    claim: str = Field(min_length=1, max_length=4000)
+    locator: str | None = Field(default=None, max_length=4000)
+    reported_value: str | None = Field(default=None, max_length=4000)
+    verified_value: str | None = Field(default=None, max_length=4000)
+    exit_code: int | None = None
+    verified: bool = False
+    activity_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidateCreate(BaseModel):
+    category: Literal[
+        "error_resolution",
+        "implementation",
+        "custom_success",
+        "performance",
+        "operations",
+    ]
+    title: str = Field(min_length=1, max_length=500)
+    problem: str = Field(min_length=1, max_length=10000)
+    symptom: str = Field(min_length=1, max_length=10000)
+    root_cause: str = Field(min_length=1, max_length=10000)
+    solution: str = Field(min_length=1, max_length=10000)
+    reported_result: str | None = Field(default=None, max_length=10000)
+    verified_result: str | None = Field(default=None, max_length=10000)
+    evidence: list[EvidenceInput] = Field(default_factory=list, max_length=100)

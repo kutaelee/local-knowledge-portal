@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
@@ -34,6 +35,14 @@ class Settings(BaseSettings):
     generation_model_digest: str = "unresolved"
     generation_timeout_seconds: int = 120
     generation_max_input_chars: int = 40000
+    hook_spool_dir: Path = Path("runtime/ingest/codex-spool")
+    hook_spool_fallback_dir: Path = Field(
+        default_factory=lambda: Path(os.getenv("LOCALAPPDATA", str(Path.home())))
+        / "LocalKnowledgePortal"
+        / "spool-fallback"
+    )
+    hook_collector_poll_seconds: float = 2.0
+    hook_claim_stale_seconds: int = 60
     pipeline_version: str = "1.0.0"
     parser_version: str = "markdown-it-py-4"
     chunker_version: str = "lkp-heading-symbol-v1"
@@ -42,6 +51,8 @@ class Settings(BaseSettings):
     max_attempts: int = 5
     heartbeat_seconds: int = 10
     stale_after_seconds: int = 45
+    reconciliation_seconds: int = 300
+    file_stability_seconds: float = 0.5
     allowed_source_roots: list[Path] = Field(default_factory=list)
 
     @field_validator("api_host")
@@ -70,6 +81,10 @@ class Settings(BaseSettings):
             if item.strip()
         ]
         return [self.codex_home, *additional]
+
+    @property
+    def hook_spool_roots(self) -> list[Path]:
+        return [self.hook_spool_dir, self.hook_spool_fallback_dir]
 
 
 @lru_cache
