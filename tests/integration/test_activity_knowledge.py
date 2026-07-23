@@ -8,10 +8,13 @@ from alembic.config import Config
 from lkp.models import (
     ActivityEvent,
     EvidenceRecord,
+    GeneratedPage,
     KnowledgeCase,
     KnowledgeCaseRelation,
+    KnowledgeCaseRevision,
     KnowledgeOccurrence,
 )
+from lkp_indexer.case_pages import materialize_case
 from lkp_indexer.hook_collector import collect_file
 from lkp_indexer.hook_spool import spool
 from lkp_indexer.knowledge import create_candidate, publish_candidate
@@ -101,7 +104,7 @@ def test_collector_separates_reported_and_verified(database_url: str, tmp_path: 
         assert not collect_file(session, stop_path)
 
 
-def test_evidence_gate_dedup_and_relationships(database_url: str):
+def test_evidence_gate_dedup_and_relationships(database_url: str, tmp_path: Path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         first = candidate(session)
@@ -121,6 +124,49 @@ def test_evidence_gate_dedup_and_relationships(database_url: str):
                 .where(KnowledgeOccurrence.case_id == first_case.id)
             )
             == 2
+        )
+
+        revised_candidate = candidate(
+            session,
+            title="pytest fixture failure corrected guidance",
+            solution="add the required field and validate the fixture schema",
+            metadata={"supersedes_case_id": str(first_case.id)},
+        )
+        revised, outcome = publish_candidate(session, revised_candidate)
+        assert outcome == "REVISED_CANONICAL"
+        assert revised is not None and revised.id == first_case.id
+        assert revised.occurrence_count == 3
+        assert revised.solution.endswith("validate the fixture schema")
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(KnowledgeCaseRevision)
+                .where(KnowledgeCaseRevision.case_id == first_case.id)
+            )
+            == 3
+        )
+        materialized = materialize_case(
+            session,
+            revised,
+            vault_dir=tmp_path / "vault",
+            pipeline_version="integration-v1",
+        )
+        materialized_content = materialized.read_text(encoding="utf-8")
+        assert "validate the fixture schema" in materialized_content
+        assert "case_revision: 3" in materialized_content
+        materialized_mtime = materialized.stat().st_mtime_ns
+        assert (
+            materialize_case(
+                session,
+                revised,
+                vault_dir=tmp_path / "vault",
+                pipeline_version="integration-v1",
+            )
+            == materialized
+        )
+        assert materialized.stat().st_mtime_ns == materialized_mtime
+        assert (
+            session.scalar(select(func.count()).select_from(GeneratedPage)) == 1
         )
 
         other_cause = candidate(

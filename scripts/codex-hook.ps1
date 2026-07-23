@@ -5,7 +5,7 @@ $Repo = Split-Path -Parent $PSScriptRoot
 $PrimarySpool = if ($env:LKP_HOOK_SPOOL_DIR) {
   $env:LKP_HOOK_SPOOL_DIR
 } else {
-  'E:\LocalKnowledgePortal\ingest\codex-spool'
+  'E:\Data\LocalKnowledgePortal\ingest\codex-spool'
 }
 $FallbackSpool = Join-Path $env:LOCALAPPDATA 'LocalKnowledgePortal\spool-fallback'
 $HookInput = [Console]::In.ReadToEnd()

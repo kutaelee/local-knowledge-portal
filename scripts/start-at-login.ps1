@@ -8,6 +8,7 @@ param(
   [string]$ComposeDirectory = '/mnt/c/Docker/local-knowledge-portal',
   [string]$ComposeName = 'compose.yaml',
   [string]$HealthUrl = 'http://127.0.0.1:8010/health/ready',
+  [string]$WebUrl = 'http://127.0.0.1:3010',
   [string]$LogPath = 'E:\Data\LocalKnowledgePortal\runtime\logs\startup.jsonl',
   [int]$DockerTimeoutSeconds = 180,
   [int]$HealthTimeoutSeconds = 180
@@ -36,8 +37,17 @@ function Write-StartupEvent {
 }
 
 function Test-DockerReady {
-  & $DockerExecutable info *> $null
-  return $LASTEXITCODE -eq 0
+  $previousPreference = $ErrorActionPreference
+  try {
+    # Docker being unavailable immediately after logon is expected.
+    $ErrorActionPreference = 'SilentlyContinue'
+    & $DockerExecutable info 1>$null 2>$null
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
 }
 
 try {
@@ -94,6 +104,24 @@ try {
   if (-not $ready) {
     throw "Portal readiness did not become healthy within $HealthTimeoutSeconds seconds"
   }
+
+  $webDeadline = [DateTimeOffset]::Now.AddSeconds($HealthTimeoutSeconds)
+  $webReady = $false
+  while ([DateTimeOffset]::Now -lt $webDeadline) {
+    try {
+      $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $WebUrl -TimeoutSec 5
+      if ($webResponse.StatusCode -eq 200) {
+        $webReady = $true
+        break
+      }
+    } catch {
+      Start-Sleep -Seconds 2
+    }
+  }
+  if (-not $webReady) {
+    throw "Portal web did not become healthy within $HealthTimeoutSeconds seconds"
+  }
+  Write-StartupEvent -Event 'web_ready'
   Write-StartupEvent -Event 'portal_ready'
   exit 0
 } catch {

@@ -11,6 +11,7 @@ import structlog
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
+from lkp_indexer.case_pages import materialize_case
 from lkp_indexer.embedding import CachedEmbedder, OllamaEmbedder
 from lkp_indexer.knowledge import create_candidate, evaluate_gate, publish_candidate
 from lkp_indexer.queue import retry_as_new
@@ -572,12 +573,21 @@ def evaluate_candidate(candidate_id: uuid.UUID, db: Session = Depends(get_db)) -
 def publish(candidate_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     row = _candidate_or_404(db, candidate_id)
     case, outcome = publish_candidate(db, row)
+    materialized_path = None
+    if case is not None:
+        materialized_path = materialize_case(
+            db,
+            case,
+            vault_dir=settings.vault_dir,
+            pipeline_version=settings.pipeline_version,
+        )
     db.commit()
     return {
         "candidate_id": str(row.id),
         "case_id": str(case.id) if case else None,
         "outcome": outcome,
         "status": row.status,
+        "materialized_path": str(materialized_path) if materialized_path else None,
     }
 
 
@@ -680,6 +690,28 @@ def knowledge_case_detail(case_id: uuid.UUID, db: Session = Depends(get_db)) -> 
             }
             for item in relations
         ],
+    }
+
+
+@app.post("/api/v1/knowledge/cases/{case_id}/materialize")
+def materialize_knowledge_case(
+    case_id: uuid.UUID, db: Session = Depends(get_db)
+) -> dict:
+    row = db.get(KnowledgeCase, case_id)
+    if not row or row.status != "verified":
+        raise HTTPException(404, "verified knowledge case not found")
+    path = materialize_case(
+        db,
+        row,
+        vault_dir=settings.vault_dir,
+        pipeline_version=settings.pipeline_version,
+    )
+    db.commit()
+    return {
+        "case_id": str(row.id),
+        "path": str(path),
+        "revision": row.metadata_json.get("materialized_revision"),
+        "content_hash": row.metadata_json.get("materialized_hash"),
     }
 
 

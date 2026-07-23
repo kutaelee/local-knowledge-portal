@@ -176,7 +176,7 @@ services:
       - ${LKP_CONFIG_ROOT}:/config:ro
       - ${LKP_DATA_ROOT}:/data
       - ${LKP_BACKUP_ROOT}:/backups
-      - ${LKP_HOOK_SPOOL_HOST_PATH:-/mnt/e/LocalKnowledgePortal/ingest/codex-spool}:/hook-spool
+      - ${LKP_HOOK_SPOOL_HOST_PATH:-/mnt/e/Data/LocalKnowledgePortal/ingest/codex-spool}:/hook-spool
       - ${LKP_HOOK_FALLBACK_ROOT:?set LKP_HOOK_FALLBACK_ROOT}:/fallback
       - ${LKP_CODEX_SESSIONS_HOST_PATH:?set LKP_CODEX_SESSIONS_HOST_PATH}:/codex-sessions:ro
     depends_on:

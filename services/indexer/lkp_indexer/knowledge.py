@@ -54,6 +54,7 @@ def create_candidate(
     reported_result: str | None,
     verified_result: str | None,
     evidence: list[dict[str, Any]],
+    metadata: dict[str, Any] | None = None,
 ) -> KnowledgeCandidate:
     candidate = KnowledgeCandidate(
         category=category,
@@ -66,6 +67,7 @@ def create_candidate(
         verified_result=verified_result,
         dedup_key=dedup_key(category, problem, root_cause, solution),
         similarity_key=similarity_key(symptom),
+        metadata_json=metadata or {},
     )
     session.add(candidate)
     session.flush()
@@ -180,6 +182,67 @@ def publish_candidate(
 ) -> tuple[KnowledgeCase | None, str]:
     if evaluate_gate(session, candidate) != "VERIFIED":
         return None, "NEEDS_EVIDENCE"
+    supersedes_case_id = (candidate.metadata_json or {}).get("supersedes_case_id")
+    if supersedes_case_id:
+        try:
+            target_id = uuid.UUID(str(supersedes_case_id))
+        except ValueError:
+            candidate.status = "needs_review"
+            candidate.evidence_gate_status = "NEEDS_REVIEW"
+            return None, "NEEDS_REVIEW"
+        target = session.get(KnowledgeCase, target_id)
+        if (
+            target is None
+            or target.status != "verified"
+            or target.category != candidate.category
+        ):
+            candidate.status = "needs_review"
+            candidate.evidence_gate_status = "NEEDS_REVIEW"
+            return None, "NEEDS_REVIEW"
+        collision = session.scalar(
+            select(KnowledgeCase).where(
+                KnowledgeCase.dedup_key == candidate.dedup_key,
+                KnowledgeCase.id != target.id,
+            )
+        )
+        if collision is not None:
+            candidate.status = "needs_review"
+            candidate.evidence_gate_status = "NEEDS_REVIEW"
+            candidate.metadata_json = {
+                **candidate.metadata_json,
+                "possible_duplicate_case_id": str(collision.id),
+            }
+            return None, "NEEDS_REVIEW"
+        previous_key = target.dedup_key
+        target.category = candidate.category
+        target.title = candidate.title
+        target.problem = candidate.problem
+        target.symptom = candidate.symptom
+        target.root_cause = candidate.root_cause
+        target.solution = candidate.solution
+        target.dedup_key = candidate.dedup_key
+        target.last_seen_at = datetime.now(timezone.utc)
+        target.occurrence_count += 1
+        target.metadata_json = {
+            **(target.metadata_json or {}),
+            "previous_dedup_keys": sorted(
+                {
+                    *(target.metadata_json or {}).get("previous_dedup_keys", []),
+                    previous_key,
+                }
+            ),
+            "last_revision_candidate_id": str(candidate.id),
+        }
+        session.add(
+            KnowledgeOccurrence(
+                case_id=target.id,
+                candidate_id=candidate.id,
+                evidence_json=_evidence_summary(session, candidate.id),
+            )
+        )
+        _new_revision(session, target, candidate)
+        candidate.status = "published"
+        return target, "REVISED_CANONICAL"
     exact = session.scalar(
         select(KnowledgeCase).where(KnowledgeCase.dedup_key == candidate.dedup_key)
     )

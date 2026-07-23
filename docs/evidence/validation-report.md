@@ -783,3 +783,95 @@ narrative do not become embedded wiki content.
 
 The final idle resource snapshot was hook collector `0.00%`, worker `0.27%`, watcher `0.27%`, API
 `0.13%`, web `0.00%`, Ollama `0.00%`, and PostgreSQL `0.19%` CPU.
+
+## 2026-07-24 reboot recovery and canonical case vector projection
+
+### Reboot failure and recovery
+
+The first real Windows reboot exposed a defect that the warm manual task test did not cover.
+`\LocalKnowledgePortal\StartAtLogon` ran at 02:34:27 and returned `1`. The startup log showed that
+`docker info` against the absent `dockerDesktopLinuxEngine` pipe became a terminating PowerShell
+error, so execution never reached the Docker Desktop start branch.
+
+`Test-DockerReady` now treats only that bounded native probe failure as `false`. A cold validation
+then recorded:
+
+```text
+docker_desktop_start_requested
+docker_ready
+compose_up_complete
+web_ready
+portal_ready
+LastTaskResult=0
+API HTTP 200
+Web HTTP 200
+```
+
+The task also verifies the web endpoint and retries failures up to three times at two-minute
+intervals. The Compose invocation remains inside Ubuntu WSL so `/home` and `/mnt/*` bind paths are
+not reinterpreted by Windows Compose.
+
+The hook wrapper and collector were corrected to the current approved spool
+`E:\Data\LocalKnowledgePortal\ingest\codex-spool`. Both old and new pending/processing directories
+were zero before the switch; no file was moved or deleted. The effective collector mount is
+`/mnt/e/Data/LocalKnowledgePortal/ingest/codex-spool -> /hook-spool`.
+
+### Knowledge-case defect and correction
+
+The initial audit found two verified cases, two revisions, ten verified evidence records, and 286
+vectors. The case rows were not the direct vector source. Two manually generated Runbooks supplied
+17 vectors, but their Korean text was encoding-corrupted and the Ollama page still prescribed the
+superseded two-CPU limit. The current reboot incident had no case and its vector query returned
+unrelated CPU pages with low confidence.
+
+Implemented canonical materialization:
+
+- PostgreSQL `knowledge_case` plus append-only revisions is the source of truth.
+- Verified publication writes one UTF-8 managed page, records `generated_page`, and enqueues a
+  priority indexing job.
+- Guidance changes require an explicit evidence-gated `supersedes_case_id` revision.
+- Existing Runbooks were reclassified `ignored`; files and history were retained.
+- Existing watcher guidance was materialized, Ollama guidance was revised from two CPUs to the
+  measured one-CPU safe default, and the reboot incident became a verified operations case.
+
+Current state:
+
+```text
+canonical cases: 3
+canonical pages: 3
+case indexing jobs: 3 succeeded
+vectors per canonical page: 8
+legacy Runbooks: 0 active, 2 ignored
+Ollama case revisions/occurrences: 2 / 2
+```
+
+Measured hybrid retrieval:
+
+| Query | Top canonical result | Similarity | Confidence |
+|---|---|---:|---|
+| watcher polling CPU 과부하 원인과 조치 | watcher CPU case | 0.7990 | high |
+| Ollama 임베딩 CPU 1개 제한과 온도 재발 방지 | Ollama CPU case | 0.8057 | high |
+| PC 재부팅 후 웹 자동 시작 실패 원인 | reboot recovery case | 0.7079 | high |
+
+Every result returned the canonical managed path, document version, chunk ID, line range, content
+hash, and indexed timestamp. The current Ollama resolution at lines 30–33 explicitly keeps Ollama
+and worker at one CPU and forbids two CPUs as a default.
+
+Executed verification:
+
+```text
+uv run ruff check .
+  PASS
+uv run pytest -q tests/unit
+  PASS: 37
+dedicated PostgreSQL test database on the private Compose network
+  PASS: 10 integration tests; one upstream Starlette deprecation warning
+Docker API image build and four app-service recreation
+  PASS
+repeat materialize on an unchanged case
+  PASS: job count 1 -> 1; managed-file mtime unchanged
+final API/Web probes
+  PASS: HTTP 200 / HTTP 200
+```
+
+Verdict for reboot recovery and canonical case vector projection: **VERIFIED**.

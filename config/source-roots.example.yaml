@@ -11,10 +11,11 @@ source_roots:
 
   - id: managed-vault
     name: Managed fallback vault
-    path: "E:\\LocalKnowledgePortal\\vault"
+    path: "E:\\Data\\LocalKnowledgePortal\\vault"
     type: obsidian
     read_only: false
     managed_subdirectory: "_generated"
     include_patterns:
       - "**/*.md"
-    exclude_patterns: []
+    exclude_patterns:
+      - "_generated/Runbooks/**"

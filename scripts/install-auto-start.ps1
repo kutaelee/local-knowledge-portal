@@ -27,7 +27,9 @@ $principal = New-ScheduledTaskPrincipal `
 $settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable `
   -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
-  -MultipleInstances IgnoreNew
+  -MultipleInstances IgnoreNew `
+  -RestartCount 3 `
+  -RestartInterval (New-TimeSpan -Minutes 2)
 
 Register-ScheduledTask `
   -TaskPath $TaskPath `

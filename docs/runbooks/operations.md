@@ -20,7 +20,7 @@ Run `scripts/install-codex-hook.ps1` to idempotently merge the six global activi
 directory under `D:\LocalBackup\LocalKnowledgePortal\config\codex` before the merge.
 
 Each hook only calls `scripts/codex-hook.ps1`, which redacts and atomically spools a bounded JSON
-envelope to `E:\LocalKnowledgePortal\ingest\codex-spool\pending`. It does not depend on the portal,
+envelope to `E:\Data\LocalKnowledgePortal\ingest\codex-spool\pending`. It does not depend on the portal,
 API, or database. `scripts/start-hook-collector.ps1` imports raw envelopes idempotently and keeps
 reported results separate from exit-code-backed verified results. Malformed, unsupported, and
 oversized envelopes are quarantined; a fallback spool is replayed after recovery.
@@ -33,6 +33,29 @@ not promoted to a wiki page. Create a knowledge
 candidate explicitly and publish only after its category-specific evidence gate passes. Exact
 problem/root-cause/resolution duplicates add occurrences and revisions to the existing canonical
 case; uncertain similarity remains `NEEDS_REVIEW`.
+
+### Canonical case search projection
+
+Publishing a verified candidate writes a deterministic UTF-8 page under
+`_generated/Knowledge-Cases`, records it in `generated_page`, and enqueues a priority indexing
+job. The PostgreSQL case and append-only revisions are canonical; the Markdown and vectors are
+rebuildable projections.
+
+If guidance changes, create a new evidence-gated candidate with
+`metadata.supersedes_case_id=<existing case UUID>`. Publication appends a revision and occurrence
+before updating the current page. Never edit a generated page to change the canonical case.
+
+Verify the projection with:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8010/api/v1/knowledge/cases
+docker compose -f C:\Docker\local-knowledge-portal\compose.yaml exec -T postgres `
+  psql -U lkp -d lkp -c "select relative_path, pipeline_version from generated_page"
+```
+
+Legacy `_generated/Runbooks` pages are ignored, not deleted. If a canonical page is missing, call
+`POST /api/v1/knowledge/cases/{id}/materialize`; the operation refuses cases without verified
+evidence.
 
 Start a new Codex session, run `/hooks`, inspect the six commands, and approve them. Codex owns
 this trust boundary, so the portal records `MANUAL_APPROVAL_REQUIRED` until the operator acts.
@@ -197,7 +220,7 @@ collector must remain running.
 ## Codex activity capture boundary
 
 Raw global hooks only write bounded atomic envelopes to
-`E:\LocalKnowledgePortal\ingest\codex-spool`. The collector discards lifecycle events,
+`E:\Data\LocalKnowledgePortal\ingest\codex-spool`. The collector discards lifecycle events,
 acknowledgements, screenshots, file reads, status checks, and other low-signal tool output after
 claiming it. It promotes file mutations, failed commands, and explicit test/build/backup/restore
 operations into activity history.

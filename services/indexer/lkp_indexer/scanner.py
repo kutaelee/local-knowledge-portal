@@ -31,6 +31,7 @@ def register_roots(session: Session, config_path: Path) -> list[SourceRoot]:
     roots = []
     for item in load_roots(config_path):
         canonical = str(Path(item["path"]).resolve(strict=True))
+        enabled = item.get("enabled", True)
         root = session.scalar(select(SourceRoot).where(SourceRoot.canonical_path == canonical))
         if root is None:
             root = SourceRoot(
@@ -39,13 +40,22 @@ def register_roots(session: Session, config_path: Path) -> list[SourceRoot]:
                 source_type=item["type"],
                 data_scope=item.get("data_scope", "production"),
                 read_only=item.get("read_only", True),
-                enabled=True,
+                enabled=enabled,
                 include_patterns=item.get("include_patterns", ["**/*"]),
                 exclude_patterns=item.get("exclude_patterns", []),
             )
             session.add(root)
             session.flush()
-        roots.append(root)
+        else:
+            root.name = item.get("name", item["id"])
+            root.source_type = item["type"]
+            root.data_scope = item.get("data_scope", "production")
+            root.read_only = item.get("read_only", True)
+            root.enabled = enabled
+            root.include_patterns = item.get("include_patterns", ["**/*"])
+            root.exclude_patterns = item.get("exclude_patterns", [])
+        if root.enabled:
+            roots.append(root)
     return roots
 
 
