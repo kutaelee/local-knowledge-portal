@@ -1,0 +1,11 @@
+{
+  "name": "local-knowledge-portal",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --filter @lkp/web dev",
+    "build": "pnpm --filter @lkp/web build",
+    "lint": "pnpm --filter @lkp/web lint",
+    "test:web": "pnpm --filter @lkp/web test"
+  }
+}

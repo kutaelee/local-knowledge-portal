@@ -1,0 +1,10 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+allowBuilds:
+  sharp: true
+minimumReleaseAgeExclude:
+  - '@tanstack/react-virtual@3.14.8'
+  - '@tanstack/virtual-core@3.17.6'
+  - lucide-react@1.26.0
+  - postcss@8.5.22

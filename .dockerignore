@@ -1,0 +1,11 @@
+.git
+.env
+.venv
+node_modules
+apps/web/.next
+test-results
+playwright-report
+config/source-roots.yaml
+config/settings.yaml
+E:
+D:

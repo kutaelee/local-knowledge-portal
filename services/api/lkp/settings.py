@@ -1,0 +1,51 @@
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="LKP_", env_file=".env", extra="ignore")
+
+    database_url: str = "postgresql+psycopg://lkp:lkp@127.0.0.1:55432/lkp"
+    source_roots_config: Path = Path("config/source-roots.yaml")
+    settings_config: Path = Path("config/settings.yaml")
+    runtime_dir: Path = Path("runtime")
+    ingest_dir: Path = Path("runtime/ingest")
+    vault_dir: Path = Path("runtime/vault")
+    backup_dir: Path = Path("runtime/backups")
+    api_host: str = "127.0.0.1"
+    api_port: int = 8010
+    cors_origins: str = "http://127.0.0.1:3010,http://localhost:3010"
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    embedding_provider: str = "ollama"
+    embedding_model: str = "qwen3-embedding:0.6b"
+    embedding_dimension: int = 1024
+    embedding_revision: str = "ollama-qwen3-embedding-0.6b-d1024-v1"
+    embedding_model_digest: str = "unresolved"
+    pipeline_version: str = "1.0.0"
+    parser_version: str = "markdown-it-py-4"
+    chunker_version: str = "lkp-heading-symbol-v1"
+    max_file_bytes: int = 10 * 1024 * 1024
+    lease_seconds: int = 120
+    max_attempts: int = 5
+    heartbeat_seconds: int = 10
+    stale_after_seconds: int = 45
+    allowed_source_roots: list[Path] = Field(default_factory=list)
+
+    @field_validator("api_host")
+    @classmethod
+    def localhost_guard(cls, value: str) -> str:
+        if value not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("non-local API bind requires an authentication implementation")
+        return value
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

@@ -1,0 +1,20 @@
+source_roots:
+  - id: windows-repositories
+    name: Windows repositories
+    path: "C:\\Dev\\Repos"
+    type: repositories
+    read_only: true
+    include_patterns:
+      - "**/*"
+    exclude_patterns:
+      - "local-knowledge-portal/**"
+
+  - id: managed-vault
+    name: Managed fallback vault
+    path: "E:\\LocalKnowledgePortal\\vault"
+    type: obsidian
+    read_only: false
+    managed_subdirectory: "_generated"
+    include_patterns:
+      - "**/*.md"
+    exclude_patterns: []
