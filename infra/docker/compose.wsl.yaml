@@ -14,6 +14,7 @@ x-app: &app
     LKP_INGEST_DIR: /data/ingest
     LKP_HOOK_SPOOL_DIR: /hook-spool
     LKP_HOOK_SPOOL_FALLBACK_DIR: /fallback
+    LKP_CODEX_SESSIONS_DIR: /codex-sessions
     LKP_VAULT_DIR: /data/vault
     LKP_BACKUP_DIR: /backups
     LKP_OLLAMA_BASE_URL: http://ollama:11434
@@ -177,6 +178,7 @@ services:
       - ${LKP_BACKUP_ROOT}:/backups
       - ${LKP_HOOK_SPOOL_HOST_PATH:-/mnt/e/LocalKnowledgePortal/ingest/codex-spool}:/hook-spool
       - ${LKP_HOOK_FALLBACK_ROOT:?set LKP_HOOK_FALLBACK_ROOT}:/fallback
+      - ${LKP_CODEX_SESSIONS_HOST_PATH:?set LKP_CODEX_SESSIONS_HOST_PATH}:/codex-sessions:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

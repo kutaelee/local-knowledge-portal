@@ -680,3 +680,106 @@ process.
 
 Verdict for this correction: **VERIFIED**. The only excluded work is long-duration endurance and a
 sensor-backed thermal soak; neither is represented as passed.
+
+## 2026-07-24 automatic startup and selective Codex evidence capture
+
+### Finding and correction
+
+The portal data plane was healthy, but the global hook collector was not fully useful. Before this
+correction, production contained 176 activity rows, zero captured exit codes, zero verified
+activities, and only two rows with a changed-file link. These rows were activity history only:
+they had not increased the 3,817 active documents, 39,758 current chunks, or 269 current production
+embeddings. The two published knowledge cases remained the two previously verified CPU incidents.
+
+The cause was that Codex `PostToolUse` envelopes often carry command status in `tool_response` or
+the matching transcript function-call output instead of a top-level `exit_code`. The original
+collector also treated broad command words and any `path` input, including `view_image`, as useful
+evidence.
+
+Implemented corrections:
+
+- parse bounded `Exit code:` records from the hook response, then from the matching tool call in
+  the read-only Codex session transcript;
+- mount only `.codex\sessions`, never the whole `.codex` directory;
+- extract changed files only for mutating tools and explicit patch/status records;
+- stop treating `view_image`, `docker compose ps`, logs, inventory reads, and generic words such
+  as `test` as evidence;
+- retain explicit pytest/ruff/Playwright, package test/build/lint/typecheck,
+  migration, backup/restore, benchmark, Compose mutation, and command-failure evidence;
+- process spool files by filesystem time so Stop cannot overtake earlier evidence merely because
+  envelope filenames are hashes;
+- keep activities outside the document/chunk/embedding pipeline and keep knowledge publication
+  behind the existing evidence gate.
+
+### Automatic startup
+
+Registered Windows Scheduled Task `\LocalKnowledgePortal\StartAtLogon` with a 20-second logon
+delay. The task starts Docker Desktop when unavailable, runs Compose through Ubuntu WSL, and waits
+for `http://127.0.0.1:8010/health/ready`.
+
+An initial validation exposed an important path-boundary failure: invoking Windows Compose against
+the Linux-path environment recreated the watcher with an empty `/config` mount. The watcher
+failed closed with `FileNotFoundError: /config/source-roots.yaml`. The startup script was corrected
+to invoke Compose from Ubuntu WSL, the affected containers were force-recreated from WSL, and the
+task was run again.
+
+Verified result:
+
+```text
+Task: \LocalKnowledgePortal\StartAtLogon
+Trigger: current-user logon, delay PT20S
+LastTaskResult: 0
+startup log: startup_begin -> docker_ready -> compose_up_complete -> portal_ready
+API: healthy
+watcher: running
+worker: running
+hook collector: running
+```
+
+### Executed checks
+
+```text
+uv run ruff check services/api/lkp/settings.py \
+  services/indexer/lkp_indexer/hook_collector.py \
+  tests/unit/test_hook_collector_evidence.py
+  PASS
+
+uv run pytest -q tests/unit/test_hook_collector_evidence.py \
+  tests/unit/test_codex_capture.py
+  PASS: 9
+
+uv run ruff check .
+uv run pytest -q tests/unit
+  PASS: ruff; 36 unit tests
+
+dedicated test database on the private Compose network
+bash scripts/test-integration-container.sh .
+  PASS: 10 integration tests; one upstream Starlette deprecation warning
+
+live pytest PostToolUse after collector deployment
+  PASS: exit_code=0, verification_status=VERIFIED
+
+unique read-only Get-Date/Get-Item probe
+  PASS: zero promoted activity rows
+
+scheduled task manual start after WSL correction
+  PASS: LastTaskResult=0 and portal_ready
+```
+
+An initial integration invocation attempted the unpublished host port and failed authentication
+against an unrelated listener. It did not touch production rows. The corrected run used a
+dedicated database on `local-knowledge-portal_backend`, passed 10/10, and dropped that database
+afterward.
+
+The historical low-quality activity rows were not destructively deleted. They remain isolated from
+search/RAG and can be quarantined by a separately reviewed retention operation. New low-signal raw
+events are claimed and discarded instead of becoming activity records.
+
+The post-deployment production sample contained 17 selected events across three concurrently
+active Codex sessions. All 17 had observed exit codes and were `VERIFIED`; nine represented file
+changes. The same interval produced zero ingest backlog and no new knowledge candidate. This is
+the intended boundary: useful work evidence is retained, while ordinary reads and unreviewed
+narrative do not become embedded wiki content.
+
+The final idle resource snapshot was hook collector `0.00%`, worker `0.27%`, watcher `0.27%`, API
+`0.13%`, web `0.00%`, Ollama `0.00%`, and PostgreSQL `0.19%` CPU.

@@ -61,6 +61,7 @@ class Settings(BaseSettings):
         / "LocalKnowledgePortal"
         / "spool-fallback"
     )
+    codex_sessions_dir: Path = Path("/codex-sessions")
     hook_collector_poll_seconds: float = 2.0
     hook_claim_stale_seconds: int = 60
     pipeline_version: str = "1.2.0"

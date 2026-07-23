@@ -31,8 +31,15 @@ _LOW_SIGNAL_PROMPTS = {
     "continue",
 }
 _EVIDENCE_COMMAND = re.compile(
-    r"(?i)\b(pytest|ruff|playwright|test|build|lint|typecheck|migrate|alembic|"
-    r"backup|restore|benchmark|profile|docker\s+(build|restart|stop|compose)|git\s+commit)\b"
+    r"(?ix)\b("
+    r"pytest|ruff|playwright|alembic|benchmark|hyperfine|"
+    r"(?:pnpm|npm|yarn)\s+(?:run\s+)?(?:test|build|lint|typecheck)\b|"
+    r"(?:backup|restore)(?:-test)?(?:\.ps1|\.sh)?\b|"
+    r"docker\s+(?:build|restart|stop)\b|"
+    r"docker\s+compose(?:\s+-[^\s]+\s+\S+)*\s+"
+    r"(?:up|down|start|stop|restart|build|pull|run)\b|"
+    r"git\s+commit\b"
+    r")"
 )
 _REUSABLE_INSTRUCTION = re.compile(
     r"(?i)(fix|bug|error|fail|implement|build|change|refactor|optim|performance|"
@@ -61,20 +68,87 @@ def _nested(payload: dict[str, Any], *names: str) -> Any:
     return None
 
 
-def _exit_code(payload: dict[str, Any]) -> int | None:
+_EXIT_CODE_LINE = re.compile(r"(?im)^\s*Exit code:\s*(-?\d+)\s*$")
+_PATCH_FILE_LINE = re.compile(
+    r"(?m)^\*{3}\s+(?:Add|Update|Delete) File:\s+(.+?)\s*$"
+)
+_CHANGE_STATUS_LINE = re.compile(r"(?m)^\s*[AMD]\s+(.+?)\s*$")
+
+
+def _response_text(payload: dict[str, Any]) -> str:
+    value = payload.get("tool_response") or payload.get("toolResponse")
+    if isinstance(value, str):
+        return value[:1_000_000]
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)[:1_000_000]
+    return ""
+
+
+def _transcript_tool_output(
+    payload: dict[str, Any], sessions_root: Path | None
+) -> str:
+    if sessions_root is None:
+        return ""
+    transcript = payload.get("transcript_path")
+    tool_use_id = payload.get("tool_use_id")
+    if not isinstance(transcript, str) or not isinstance(tool_use_id, str):
+        return ""
+    normalized = transcript.replace("\\", "/")
+    marker = "/.codex/sessions/"
+    marker_index = normalized.casefold().find(marker)
+    if marker_index < 0:
+        return ""
+    relative = normalized[marker_index + len(marker) :].lstrip("/")
+    if not relative or ".." in Path(relative).parts:
+        return ""
+    root = sessions_root.resolve(strict=False)
+    source = (root / relative).resolve(strict=False)
+    try:
+        source.relative_to(root)
+        with source.open("rb") as handle:
+            size = source.stat().st_size
+            handle.seek(max(0, size - 4_000_000))
+            raw = handle.read(4_000_000)
+    except (FileNotFoundError, OSError, ValueError):
+        return ""
+    for line in reversed(raw.decode("utf-8", errors="replace").splitlines()):
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        record = item.get("payload") if isinstance(item, dict) else None
+        if not isinstance(record, dict) or record.get("call_id") != tool_use_id:
+            continue
+        output = record.get("output")
+        return output[:1_000_000] if isinstance(output, str) else ""
+    return ""
+
+
+def _exit_code(
+    payload: dict[str, Any], sessions_root: Path | None = None
+) -> int | None:
     value = _nested(payload, "exit_code", "exitCode", "status_code")
     if isinstance(value, int):
         return value
     if isinstance(value, str) and value.lstrip("-").isdigit():
         return int(value)
+    for output in (_response_text(payload), _transcript_tool_output(payload, sessions_root)):
+        match = _EXIT_CODE_LINE.search(output)
+        if match:
+            return int(match.group(1))
     return None
 
 
-def _changed_files(payload: dict[str, Any]) -> list[str]:
+def _changed_files(payload: dict[str, Any], tool_name: str | None = None) -> list[str]:
     tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
     if not isinstance(tool_input, dict):
         return []
     found: list[str] = []
+
+    def add(value: str) -> None:
+        cleaned = value.strip().strip('"')
+        if cleaned and cleaned not in found:
+            found.append(cleaned)
 
     def walk(value: Any, key: str = "") -> None:
         if isinstance(value, dict):
@@ -83,11 +157,17 @@ def _changed_files(payload: dict[str, Any]) -> list[str]:
         elif isinstance(value, list):
             for item in value:
                 walk(item, key)
-        elif isinstance(value, str) and key in {"path", "file_path", "filename"}:
-            if value not in found:
-                found.append(value)
+        elif isinstance(value, str):
+            if key in {"path", "file_path", "filename"}:
+                add(value)
+            for match in _PATCH_FILE_LINE.finditer(value):
+                add(match.group(1))
 
-    walk(tool_input)
+    normalized_tool = (tool_name or "").casefold()
+    if normalized_tool in _MUTATING_TOOLS:
+        walk(tool_input)
+        for match in _CHANGE_STATUS_LINE.finditer(_response_text(payload)):
+            add(match.group(1))
     return found[:200]
 
 
@@ -119,7 +199,9 @@ def _tool_name(envelope: dict[str, Any], payload: dict[str, Any]) -> str | None:
     return str(value)[:200] if value else None
 
 
-def activity_signal(envelope: dict[str, Any]) -> tuple[bool, list[str]]:
+def activity_signal(
+    envelope: dict[str, Any], sessions_root: Path | None = None
+) -> tuple[bool, list[str]]:
     payload = envelope.get("payload") or {}
     event_name = str(envelope.get("event_name") or "")
     reasons: list[str] = []
@@ -134,10 +216,10 @@ def activity_signal(envelope: dict[str, Any]) -> tuple[bool, list[str]]:
             return True, ["reusable_work_instruction"]
         return False, ["general_prompt_without_knowledge_signal"]
     if event_name == "PostToolUse":
-        exit_code = _exit_code(payload)
-        changed_files = _changed_files(payload)
-        command = _command(payload) or ""
         tool_name = (_tool_name(envelope, payload) or "").casefold()
+        exit_code = _exit_code(payload, sessions_root)
+        changed_files = _changed_files(payload, tool_name)
+        command = _command(payload) or ""
         if exit_code not in {None, 0}:
             reasons.append("command_failure")
         if changed_files:
@@ -170,15 +252,20 @@ def _document_versions(
     return versions
 
 
-def envelope_to_activity(session: Session, envelope: dict[str, Any]) -> ActivityEvent:
+def envelope_to_activity(
+    session: Session,
+    envelope: dict[str, Any],
+    sessions_root: Path | None = None,
+) -> ActivityEvent:
     payload = envelope["payload"]
     event_name = str(envelope["event_name"])
     event_id = str(envelope["event_id"])
     existing = session.scalar(select(ActivityEvent).where(ActivityEvent.event_key == event_id))
     if existing:
         return existing
-    exit_code = _exit_code(payload)
-    changed_files = _changed_files(payload)
+    tool_name = _tool_name(envelope, payload)
+    exit_code = _exit_code(payload, sessions_root)
+    changed_files = _changed_files(payload, tool_name)
     cwd = str(envelope.get("cwd") or payload.get("cwd") or "") or None
     verified_result = None
     verification_status = "UNVERIFIED"
@@ -209,7 +296,7 @@ def envelope_to_activity(session: Session, envelope: dict[str, Any]) -> Activity
         project_key=Path(cwd).name if cwd else None,
         cwd=cwd,
         instruction=_instruction(payload, event_name),
-        tool_name=_tool_name(envelope, payload),
+        tool_name=tool_name,
         command=_command(payload),
         exit_code=exit_code,
         changed_files=changed_files,
@@ -243,13 +330,15 @@ def envelope_to_activity(session: Session, envelope: dict[str, Any]) -> Activity
     return activity
 
 
-def collect_file(session: Session, path: Path) -> bool:
+def collect_file(
+    session: Session, path: Path, sessions_root: Path | None = None
+) -> bool:
     envelope = json.loads(path.read_text(encoding="utf-8"))
     event_id = str(envelope["event_id"])
     existing = session.get(HookSpoolEvent, event_id)
     if existing:
         return False
-    promote, signal_reasons = activity_signal(envelope)
+    promote, signal_reasons = activity_signal(envelope, sessions_root)
     if promote and str(envelope.get("event_name") or "") in {"Stop", "SubagentStop"}:
         prior = session.scalar(
             select(ActivityEvent.id).where(
@@ -281,7 +370,7 @@ def collect_file(session: Session, path: Path) -> bool:
             processed_at=datetime.now(timezone.utc),
         )
     )
-    envelope_to_activity(session, envelope)
+    envelope_to_activity(session, envelope, sessions_root)
     return True
 
 
@@ -321,14 +410,20 @@ def collect_once(settings: Settings) -> dict[str, int]:
         pending = root / "pending"
         if not pending.exists():
             continue
-        for path in sorted(pending.glob("*.json")):
+        paths = sorted(
+            pending.glob("*.json"),
+            key=lambda item: (item.stat().st_mtime_ns, item.name),
+        )
+        for path in paths:
             counts["seen"] += 1
             claimed = _claim(path)
             if claimed is None:
                 continue
             try:
                 with SessionLocal() as session:
-                    changed = collect_file(session, claimed)
+                    changed = collect_file(
+                        session, claimed, settings.codex_sessions_dir
+                    )
                     session.commit()
                 claimed.unlink(missing_ok=True)
                 counts["processed" if changed else "duplicates"] += 1

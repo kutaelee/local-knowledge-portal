@@ -167,6 +167,48 @@ Stop worker loops gracefully so their current transaction rolls back and lease r
 Run `./scripts/docker-stack.sh stop`. This stops every application container without deleting the
 Docker named volume, E: data directory, or raw spool.
 
+## Windows logon startup
+
+Register the per-user logon task from Windows PowerShell:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "\\wsl.localhost\Ubuntu\home\kutae\src\local-knowledge-portal\scripts\install-auto-start.ps1"
+```
+
+The task `\LocalKnowledgePortal\StartAtLogon` starts Docker Desktop when necessary, invokes
+Compose from the Ubuntu WSL distribution so Linux and `/mnt/*` bind paths retain their intended
+meaning, and waits for API readiness. It does not build images during logon. Structured results
+are appended to `E:\Data\LocalKnowledgePortal\runtime\logs\startup.jsonl`.
+
+Do not replace the WSL Compose invocation with Windows `docker compose` while the repository and
+environment use Linux paths. Doing so can create syntactically valid containers with empty bind
+mounts. Validate the task after changes:
+
+```powershell
+Start-ScheduledTask -TaskPath '\LocalKnowledgePortal\' -TaskName 'StartAtLogon'
+Get-ScheduledTaskInfo -TaskPath '\LocalKnowledgePortal\' -TaskName 'StartAtLogon'
+docker compose -f C:\Docker\local-knowledge-portal\compose.yaml ps
+```
+
+`LastTaskResult` must be `0`, API readiness must return HTTP 200, and watcher, worker, and hook
+collector must remain running.
+
+## Codex activity capture boundary
+
+Raw global hooks only write bounded atomic envelopes to
+`E:\LocalKnowledgePortal\ingest\codex-spool`. The collector discards lifecycle events,
+acknowledgements, screenshots, file reads, status checks, and other low-signal tool output after
+claiming it. It promotes file mutations, failed commands, and explicit test/build/backup/restore
+operations into activity history.
+
+The collector reads only `C:\Users\kutae\.codex\sessions` through a read-only container mount to
+resolve the tool call's recorded exit code. It does not mount the rest of `.codex`. Activities are
+not documents and are never chunked or embedded. A reported assistant result remains
+`UNVERIFIED` unless an independently captured exit code exists in the same turn. Knowledge cases
+still require the evidence gate and explicit candidate publication; ordinary activity is not
+automatically published as a wiki fact.
+
 ## Logs
 
 Runtime files belong under `E:\Data\LocalKnowledgePortal\runtime`; container logs are available
