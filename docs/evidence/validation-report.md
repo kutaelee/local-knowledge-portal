@@ -234,3 +234,14 @@ Rollback은 service와 Compose를 중지하고 E:의 derived DB directory를 별
   `docs/evidence/watcher-cpu-remediation-2026-07-23.md`.
 
 Verdict for this remediation: **VERIFIED**.
+
+## Post-incident cleanup
+
+- Five jobs created only for the temporary watcher validation paths were retained as audit
+  records and transitioned to `cancelled` with `validation_fixture_cleanup` metadata.
+- Two stopped historical `watcher-service:*` heartbeat rows were retained and marked
+  `retired=true` with the incident cleanup reason.
+- Successful one-off `migrate` and `ollama-model` containers were removed; no active volume,
+  source file, backup, document, or embedding was removed.
+- Cleanup verification: validation-path jobs `cancelled=5`, no matching pending jobs, no
+  stopped one-off containers, API readiness true, watcher CPU 0.13%.
