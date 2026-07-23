@@ -58,6 +58,18 @@ export type Metrics = {
   embedding_revision: string;
   pipeline_version: string;
   repository_embedding_mode: string;
+  query_embedding_cache: {
+    entries: number;
+    hits: number;
+    misses: number;
+    max_entries: number;
+    ttl_seconds: number;
+  };
+  search_latency_last_hour: Record<string, {
+    queries: number;
+    p50_ms: number;
+    p95_ms: number;
+  }>;
 };
 
 export type TreeItem = {

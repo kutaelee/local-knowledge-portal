@@ -20,7 +20,7 @@ Run `scripts/install-codex-hook.ps1` to idempotently merge the six global activi
 directory under `D:\LocalBackup\LocalKnowledgePortal\config\codex` before the merge.
 
 Each hook only calls `scripts/codex-hook.ps1`, which redacts and atomically spools a bounded JSON
-envelope to `E:\Data\LocalKnowledgePortal\ingest\codex-spool\pending`. It does not depend on the portal,
+envelope to `E:\LocalKnowledgePortal\ingest\codex-spool\pending`. It does not depend on the portal,
 API, or database. `scripts/start-hook-collector.ps1` imports raw envelopes idempotently and keeps
 reported results separate from exit-code-backed verified results. Malformed, unsupported, and
 oversized envelopes are quarantined; a fallback spool is replayed after recovery.
@@ -90,11 +90,18 @@ If Ollama is unavailable, new embedding jobs fail and retry; keyword retrieval o
 
 ### CPU and thermal guard
 
-The WSL2 Compose deployment applies a hard one-CPU quota to both Ollama and the worker. Do not
-remove these limits to accelerate an initial scan. Semantic throughput is intentionally bounded
+The WSL2 Compose deployment applies a hard one-CPU quota to Ollama, worker, and API, plus a
+half-CPU quota to watcher, hook collector, and web. Do not remove these limits to accelerate an
+initial scan. Semantic throughput is intentionally bounded
 with one-chunk embedding batches, inter-batch and inter-job delays, and a 20-job burst cooldown.
 Lexical-only jobs never call Ollama and use a separate 200-job burst with a short cooldown under
 the same worker CPU limit.
+
+One CPU is the current safe Ollama default, not a universal optimum. Startup prewarming and
+`OLLAMA_KEEP_ALIVE=24h` avoid repeated cold model loads; the 512-entry, 24-hour revision-aware
+query cache removes repeat inference. Inspect dashboard search p50/p95 and cache occupancy before
+considering CPU. Do not evaluate 1.5 CPUs until a real temperature sensor, representative workload,
+30-minute thermal soak, and rollback evidence are available. Never jump directly to two CPUs.
 
 Inspect the effective cgroup limits and current load:
 

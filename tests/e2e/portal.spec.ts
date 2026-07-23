@@ -31,7 +31,7 @@ test("localized overview explains freshness and persists language", async ({ pag
   })).toBeVisible();
 
   const localizedScreens = [
-    ["문서 탐색", "저장소와 파일"],
+    ["저장소 탐색", "저장소와 파일"],
     ["검색", "원본 지식 검색"],
     ["활동 이력", "활동 이력"],
     ["지식 사례", "지식 사례"],
@@ -49,7 +49,7 @@ test("overview, explorer, document versions, and provenance", async ({ page, req
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "See what is current, at a glance." }))
     .toBeVisible();
-  await page.getByRole("button", { name: "Explorer" }).click();
+  await page.getByRole("button", { name: "Repository explorer" }).click();
   await expect(page.getByRole("heading", { name: "Repositories & files" })).toBeVisible();
 
   const tree = await (

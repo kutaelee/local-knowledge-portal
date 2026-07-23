@@ -68,7 +68,8 @@ saved in the browser and the document language is updated for assistive technolo
 
 The overview is intended for human verification rather than model consumption. It shows the data
 snapshot time, last indexed source time, most recently indexed documents, per-source reconciliation
-freshness, queue age and state, worker state, and the active embedding/pipeline revision. Throughput
+freshness, queue age and state, worker state, the active embedding/pipeline revision, query cache
+occupancy, and last-hour search p50/p95. Throughput
 charts use measured database events; they do not display placeholder series. API and RAG clients
 continue to use the same provenance-bearing endpoints independently of the display language.
 
@@ -89,7 +90,7 @@ incidental parent such as `ai`. Canonical cases still require verified evidence.
 The user-level `%USERPROFILE%\.codex\hooks.json` records activity from every trusted Codex
 workspace, not only this repository. `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`,
 `SubagentStart`, and `SubagentStop` invoke a small PowerShell wrapper that only writes an atomic
-JSON envelope to `E:\Data\LocalKnowledgePortal\ingest\codex-spool\pending`. It never calls the API or
+JSON envelope to `E:\LocalKnowledgePortal\ingest\codex-spool\pending`. It never calls the API or
 database. A bounded fallback spool, deterministic event IDs, secret redaction, malformed and
 oversized quarantine, and collector-side idempotency keep capture available during portal or
 database outages.
@@ -131,12 +132,17 @@ Production embedding uses Ollama `qwen3-embedding:0.6b`, digest
 digest mismatch fails closed. Model changes require a new revision; vectors are never silently
 mixed. Tests use a separate deterministic revision.
 
-The WSL2 runtime keeps embedding thermally bounded: Ollama and the worker each have a one-CPU
-Docker quota, model concurrency is one, and requests use one-chunk batches. Semantic and lexical
+The WSL2 runtime keeps embedding thermally bounded: Ollama, the worker, and API each have a one-CPU
+Docker quota; watcher, hook collector, and web each have a half-CPU quota. Model concurrency is one,
+and requests use one-chunk batches. The one-CPU Ollama value is the safe default, not a permanent
+throughput claim. Query embeddings use a bounded revision-aware cache, the model is prewarmed and
+kept loaded, and search SQL has a bounded execution time. Semantic and lexical
 jobs have separate cooldown/burst policies, so an initial code catalog scan drains without calling
 the model while semantic work remains conservative. Operators can create
 `E:\Data\LocalKnowledgePortal\runtime\embedding.pause` to stop new leases while keeping the portal
 and lexical search online. See the operations runbook before changing these defaults.
+The evidence required before evaluating a larger CPU profile is documented in
+[ADR 0008](docs/adr/0008-search-latency-and-cpu-budget.md).
 
 ## Tests
 

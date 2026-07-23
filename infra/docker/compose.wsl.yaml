@@ -12,7 +12,7 @@ x-app: &app
     LKP_SETTINGS_CONFIG: /config/settings.yaml
     LKP_RUNTIME_DIR: /data/runtime
     LKP_INGEST_DIR: /data/ingest
-    LKP_HOOK_SPOOL_DIR: /data/ingest/codex-spool
+    LKP_HOOK_SPOOL_DIR: /hook-spool
     LKP_HOOK_SPOOL_FALLBACK_DIR: /fallback
     LKP_VAULT_DIR: /data/vault
     LKP_BACKUP_DIR: /backups
@@ -22,6 +22,11 @@ x-app: &app
     LKP_EMBEDDING_MAX_CHUNKS_PER_DOCUMENT: ${LKP_EMBEDDING_MAX_CHUNKS_PER_DOCUMENT:-128}
     LKP_EMBEDDING_MAX_CHARS_PER_DOCUMENT: ${LKP_EMBEDDING_MAX_CHARS_PER_DOCUMENT:-250000}
     LKP_SEMANTIC_HIGH_CONFIDENCE_SIMILARITY: ${LKP_SEMANTIC_HIGH_CONFIDENCE_SIMILARITY:-0.6}
+    LKP_QUERY_EMBEDDING_CACHE_SIZE: ${LKP_QUERY_EMBEDDING_CACHE_SIZE:-512}
+    LKP_QUERY_EMBEDDING_CACHE_TTL_SECONDS: ${LKP_QUERY_EMBEDDING_CACHE_TTL_SECONDS:-86400}
+    LKP_QUERY_EMBEDDING_TIMEOUT_SECONDS: ${LKP_QUERY_EMBEDDING_TIMEOUT_SECONDS:-30}
+    LKP_QUERY_EMBEDDING_PREWARM: ${LKP_QUERY_EMBEDDING_PREWARM:-true}
+    LKP_SEARCH_STATEMENT_TIMEOUT_MS: ${LKP_SEARCH_STATEMENT_TIMEOUT_MS:-5000}
     LKP_REPOSITORY_EMBEDDING_MODE: ${LKP_REPOSITORY_EMBEDDING_MODE:-docs_only}
     LKP_PIPELINE_VERSION: ${LKP_PIPELINE_VERSION:-1.2.0}
     LKP_WORKER_JOB_COOLDOWN_SECONDS: ${LKP_WORKER_JOB_COOLDOWN_SECONDS:-1}
@@ -74,6 +79,7 @@ services:
       OLLAMA_NUM_PARALLEL: "1"
       OLLAMA_MAX_LOADED_MODELS: "1"
       OLLAMA_MAX_QUEUE: "8"
+      OLLAMA_KEEP_ALIVE: ${LKP_OLLAMA_KEEP_ALIVE:-24h}
     volumes:
       - ${LKP_MODEL_ROOT:?set LKP_MODEL_ROOT}:/root/.ollama
     healthcheck:
@@ -105,6 +111,9 @@ services:
   api:
     <<: *app
     command: ["uvicorn", "lkp.main:app", "--host", "0.0.0.0", "--port", "8010"]
+    cpus: "${LKP_API_CPUS:-1.0}"
+    mem_limit: 1g
+    pids_limit: 256
     ports:
       - "127.0.0.1:8010:8010"
     depends_on:
@@ -142,6 +151,9 @@ services:
   watcher:
     <<: *app
     command: ["python", "-m", "lkp_indexer.watcher_service"]
+    cpus: "${LKP_WATCHER_CPUS:-0.5}"
+    mem_limit: 512m
+    pids_limit: 128
     volumes:
       - ${LKP_CONFIG_ROOT}:/config:ro
       - ${LKP_DATA_ROOT}:/data
@@ -156,10 +168,14 @@ services:
   hook-collector:
     <<: *app
     command: ["python", "-m", "lkp_indexer.hook_collector", "--watch"]
+    cpus: "${LKP_HOOK_COLLECTOR_CPUS:-0.5}"
+    mem_limit: 512m
+    pids_limit: 128
     volumes:
       - ${LKP_CONFIG_ROOT}:/config:ro
       - ${LKP_DATA_ROOT}:/data
       - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_HOOK_SPOOL_HOST_PATH:-/mnt/e/LocalKnowledgePortal/ingest/codex-spool}:/hook-spool
       - ${LKP_HOOK_FALLBACK_ROOT:?set LKP_HOOK_FALLBACK_ROOT}:/fallback
     depends_on:
       migrate:
@@ -173,6 +189,9 @@ services:
       args:
         NEXT_PUBLIC_API_URL: http://127.0.0.1:8010
     restart: unless-stopped
+    cpus: "${LKP_WEB_CPUS:-0.5}"
+    mem_limit: 512m
+    pids_limit: 128
     ports:
       - "127.0.0.1:3010:3010"
     depends_on:

@@ -571,3 +571,112 @@ Verified canonical cases: 2, distinct dedup keys: 2, exact duplicates: 0. The on
 approval is Codex `/hooks` trust review; status remains `MANUAL_APPROVAL_REQUIRED`.
 
 Verdict for this correction: **VERIFIED**. No long-duration endurance or thermal soak is claimed.
+
+## 2026-07-24 menu, search latency, CPU budget, and hook trust correction
+
+### Implemented
+
+- Renamed the navigation item from `문서 탐색` / `Explorer` to `저장소 탐색` /
+  `Repository explorer`. The page remains `저장소와 파일`: code belongs in this read-only
+  repository catalog, while only purpose-selected Markdown is embedded by default.
+- Replaced the combined lexical sequential scan with indexed full-text, path, and symbol candidate
+  stages. Added migrations `0005_search_candidate_indexes` and
+  `0006_chunk_content_trigram`.
+- Split word-similarity and literal-content lookup into fallbacks that run only when the indexed
+  stage returns no candidate. This avoided a measured 4.5-second common-term regression while
+  retaining Korean and paraphrase retrieval.
+- Added a five-second per-search PostgreSQL statement timeout.
+- Added a revision-aware 512-entry TTL/LRU query-embedding cache, 24-hour Ollama keepalive,
+  startup prewarm, bounded 30-second provider timeout, and cache statistics in readiness and
+  dashboard metrics.
+- Added last-hour keyword/semantic/hybrid p50/p95 metrics to the dashboard.
+- Corrected duplicate example values that could have made a new deployment use two Ollama CPUs.
+- Applied cgroup budgets: Ollama/worker/API `1.0` CPU; watcher/hook collector/web `0.5` CPU.
+  Memory and PID limits are also explicit.
+- Documented the evidence gate for any future 1.5-CPU experiment in ADR 0008. Two CPUs are not a
+  default.
+- Corrected global-hook spool placement to the workstation-approved
+  `E:\LocalKnowledgePortal\ingest\codex-spool` and mounted that exact path into the collector.
+
+### Executed verification
+
+```text
+bash scripts/validate-container.sh .
+  PASS: ruff; 32 unit tests
+LKP_TEST_DATABASE_URL=<ephemeral tmpfs PostgreSQL 18> \
+  bash scripts/test-integration-container.sh .
+  PASS: 10 integration tests; one upstream Starlette deprecation warning
+docker compose ... build api web
+  PASS: API image; Next.js 16.2.11 production build and TypeScript
+python tests/retrieval/evaluate.py  # isolated DB, real Ollama
+  PASS: no-answer, stale exclusion, filters, and citations
+browser verification against http://127.0.0.1:3010
+  PASS: Korean overview, Repository explorer menu, 3,817-file project tree,
+        live model/cache/latency metrics, PostgreSQL and Ollama health
+bash scripts/backup-wsl-docker.sh
+bash scripts/restore-test-wsl-docker.sh <new backup>
+  PASS: checksum and separate PostgreSQL 18 restore
+```
+
+The complete isolated Playwright 4/4 run recorded earlier in this report remains the full E2E
+baseline. This correction additionally performed a live browser check of the changed menu and
+dashboard surfaces; it did not claim a second full fixture-seeded Playwright run.
+
+### Performance and resource evidence
+
+Production data: 3,817 current files, 39,758 current chunks, 269 semantic chunks.
+
+| Query path | Measured latency |
+|---|---:|
+| common keyword, first after API restart | 191 ms |
+| common keyword, warm | 13 ms |
+| unique semantic, model warm / cache miss | 1,372 ms |
+| repeated semantic / cache hit | 12 ms |
+| unique hybrid, model warm / cache miss | 1,183 ms |
+| repeated hybrid / cache hit | 13 ms |
+
+Five sequential semantic cache misses completed in `998–1,501 ms`; active Ollama samples were
+`76–88%` of its one-CPU quota. The final idle snapshot was Ollama `0.00%`, worker `0.24%`, API
+`0.14%`, watcher `0.14%`, hook collector `0.00%`, and web `0.00%`. The loaded model used about
+`1.29 GiB` of its 6-GiB limit.
+
+The one-CPU model profile therefore remains the safe default. It is not declared permanently
+optimal: increasing it requires a representative workload, a real package-temperature sensor,
+user-approved thermal bound, 30-minute soak, and rollback evidence. Those endurance/thermal tests
+remain outside this run.
+
+### Retrieval evaluation
+
+| mode | Hit@5 | Hit@10 | MRR | filter | citation |
+|---|---:|---:|---:|---:|---:|
+| keyword | 0.8889 | 0.8889 | 0.8889 | 1.00 | 1.00 |
+| semantic | 1.00 | 1.00 | 0.8519 | 1.00 | 1.00 |
+| hybrid | 1.00 | 1.00 | 0.9259 | 1.00 | 1.00 |
+
+Keyword retrieval improved from the previous `0.6667` baseline; semantic and hybrid did not
+regress.
+
+### Hook trust and spool evidence
+
+The user changed all displayed hooks to trusted during this task. After that change, live activity
+contained `UserPromptSubmit`, `PostToolUse`, and `Stop`; every row remained `UNVERIFIED`.
+`SessionStart` cannot occur retroactively in the current session, and subagent events occur only
+when a subagent is used. The earlier isolated hook validation in this report already exercised all
+six configured event types.
+
+After the approved spool-path correction, live hook files appeared only under
+`E:\LocalKnowledgePortal\ingest\codex-spool`. The collector mount resolved to
+`/mnt/e/LocalKnowledgePortal/ingest/codex-spool -> /hook-spool`; pending and processing both drained
+to zero, and the activity total advanced. No API, database, or remote model call occurs in the hook
+process.
+
+### Backup and current state
+
+- backup: `D:\LocalBackup\LocalKnowledgePortal\database\2026-07-23T164702Z`
+- restored schema: `0006_chunk_content_trigram`
+- restored rows: 3,817 documents, 39,775 chunks, 286 vectors, 71 activities
+- live API/web/PostgreSQL/Ollama/worker/watcher/hook collector: healthy
+- pending initial/live jobs: `0 / 0`
+
+Verdict for this correction: **VERIFIED**. The only excluded work is long-duration endurance and a
+sensor-backed thermal soak; neither is represented as passed.

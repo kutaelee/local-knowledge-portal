@@ -15,6 +15,11 @@ worker:
   embedding_batch_size: 1
   embedding_batch_cooldown_seconds: 1
   semantic_high_confidence_similarity: 0.6
+  query_embedding_cache_size: 512
+  query_embedding_cache_ttl_seconds: 86400
+  query_embedding_timeout_seconds: 30
+  query_embedding_prewarm: true
+  search_statement_timeout_ms: 5000
   embedding_max_chunks_per_document: 128
   embedding_max_chars_per_document: 250000
   repository_embedding_mode: "docs_only"

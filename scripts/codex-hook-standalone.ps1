@@ -13,7 +13,7 @@ $SupportedEvents = @(
 $PrimarySpool = if ($env:LKP_HOOK_SPOOL_DIR) {
   $env:LKP_HOOK_SPOOL_DIR
 } else {
-  'E:\Data\LocalKnowledgePortal\ingest\codex-spool'
+  'E:\LocalKnowledgePortal\ingest\codex-spool'
 }
 $FallbackSpool = if ($env:LKP_HOOK_SPOOL_FALLBACK_DIR) {
   $env:LKP_HOOK_SPOOL_FALLBACK_DIR

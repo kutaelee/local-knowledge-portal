@@ -46,7 +46,7 @@ const nav: { id: View; icon: React.ComponentType<{ size?: number }> }[] = [
 const translations = {
   ko: {
     nav: {
-      overview: "현황", explorer: "문서 탐색", document: "문서",
+      overview: "현황", explorer: "저장소 탐색", document: "문서",
       search: "검색", activities: "활동 이력", knowledge: "지식 사례",
       operations: "운영", timeline: "변경 타임라인", graph: "지식 그래프",
     },
@@ -102,6 +102,9 @@ const translations = {
       pipelineVersion: "파이프라인 버전",
       repositoryMode: "저장소 의미 검색 범위",
       docsOnly: "문서만 · 코드는 키워드/심볼",
+      searchLatency: "최근 1시간 검색 지연",
+      cacheUsage: "질의 임베딩 캐시",
+      noSearches: "검색 기록 없음",
       workers: "현재 동작 중인 서비스",
       queue: "작업 큐",
       failed: "실패",
@@ -212,7 +215,7 @@ const translations = {
   },
   en: {
     nav: {
-      overview: "Overview", explorer: "Explorer", document: "Document",
+      overview: "Overview", explorer: "Repository explorer", document: "Document",
       search: "Search", activities: "Activity", knowledge: "Knowledge cases",
       operations: "Operations", timeline: "Timeline", graph: "Knowledge graph",
     },
@@ -268,6 +271,9 @@ const translations = {
       pipelineVersion: "Pipeline version",
       repositoryMode: "Repository semantic scope",
       docsOnly: "Docs only · code uses keyword/symbol",
+      searchLatency: "Search latency (last hour)",
+      cacheUsage: "Query embedding cache",
+      noSearches: "No recent searches",
       workers: "Active services",
       queue: "Job queue",
       failed: "Failed",
@@ -670,6 +676,14 @@ function Overview({ onNavigate, locale }: {
             <div><dt>{text.pipelineVersion}</dt><dd>{data?.pipeline_version ?? "—"}</dd></div>
             <div><dt>{text.repositoryMode}</dt><dd>{data?.repository_embedding_mode === "docs_only"
               ? text.docsOnly : data?.repository_embedding_mode ?? "—"}</dd></div>
+            <div><dt>{text.searchLatency}</dt><dd>{data?.search_latency_last_hour.hybrid
+              ? `p50 ${Math.round(data.search_latency_last_hour.hybrid.p50_ms)}ms · p95 ${
+                Math.round(data.search_latency_last_hour.hybrid.p95_ms)}ms`
+              : text.noSearches}</dd></div>
+            <div><dt>{text.cacheUsage}</dt><dd>{data
+              ? `${number.format(data.query_embedding_cache.entries)} / ${
+                number.format(data.query_embedding_cache.max_entries)}`
+              : "—"}</dd></div>
             <div><dt>{text.workers}</dt><dd>{data?.workers ?? 0}</dd></div>
           </dl>
         </article>

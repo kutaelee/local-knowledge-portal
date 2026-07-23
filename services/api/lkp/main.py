@@ -1,14 +1,17 @@
+import asyncio
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from difflib import unified_diff
+from functools import lru_cache
 
 import httpx
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
-from lkp_indexer.embedding import OllamaEmbedder
+from lkp_indexer.embedding import CachedEmbedder, OllamaEmbedder
 from lkp_indexer.knowledge import create_candidate, evaluate_gate, publish_candidate
 from lkp_indexer.queue import retry_as_new
 from lkp_indexer.selection import CODE_EXTENSIONS
@@ -45,10 +48,37 @@ from .settings import get_settings
 settings = get_settings()
 configure_logging("api")
 logger = structlog.get_logger()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if settings.query_embedding_prewarm:
+        started = time.perf_counter()
+        try:
+            await asyncio.to_thread(
+                _embedder().embed,
+                ["local knowledge portal query cache warmup"],
+            )
+            logger.info(
+                "query_embedding_prewarmed",
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                model=settings.embedding_model,
+                revision=settings.embedding_revision,
+            )
+        except Exception as exc:
+            logger.warning(
+                "query_embedding_prewarm_failed",
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                error_type=type(exc).__name__,
+            )
+    yield
+
+
 app = FastAPI(
     title="Local Knowledge Portal API",
     version="0.1.0",
     description="Read-only provenance-first local knowledge and RAG API",
+    lifespan=lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -88,12 +118,18 @@ async def request_log(request: Request, call_next):
         raise
 
 
-def _embedder() -> OllamaEmbedder:
-    return OllamaEmbedder(
-        settings.ollama_base_url,
-        settings.embedding_model,
-        settings.embedding_model_digest,
-        settings.embedding_dimension,
+@lru_cache(maxsize=1)
+def _embedder() -> CachedEmbedder:
+    return CachedEmbedder(
+        OllamaEmbedder(
+            settings.ollama_base_url,
+            settings.embedding_model,
+            settings.embedding_model_digest,
+            settings.embedding_dimension,
+            settings.query_embedding_timeout_seconds,
+        ),
+        max_entries=settings.query_embedding_cache_size,
+        ttl_seconds=settings.query_embedding_cache_ttl_seconds,
     )
 
 
@@ -122,6 +158,7 @@ def ready(db: Session = Depends(get_db)) -> dict:
         "schema_revision": revision,
         "ollama": ollama,
         "embedding_revision": settings.embedding_revision,
+        "query_embedding_cache": _embedder().cache_info(),
         "generation": {
             "enabled": settings.generation_provider != "disabled",
             "provider": settings.generation_provider,
@@ -1005,6 +1042,26 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
         or 0
     )
     pending_live = max(0, int(counts.get(JobStatus.pending, 0)) - pending_initial)
+    search_latency = {
+        row["mode"]: {
+            "queries": int(row["queries"]),
+            "p50_ms": float(row["p50_ms"]),
+            "p95_ms": float(row["p95_ms"]),
+        }
+        for row in db.execute(
+            text(
+                """
+                SELECT mode, count(*) AS queries,
+                  percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ms) AS p50_ms,
+                  percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms
+                FROM search_query_log
+                WHERE created_at >= now() - interval '1 hour'
+                GROUP BY mode
+                ORDER BY mode
+                """
+            )
+        ).mappings()
+    }
     return {
         "generated_at": now,
         "projects": db.scalar(
@@ -1057,6 +1114,8 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
         "embedding_revision": settings.embedding_revision,
         "pipeline_version": settings.pipeline_version,
         "repository_embedding_mode": settings.repository_embedding_mode,
+        "query_embedding_cache": _embedder().cache_info(),
+        "search_latency_last_hour": search_latency,
     }
 
 

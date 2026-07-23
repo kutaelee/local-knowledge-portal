@@ -10,13 +10,80 @@ from lkp.models import SearchQueryLog
 from .schemas import Provenance, SearchRequest, SearchResponse, SearchResult
 from .settings import Settings
 
-LEXICAL_SQL = text(
+INDEXED_LEXICAL_SQL = text(
+    """
+    WITH candidates AS MATERIALIZED (
+      SELECT c.id chunk_id,
+        ts_rank_cd(
+          c.lexical_search_vector,
+          websearch_to_tsquery('simple', :query)
+        ) lexical_rank,
+        0 path_match,
+        0 symbol_match,
+        0 fuzzy_match
+      FROM document_chunk c
+      WHERE :allow_text
+        AND c.lexical_search_vector
+          @@ websearch_to_tsquery('simple', :query)
+
+      UNION ALL
+
+      SELECT c.id chunk_id, 0 lexical_rank, 1 path_match, 0 symbol_match,
+        0 fuzzy_match
+      FROM document d
+      JOIN document_version v ON v.id = d.current_version_id
+      JOIN document_chunk c ON c.document_version_id = v.id
+      WHERE :allow_path
+        AND d.relative_path ILIKE :contains
+
+      UNION ALL
+
+      SELECT c.id chunk_id, 0 lexical_rank, 0 path_match, 1 symbol_match,
+        0 fuzzy_match
+      FROM document_chunk c
+      WHERE :allow_symbol
+        AND c.symbol_name IS NOT NULL
+        AND lower(c.symbol_name) = lower(:query)
+    ),
+    ranked AS (
+      SELECT chunk_id,
+        max(lexical_rank) lexical_rank,
+        max(path_match) path_match,
+        max(symbol_match) symbol_match,
+        max(fuzzy_match) fuzzy_match
+      FROM candidates
+      GROUP BY chunk_id
+    )
+    SELECT d.id document_id, v.id version_id, c.id chunk_id, r.name source_root,
+      d.canonical_path, d.relative_path, d.filename, c.heading_path, c.symbol_name,
+      c.start_line, c.end_line, c.content, c.content_hash, v.detected_at,
+      ranked.lexical_rank, ranked.path_match, ranked.symbol_match,
+      ranked.fuzzy_match
+    FROM ranked
+    JOIN document_chunk c ON c.id = ranked.chunk_id
+    JOIN document_version v ON v.id = c.document_version_id
+    JOIN document d ON d.current_version_id = v.id
+    JOIN source_root r ON r.id = d.source_root_id
+    WHERE d.state = 'active' AND r.data_scope = 'production'
+      AND (CAST(:source_root_id AS uuid) IS NULL
+           OR d.source_root_id = CAST(:source_root_id AS uuid))
+      AND (CAST(:project AS text) IS NULL OR d.project_key = CAST(:project AS text))
+      AND (CAST(:path_prefix AS text) IS NULL
+           OR lower(d.relative_path) LIKE lower(:path_filter))
+    ORDER BY ranked.symbol_match DESC, ranked.path_match DESC,
+      ranked.fuzzy_match DESC,
+      ranked.lexical_rank DESC, d.relative_path, c.chunk_index
+    LIMIT :limit
+    """
+)
+
+FUZZY_FALLBACK_SQL = text(
     """
     SELECT d.id document_id, v.id version_id, c.id chunk_id, r.name source_root,
       d.canonical_path, d.relative_path, d.filename, c.heading_path, c.symbol_name,
       c.start_line, c.end_line, c.content, c.content_hash, v.detected_at,
-      ts_rank_cd(c.lexical_search_vector, websearch_to_tsquery('simple', :query)) lexical_rank,
-      CASE WHEN lower(d.relative_path) LIKE lower(:prefix) THEN 1 ELSE 0 END path_match
+      word_similarity(:query, c.content) lexical_rank,
+      0 path_match, 0 symbol_match, 1 fuzzy_match
     FROM document_chunk c
     JOIN document_version v ON v.id = c.document_version_id
     JOIN document d ON d.current_version_id = v.id
@@ -27,14 +94,30 @@ LEXICAL_SQL = text(
       AND (CAST(:project AS text) IS NULL OR d.project_key = CAST(:project AS text))
       AND (CAST(:path_prefix AS text) IS NULL
            OR lower(d.relative_path) LIKE lower(:path_filter))
-      AND (
-        c.lexical_search_vector @@ websearch_to_tsquery('simple', :query)
-        OR lower(c.content) LIKE lower(:contains)
-        OR lower(d.relative_path) LIKE lower(:contains)
-        OR similarity(d.relative_path, :query) > 0.15
-        OR lower(coalesce(c.symbol_name, '')) = lower(:query)
-      )
-    ORDER BY path_match DESC, lexical_rank DESC, similarity(d.relative_path, :query) DESC
+      AND c.content %> :query
+    ORDER BY word_similarity(:query, c.content) DESC
+    LIMIT :limit
+    """
+)
+
+CONTENT_FALLBACK_SQL = text(
+    """
+    SELECT d.id document_id, v.id version_id, c.id chunk_id, r.name source_root,
+      d.canonical_path, d.relative_path, d.filename, c.heading_path, c.symbol_name,
+      c.start_line, c.end_line, c.content, c.content_hash, v.detected_at,
+      0 lexical_rank, 0 path_match, 0 symbol_match, 0 fuzzy_match
+    FROM document_chunk c
+    JOIN document_version v ON v.id = c.document_version_id
+    JOIN document d ON d.current_version_id = v.id
+    JOIN source_root r ON r.id = d.source_root_id
+    WHERE d.state = 'active' AND r.data_scope = 'production'
+      AND (CAST(:source_root_id AS uuid) IS NULL
+           OR d.source_root_id = CAST(:source_root_id AS uuid))
+      AND (CAST(:project AS text) IS NULL OR d.project_key = CAST(:project AS text))
+      AND (CAST(:path_prefix AS text) IS NULL
+           OR lower(d.relative_path) LIKE lower(:path_filter))
+      AND c.content ILIKE :contains
+    ORDER BY d.relative_path, c.chunk_index
     LIMIT :limit
     """
 )
@@ -87,9 +170,11 @@ def classify_confidence(
 def _params(request: SearchRequest) -> dict:
     return {
         "query": request.query,
-        "prefix": request.query + "%",
         "contains": "%" + request.query + "%",
         "limit": request.top_k * 3,
+        "allow_text": request.mode in {"keyword", "hybrid"},
+        "allow_path": request.mode in {"keyword", "hybrid", "path"},
+        "allow_symbol": request.mode in {"keyword", "hybrid", "symbol"},
         "source_root_id": str(request.source_root_id) if request.source_root_id else None,
         "project": request.project,
         "path_prefix": request.path_prefix,
@@ -101,10 +186,35 @@ def search(
     session: Session, request: SearchRequest, settings: Settings, embedder: Embedder | None = None
 ) -> SearchResponse:
     started = time.perf_counter()
+    session.execute(
+        text("SELECT set_config('statement_timeout', :timeout, true)"),
+        {"timeout": f"{settings.search_statement_timeout_ms}ms"},
+    )
     lexical_rows = []
     vector_rows = []
     if request.mode in {"keyword", "hybrid", "path", "symbol"}:
-        lexical_rows = list(session.execute(LEXICAL_SQL, _params(request)).mappings())
+        lexical_rows = list(
+            session.execute(INDEXED_LEXICAL_SQL, _params(request)).mappings()
+        )
+        if request.mode == "keyword" and not lexical_rows:
+            session.execute(
+                text("SET LOCAL pg_trgm.word_similarity_threshold = 0.15")
+            )
+            fallback_rows = list(
+                session.execute(FUZZY_FALLBACK_SQL, _params(request)).mappings()
+            )
+            indexed_chunk_ids = {row["chunk_id"] for row in lexical_rows}
+            lexical_rows.extend(
+                row for row in fallback_rows if row["chunk_id"] not in indexed_chunk_ids
+            )
+        if request.mode == "keyword" and not lexical_rows:
+            fallback_rows = list(
+                session.execute(CONTENT_FALLBACK_SQL, _params(request)).mappings()
+            )
+            indexed_chunk_ids = {row["chunk_id"] for row in lexical_rows}
+            lexical_rows.extend(
+                row for row in fallback_rows if row["chunk_id"] not in indexed_chunk_ids
+            )
     if request.mode in {"semantic", "hybrid"} and embedder is not None:
         vector = embedder.embed([request.query])[0]
         vector_rows = list(
@@ -125,7 +235,16 @@ def search(
         )
         item["fused"] += 1 / (rrf_k + rank)
         item["lex"] = float(row["lexical_rank"] or 0)
-        item["why"].append("keyword/path match")
+        if row["symbol_match"]:
+            item["why"].append("exact symbol match")
+        if row["path_match"]:
+            item["why"].append("path match")
+        if row["fuzzy_match"]:
+            item["why"].append("fuzzy content match")
+        elif row["lexical_rank"]:
+            item["why"].append("full-text match")
+        if not item["why"]:
+            item["why"].append("content fallback")
     for rank, row in enumerate(vector_rows, 1):
         similarity = float(row["vector_similarity"])
         if similarity < request.minimum_similarity:
