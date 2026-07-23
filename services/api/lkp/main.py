@@ -744,6 +744,7 @@ def workers(db: Session = Depends(get_db)) -> list[dict]:
             "current_job_id": row.current_job_id,
             "processed_count": row.processed_count,
             "failed_count": row.failed_count,
+            "metadata": row.metadata_json or {},
         }
         for row in rows
     ]

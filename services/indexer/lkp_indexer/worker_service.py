@@ -72,6 +72,9 @@ def run(deterministic: bool = False, once: bool = False) -> int:
                 break
             stopping.wait(1)
             continue
+        with SessionLocal() as session:
+            heartbeat(session, worker_id, "busy", job.id)
+            session.commit()
         renew_stop = threading.Event()
         renewer = threading.Thread(
             target=_renew_lease,

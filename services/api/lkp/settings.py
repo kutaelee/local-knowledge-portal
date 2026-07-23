@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     heartbeat_seconds: int = 10
     stale_after_seconds: int = 45
     reconciliation_seconds: int = 300
+    watch_debounce_ms: int = Field(default=750, ge=0)
+    watch_force_polling: bool = False
+    watch_polling_roots: str = ""
+    watch_poll_delay_ms: int = Field(default=2000, ge=1000)
+    watch_cpu_warning_percent: float = Field(default=50.0, ge=1.0)
+    watch_cpu_warning_samples: int = Field(default=3, ge=1)
+    watch_cpu_grace_seconds: int = Field(default=60, ge=0)
     file_stability_seconds: float = 0.5
     allowed_source_roots: list[Path] = Field(default_factory=list)
 
@@ -88,6 +95,14 @@ class Settings(BaseSettings):
     @property
     def hook_spool_roots(self) -> list[Path]:
         return [self.hook_spool_dir, self.hook_spool_fallback_dir]
+
+    @property
+    def watch_polling_root_set(self) -> set[str]:
+        return {
+            str(Path(item.strip()).resolve(strict=False))
+            for item in self.watch_polling_roots.replace(";", ",").split(",")
+            if item.strip()
+        }
 
 
 @lru_cache

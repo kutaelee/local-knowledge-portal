@@ -211,3 +211,26 @@ Rollback은 service와 Compose를 중지하고 E:의 derived DB directory를 별
 검증에서도 이동·이름 변경·삭제·수정하지 않았으므로 source rollback은 필요 없다.
 
 **최종 판정: VERIFIED**
+
+## 2026-07-23 WSL2 watcher CPU remediation
+
+- Baseline: watcher CPU remained at 70.82–100.73% with zero watcher events and zero new
+  jobs during the preceding 15 minutes.
+- Cause: watchfiles 1.1.1 automatically forced polling under the WSL2 kernel and repeatedly
+  traversed a 107,426-inode source root.
+- Design: per-root hybrid mode (`/home/kutae/src` native, `/data/vault` polling at 2,000 ms),
+  300-second reconciliation, polling interval guard, stable CPU telemetry heartbeat, and
+  live-event queue priority.
+- Verification: ruff passed; 22 unit tests passed; 6 dedicated-DB integration tests passed;
+  Next.js production build passed; WSL native bind probe exited 0; E: Vault
+  create/modify/rename/delete events were observed.
+- Steady state after startup grace: external watcher CPU 0.15–0.71%, internal 0.25–0.27%,
+  `healthy`, `cpu_alert=false`.
+- Knowledge promotion: candidate `c67e1f0a-58c6-42fc-ba89-3242220a1e9a` passed the evidence
+  gate and canonical case `0af5a147-dd2c-4718-80f0-4a9074c3c73a` was created.
+- Managed wiki: `/data/vault/_generated/Runbooks/WSL2-Docker-Watcher-CPU.md`; priority-20
+  ingest succeeded; keyword and hybrid retrieval returned source provenance.
+- Detailed evidence:
+  `docs/evidence/watcher-cpu-remediation-2026-07-23.md`.
+
+Verdict for this remediation: **VERIFIED**.

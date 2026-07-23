@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-compose_file=/mnt/c/Docker/local-knowledge-portal/compose.yaml
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+compose_file="$repo_root/infra/docker/compose.wsl.yaml"
 env_file=/mnt/c/Docker/local-knowledge-portal/.env
 
 if [[ ! -f "$compose_file" || ! -f "$env_file" ]]; then

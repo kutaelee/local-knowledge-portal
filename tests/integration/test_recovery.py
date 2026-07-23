@@ -92,6 +92,7 @@ async def test_watcher_coalesces_create_modify_rename_delete(database_url: str, 
             factory,
             root,
             debounce_ms=100,
+            force_polling=False,
             stability_seconds=0.05,
             stop_event=stop,
         )
@@ -117,6 +118,7 @@ async def test_watcher_coalesces_create_modify_rename_delete(database_url: str, 
         assert "watch_index" in job_types
         assert "watch_delete" in job_types
         assert len(jobs) <= 5
+        assert all(job.priority <= 20 for job in jobs)
         for job in jobs:
             if job.status in {JobStatus.pending, JobStatus.leased, JobStatus.processing}:
                 job.status = JobStatus.cancelled

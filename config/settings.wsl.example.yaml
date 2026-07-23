@@ -3,6 +3,13 @@ scanner:
   hash_chunk_bytes: 1048576
 watcher:
   debounce_ms: 750
+  force_polling: false
+  polling_roots:
+    - /data/vault
+  poll_delay_ms: 2000
+  cpu_warning_percent: 50
+  cpu_warning_samples: 3
+  cpu_grace_seconds: 60
   stability_wait_ms: 1000
 reconciler:
   interval_seconds: 900

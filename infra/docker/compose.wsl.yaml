@@ -5,7 +5,7 @@ x-app: &app
   build:
     context: ${LKP_REPO_PATH:?set LKP_REPO_PATH}
     dockerfile: infra/docker/Dockerfile.api
-  env_file: .env
+  env_file: ${LKP_ENV_FILE:-/mnt/c/Docker/local-knowledge-portal/.env}
   environment:
     LKP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     LKP_SOURCE_ROOTS_CONFIG: /config/source-roots.yaml
@@ -17,6 +17,12 @@ x-app: &app
     LKP_VAULT_DIR: /data/vault
     LKP_BACKUP_DIR: /backups
     LKP_OLLAMA_BASE_URL: http://ollama:11434
+    LKP_WATCH_FORCE_POLLING: ${LKP_WATCH_FORCE_POLLING:-false}
+    LKP_WATCH_POLLING_ROOTS: ${LKP_WATCH_POLLING_ROOTS:-/data/vault}
+    LKP_WATCH_POLL_DELAY_MS: ${LKP_WATCH_POLL_DELAY_MS:-2000}
+    LKP_WATCH_CPU_WARNING_PERCENT: ${LKP_WATCH_CPU_WARNING_PERCENT:-50}
+    LKP_WATCH_CPU_WARNING_SAMPLES: ${LKP_WATCH_CPU_WARNING_SAMPLES:-3}
+    LKP_WATCH_CPU_GRACE_SECONDS: ${LKP_WATCH_CPU_GRACE_SECONDS:-60}
   volumes:
     - ${LKP_CONFIG_ROOT:?set LKP_CONFIG_ROOT}:/config:ro
     - ${LKP_DATA_ROOT:?set LKP_DATA_ROOT}:/data

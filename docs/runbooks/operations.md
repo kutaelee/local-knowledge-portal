@@ -51,6 +51,23 @@ An interrupted processing job becomes claimable after `lease_expires_at`. Failed
 
 Treat file events as hints. If watchfiles fails, stop only the watcher and run reconciliation/scan. Do not touch source files. After Windows suspend/resume, run reconciliation before trusting freshness.
 
+The WSL2 Docker deployment deliberately uses per-root hybrid monitoring:
+
+- WSL ext4 roots such as `/home/kutae/src` use native filesystem notifications.
+- Windows bind-mounted roots such as `/data/vault` use bounded polling. Keep
+  `LKP_WATCH_POLL_DELAY_MS` at or above 1,000 ms; the default is 2,000 ms.
+- Reconciliation remains enabled even when native events appear healthy.
+
+In Operations → Workers, inspect the stable `watcher-service` row. Normal state is `healthy`
+with `cpu_alert=false`; its metadata shows `root_watch_modes` and `process_cpu_percent`.
+After the startup grace period, three consecutive samples at or above the configured 50%
+threshold set the row to `error` and emit `watcher_cpu_alert_changed`.
+
+If the alert fires, inspect source-root inode growth, accidental force-polling settings,
+poll delay, and high-churn generated directories. Do not globally force polling for a large
+WSL root. Use `scripts/watchfiles-bind-probe.py` to verify event delivery on a test bind mount,
+then confirm missed events are recovered by reconciliation.
+
 ## Embedding incident
 
 If Ollama is unavailable, new embedding jobs fail and retry; keyword retrieval over already indexed content remains available. A dimension mismatch is a hard failure. Correct the configured model/dimension or create a new embedding revision and explicitly reindex.

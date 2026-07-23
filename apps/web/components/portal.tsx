@@ -354,6 +354,10 @@ function Operations() {
     queryFn: () => api<Array<{
       worker_id: string; hostname: string; state: string; last_seen_at: string;
       current_job_id: string | null; processed_count: number; failed_count: number;
+      metadata: {
+        watch_mode?: string; process_cpu_percent?: number; cpu_alert?: boolean;
+        cpu_warning_percent?: number; reconciliation_seconds?: number;
+      };
     }>>("/api/v1/workers"),
     refetchInterval: 5000,
   });
@@ -400,10 +404,18 @@ function Operations() {
       </div>}
       {tab === "workers" && <div className="panel table-wrap">
         <table><thead><tr><th>Worker</th><th>Host</th><th>State</th>
-          <th>Heartbeat</th><th>Processed</th><th>Failed</th></tr></thead>
+          <th>Mode</th><th>CPU</th><th>Heartbeat</th><th>Processed</th><th>Failed</th></tr></thead>
           <tbody>{workers.data?.map((worker) => <tr key={worker.worker_id}>
             <td className="mono">{worker.worker_id}</td><td>{worker.hostname}</td>
             <td><Status value={worker.state} /></td>
+            <td>{worker.metadata.watch_mode ?? "—"}</td>
+            <td title={worker.metadata.cpu_alert
+              ? `Warning threshold: ${worker.metadata.cpu_warning_percent ?? "?"}%`
+              : undefined}>
+              {typeof worker.metadata.process_cpu_percent === "number"
+                ? `${worker.metadata.process_cpu_percent.toFixed(2)}%`
+                : "—"}
+            </td>
             <td>{new Date(worker.last_seen_at).toLocaleString()}</td>
             <td>{worker.processed_count}</td><td>{worker.failed_count}</td>
           </tr>)}</tbody></table>

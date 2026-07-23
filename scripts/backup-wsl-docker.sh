@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-compose_file=/mnt/c/Docker/local-knowledge-portal/compose.yaml
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+compose_file="$repo_root/infra/docker/compose.wsl.yaml"
 env_file=/mnt/c/Docker/local-knowledge-portal/.env
 backup_root=/mnt/d/LocalBackup/LocalKnowledgePortal
 stamp=$(date -u +%Y-%m-%dT%H%M%SZ)
@@ -51,7 +52,7 @@ manifest = {
     "dump_size": int(${dump_size@Q}),
     "sha256": ${dump_sha@Q},
     "model": ${model@Q},
-    "compose_path": "C:\\\\Docker\\\\local-knowledge-portal\\\\compose.yaml",
+    "compose_path": ${compose_file@Q},
     "data_path": "E:\\\\Data\\\\LocalKnowledgePortal",
 }
 with open(sys.argv[1], "w", encoding="utf-8") as handle:

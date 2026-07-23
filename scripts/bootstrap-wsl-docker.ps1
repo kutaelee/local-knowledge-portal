@@ -44,8 +44,6 @@ $Directories = @(
 )
 New-Item -ItemType Directory -Force -Path $Directories | Out-Null
 
-Copy-Item -LiteralPath (Join-Path $RepoWindows 'infra\docker\compose.wsl.yaml') `
-  -Destination (Join-Path $DockerRoot 'compose.yaml') -Force
 Copy-Item -LiteralPath (Join-Path $RepoWindows 'scripts\codex-hook-standalone.ps1') `
   -Destination (Join-Path $HookRoot 'codex-hook.ps1') -Force
 
@@ -108,6 +106,6 @@ $env:LKP_RUNTIME_DIR = Join-Path $DataRoot 'runtime'
 & (Join-Path $RepoWindows 'scripts\install-codex-hook.ps1')
 
 Write-Host "WSL repository: $RepoLinux"
-Write-Host "Compose definition: $(Join-Path $DockerRoot 'compose.yaml')"
+Write-Host "Compose definition: $RepoLinux/infra/docker/compose.wsl.yaml"
 Write-Host "Data: $DataRoot"
 Write-Host "Backup: $BackupRoot"

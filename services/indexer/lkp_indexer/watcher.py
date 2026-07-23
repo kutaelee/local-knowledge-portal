@@ -48,6 +48,8 @@ async def watch_root(
     source_root: SourceRoot,
     *,
     debounce_ms: int = 750,
+    force_polling: bool = False,
+    poll_delay_ms: int = 2000,
     stability_seconds: float = 0.5,
     max_file_bytes: int = 10 * 1024 * 1024,
     stop_event: asyncio.Event | None = None,
@@ -57,6 +59,8 @@ async def watch_root(
     async for changes in awatch(
         root,
         debounce=debounce_ms,
+        force_polling=force_polling,
+        poll_delay_ms=poll_delay_ms,
         stop_event=stop_event,
         recursive=True,
     ):
@@ -122,14 +126,14 @@ async def watch_root(
                     key = idempotency_key(
                         str(source_root.id), key_path, info.st_size, info.st_mtime_ns
                     )
-                    priority = 20 if old_path else 100
+                    priority = 10 if old_path else 20
                 else:
                     if canonical in renamed_from:
                         continue
                     key = idempotency_key(str(source_root.id), canonical, 0, 0)
                     job_type = "watch_delete"
                     details = {}
-                    priority = 100
+                    priority = 20
                 enqueue(
                     session,
                     key=key,
