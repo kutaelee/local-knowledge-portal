@@ -5,7 +5,7 @@ import uuid
 from lkp.db import SessionLocal
 from lkp.settings import get_settings
 
-from .embedding import DeterministicTestEmbedder, OllamaEmbedder
+from .embedding import DeterministicTestEmbedder, OllamaEmbedder, RateLimitedEmbedder
 from .queue import lease
 from .scanner import register_roots, scan_root
 from .worker import process_job
@@ -14,11 +14,15 @@ from .worker import process_job
 def get_embedder(settings, deterministic: bool):
     if deterministic:
         return DeterministicTestEmbedder(settings.embedding_dimension)
-    return OllamaEmbedder(
-        settings.ollama_base_url,
-        settings.embedding_model,
-        settings.embedding_model_digest,
-        settings.embedding_dimension,
+    return RateLimitedEmbedder(
+        OllamaEmbedder(
+            settings.ollama_base_url,
+            settings.embedding_model,
+            settings.embedding_model_digest,
+            settings.embedding_dimension,
+        ),
+        settings.embedding_batch_size,
+        settings.embedding_batch_cooldown_seconds,
     )
 
 

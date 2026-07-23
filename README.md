@@ -108,6 +108,12 @@ Production embedding uses Ollama `qwen3-embedding:0.6b`, digest
 digest mismatch fails closed. Model changes require a new revision; vectors are never silently
 mixed. Tests use a separate deterministic revision.
 
+The WSL2 runtime keeps embedding thermally bounded: Ollama has a two-CPU Docker quota, the worker
+has a one-CPU quota, model concurrency is one, requests use small batches, and worker job/burst
+cooldowns prevent an initial scan backlog from saturating every core. Operators can create
+`E:\Data\LocalKnowledgePortal\runtime\embedding.pause` to stop new leases while keeping the portal
+and lexical search online. See the operations runbook before changing these defaults.
+
 ## Tests
 
 ```bash
@@ -136,6 +142,7 @@ See:
 - [Retrieval baseline](docs/evidence/retrieval-evaluation.md)
 - [Validation evidence](docs/evidence/validation-report.md)
 - [WSL2 transition evidence](docs/evidence/wsl2-transition-report.md)
+- [Ollama CPU remediation](docs/evidence/ollama-embedding-cpu-remediation-2026-07-23.md)
 - [Known limitations](docs/known-limitations.md)
 - [Backlog](docs/backlog.md)
 

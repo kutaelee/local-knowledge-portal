@@ -19,6 +19,12 @@ worker:
   lease_seconds: 120
   max_attempts: 5
   retry_base_seconds: 2
+  embedding_batch_size: 2
+  embedding_batch_cooldown_seconds: 0.5
+  job_cooldown_seconds: 1
+  burst_jobs: 20
+  burst_cooldown_seconds: 15
+  pause_file: "/data/runtime/embedding.pause"
 chunking:
   max_chars: 6000
   overlap_lines: 8

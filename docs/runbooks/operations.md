@@ -72,6 +72,42 @@ then confirm missed events are recovered by reconciliation.
 
 If Ollama is unavailable, new embedding jobs fail and retry; keyword retrieval over already indexed content remains available. A dimension mismatch is a hard failure. Correct the configured model/dimension or create a new embedding revision and explicitly reindex.
 
+### CPU and thermal guard
+
+The WSL2 Compose deployment applies a hard two-CPU quota to Ollama and a one-CPU quota to the
+worker. Do not remove these limits to accelerate an initial scan. Throughput is intentionally
+bounded with two-chunk embedding batches, inter-batch and inter-job delays, and a 20-job burst
+cooldown.
+
+Inspect the effective cgroup limits and current load:
+
+```powershell
+docker inspect -f '{{.Name}} NanoCpus={{.HostConfig.NanoCpus}} Memory={{.HostConfig.Memory}}' `
+  local-knowledge-portal-ollama-1 local-knowledge-portal-worker-1
+docker stats --no-stream local-knowledge-portal-ollama-1 `
+  local-knowledge-portal-worker-1 local-knowledge-portal-watcher-1
+```
+
+If temperature or total CPU remains unsafe, stop only model ingestion:
+
+```powershell
+docker stop --timeout 20 local-knowledge-portal-worker-1 `
+  local-knowledge-portal-ollama-1
+```
+
+API, PostgreSQL, web, watcher, lexical search, and raw Codex spooling remain available. To pause
+before the next lease without stopping containers, atomically create
+`E:\Data\LocalKnowledgePortal\runtime\embedding.pause`. The worker heartbeat changes to `paused`.
+Delete only that exact operator-created file to resume.
+
+The expected worker heartbeat metadata includes `resource_guard_enabled=true`, batch and cooldown
+values, and `pause_requested`. During a long job, both `last_seen_at` and `lease_expires_at` must
+continue advancing. If either stalls, stop the worker and inspect transaction locks before adding
+another worker.
+
+Detailed evidence:
+`docs/evidence/ollama-embedding-cpu-remediation-2026-07-23.md`.
+
 ## Shutdown
 
 Stop worker loops gracefully so their current transaction rolls back and lease recovery can occur.

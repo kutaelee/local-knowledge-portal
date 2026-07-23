@@ -245,3 +245,39 @@ Verdict for this remediation: **VERIFIED**.
   source file, backup, document, or embedding was removed.
 - Cleanup verification: validation-path jobs `cancelled=5`, no matching pending jobs, no
   stopped one-off containers, API readiness true, watcher CPU 0.13%.
+
+## 2026-07-23 Ollama embedding CPU and lease remediation
+
+- User-reported CPU package temperature: 92°C. The available Windows ACPI provider did not expose
+  a sensor, so this remains reported rather than verified evidence.
+- Verified cause: Ollama measured 1503.60% Docker CPU with no cgroup limit; host CPU was 61.745%.
+  The worker submitted unbounded document-level embedding batches with no job/burst cooling while
+  2,455 jobs were pending. The watcher was only 0.38%.
+- Additional correctness defect: the long processing transaction locked the job and heartbeat
+  rows, blocking lease renewal and risking duplicate processing after lease expiry.
+- Implemented:
+  - Ollama 2-CPU/6-GiB/256-PID hard limit and worker 1-CPU/1-GiB/256-PID hard limit;
+  - Ollama concurrency one and bounded internal request queue;
+  - two-chunk embedding batches, 0.5-second inter-batch delay, one-second job delay, and
+    15-second cooldown after each 20-job burst;
+  - operator pause file and worker heartbeat resource-policy metadata;
+  - processing/lease transaction separation so heartbeat and lease renewal continue during
+    long embeddings.
+- Verification:
+  - `docker inspect`: Ollama `NanoCpus=2000000000`, worker `NanoCpus=1000000000`;
+  - Ollama post-fix samples `80.74–201.85%`, host `18.1–22.5%`, watcher `0.15–0.73%`;
+  - a live job's heartbeat and lease expiry both advanced 20 seconds across a 20-second sample;
+  - ruff passed, 24 unit tests passed, 6 dedicated-DB integration tests passed;
+  - Next.js production build and TypeScript validation passed;
+  - temporary test container and named volume removed.
+- Knowledge promotion: candidate `60e1b128-33f7-4dbf-a0a2-bac6d341ae16`,
+  evidence gate `VERIFIED`, canonical case `2ca980f8-1dfa-40be-b7eb-65756cc6be78`,
+  outcome `CREATED_CANONICAL`.
+- Managed wiki `_generated/Runbooks/Ollama-Embedding-CPU-Guard.md` was indexed by a priority-20
+  job on attempt one: active document, 9 chunks, 9 production embeddings. Hybrid retrieval
+  returned keyword/path and semantic reasons with line-level provenance and similarity 0.9616.
+- No source file, backup, document history, embedding, or audit row was deleted.
+- Detailed evidence:
+  `docs/evidence/ollama-embedding-cpu-remediation-2026-07-23.md`.
+
+Verdict for this remediation: **VERIFIED**, excluding long-duration thermal/endurance testing.

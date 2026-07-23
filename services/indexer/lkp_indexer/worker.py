@@ -14,7 +14,6 @@ from lkp.models import (
     DocumentVersion,
     IngestEvent,
     IngestJob,
-    JobStatus,
     SourceRoot,
     WorkerHeartbeat,
 )
@@ -40,6 +39,7 @@ def heartbeat(
     *,
     success: bool = False,
     failure: bool = False,
+    metadata: dict | None = None,
 ) -> None:
     row = session.get(WorkerHeartbeat, worker_id)
     if row is None:
@@ -59,6 +59,7 @@ def heartbeat(
     row.current_job_id = job_id
     row.processed_count += int(success)
     row.failed_count += int(failure)
+    row.metadata_json = {**(row.metadata_json or {}), **(metadata or {})}
 
 
 def _embed_missing(
@@ -117,9 +118,6 @@ def process_job(
     embedder: Embedder | None,
     worker_id: str,
 ) -> None:
-    heartbeat(session, worker_id, "busy", job.id)
-    job.status = JobStatus.processing
-    session.flush()
     try:
         root = session.get(SourceRoot, job.source_root_id)
         if root is None or not root.enabled:
@@ -207,7 +205,6 @@ def process_job(
             change_type = "created"
         else:
             change_type = "restored" if existing.state == DocumentState.deleted else "modified"
-        job.document_id = existing.id
         existing.last_seen_at = _utcnow()
         existing.modified_at_fs = modified
         existing.size_bytes = info.st_size
@@ -217,6 +214,7 @@ def process_job(
                 current_version = session.get(DocumentVersion, existing.current_version_id)
                 if current_version:
                     _embed_missing(session, current_version, settings, embedder)
+            job.document_id = existing.id
             finish(session, job)
             heartbeat(session, worker_id, "idle", success=True)
             return
@@ -231,6 +229,7 @@ def process_job(
             existing.current_version_id = duplicate.id
             if embedder:
                 _embed_missing(session, duplicate, settings, embedder)
+            job.document_id = existing.id
             finish(session, job)
             heartbeat(session, worker_id, "idle", success=True)
             return
@@ -290,6 +289,7 @@ def process_job(
                 )
         existing.current_content_hash = digest
         existing.current_version_id = version.id
+        job.document_id = existing.id
         session.add(
             IngestEvent(
                 source_root_id=root.id,

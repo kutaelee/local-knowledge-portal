@@ -357,6 +357,8 @@ function Operations() {
       metadata: {
         watch_mode?: string; process_cpu_percent?: number; cpu_alert?: boolean;
         cpu_warning_percent?: number; reconciliation_seconds?: number;
+        resource_guard_enabled?: boolean; pause_requested?: boolean;
+        embedding_batch_size?: number; burst_jobs?: number;
       };
     }>>("/api/v1/workers"),
     refetchInterval: 5000,
@@ -404,11 +406,18 @@ function Operations() {
       </div>}
       {tab === "workers" && <div className="panel table-wrap">
         <table><thead><tr><th>Worker</th><th>Host</th><th>State</th>
-          <th>Mode</th><th>CPU</th><th>Heartbeat</th><th>Processed</th><th>Failed</th></tr></thead>
+          <th>Mode</th><th>Guard</th><th>CPU</th><th>Heartbeat</th><th>Processed</th><th>Failed</th></tr></thead>
           <tbody>{workers.data?.map((worker) => <tr key={worker.worker_id}>
             <td className="mono">{worker.worker_id}</td><td>{worker.hostname}</td>
             <td><Status value={worker.state} /></td>
             <td>{worker.metadata.watch_mode ?? "—"}</td>
+            <td title={worker.metadata.resource_guard_enabled
+              ? `Batch ${worker.metadata.embedding_batch_size ?? "?"}, burst ${worker.metadata.burst_jobs ?? "?"}`
+              : undefined}>
+              {worker.metadata.pause_requested
+                ? "PAUSED"
+                : worker.metadata.resource_guard_enabled ? "ENABLED" : "—"}
+            </td>
             <td title={worker.metadata.cpu_alert
               ? `Warning threshold: ${worker.metadata.cpu_warning_percent ?? "?"}%`
               : undefined}>

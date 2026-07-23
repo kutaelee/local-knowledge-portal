@@ -1,6 +1,8 @@
 import hashlib
 import math
 import random
+import time
+from collections.abc import Callable
 from typing import Protocol
 
 import httpx
@@ -42,6 +44,40 @@ class OllamaEmbedder:
                 f"configured dimension {self.dimension}, provider returned {actual}; "
                 "reindex required"
             )
+        return vectors
+
+
+class RateLimitedEmbedder:
+    """Bound each model request and introduce deterministic cooling between batches."""
+
+    def __init__(
+        self,
+        delegate: Embedder,
+        batch_size: int,
+        cooldown_seconds: float,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if batch_size < 1:
+            raise ValueError("embedding batch size must be at least one")
+        if cooldown_seconds < 0:
+            raise ValueError("embedding cooldown cannot be negative")
+        self.delegate = delegate
+        self.batch_size = batch_size
+        self.cooldown_seconds = cooldown_seconds
+        self.sleep = sleep
+        self.provider = delegate.provider
+        self.model = delegate.model
+        self.digest = delegate.digest
+        self.dimension = delegate.dimension
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for offset in range(0, len(texts), self.batch_size):
+            batch = texts[offset : offset + self.batch_size]
+            vectors.extend(self.delegate.embed(batch))
+            if offset + self.batch_size < len(texts) and self.cooldown_seconds:
+                self.sleep(self.cooldown_seconds)
         return vectors
 
 

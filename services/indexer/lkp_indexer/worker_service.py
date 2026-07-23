@@ -7,7 +7,9 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import structlog
 from lkp.db import SessionLocal
+from lkp.logging import configure_logging
 from lkp.models import IngestJob, JobStatus, WorkerHeartbeat
 from lkp.settings import get_settings
 from sqlalchemy import update
@@ -16,6 +18,20 @@ from .cli import get_embedder
 from .queue import lease
 from .service_runtime import service_pid
 from .worker import heartbeat, process_job
+
+logger = structlog.get_logger()
+
+
+def _resource_policy(settings) -> dict:
+    return {
+        "embedding_batch_size": settings.embedding_batch_size,
+        "embedding_batch_cooldown_seconds": settings.embedding_batch_cooldown_seconds,
+        "job_cooldown_seconds": settings.worker_job_cooldown_seconds,
+        "burst_jobs": settings.worker_burst_jobs,
+        "burst_cooldown_seconds": settings.worker_burst_cooldown_seconds,
+        "pause_file": str(settings.worker_pause_file),
+        "resource_guard_enabled": True,
+    }
 
 
 def _renew_lease(
@@ -58,10 +74,47 @@ def run(deterministic: bool = False, once: bool = False) -> int:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
     embedder = get_embedder(settings, deterministic)
+    policy = _resource_policy(settings)
+    jobs_in_burst = 0
+    pause_logged = False
+    logger.info("worker_resource_policy", **policy)
     while not stopping.is_set():
+        if settings.worker_pause_file.exists():
+            try:
+                with SessionLocal() as session:
+                    heartbeat(
+                        session,
+                        worker_id,
+                        "paused",
+                        metadata={
+                            **policy,
+                            "pause_requested": True,
+                            "pause_reason": "operator_pause_file",
+                        },
+                    )
+                    session.commit()
+            except Exception:
+                pass
+            if not pause_logged:
+                logger.warning(
+                    "worker_paused",
+                    pause_file=str(settings.worker_pause_file),
+                    reason="operator_pause_file",
+                )
+                pause_logged = True
+            stopping.wait(settings.worker_pause_poll_seconds)
+            continue
+        if pause_logged:
+            logger.info("worker_resumed", pause_file=str(settings.worker_pause_file))
+            pause_logged = False
         try:
             with SessionLocal() as session:
-                heartbeat(session, worker_id, "idle")
+                heartbeat(
+                    session,
+                    worker_id,
+                    "idle",
+                    metadata={**policy, "pause_requested": False},
+                )
                 job = lease(session, worker_id, settings.lease_seconds)
                 session.commit()
         except Exception:
@@ -73,7 +126,13 @@ def run(deterministic: bool = False, once: bool = False) -> int:
             stopping.wait(1)
             continue
         with SessionLocal() as session:
-            heartbeat(session, worker_id, "busy", job.id)
+            heartbeat(
+                session,
+                worker_id,
+                "busy",
+                job.id,
+                metadata={**policy, "pause_requested": False},
+            )
             session.commit()
         renew_stop = threading.Event()
         renewer = threading.Thread(
@@ -93,6 +152,11 @@ def run(deterministic: bool = False, once: bool = False) -> int:
                 with SessionLocal() as session:
                     current = session.get(IngestJob, job.id)
                     if current:
+                        current.status = JobStatus.processing
+                        session.commit()
+                with SessionLocal() as session:
+                    current = session.get(IngestJob, job.id)
+                    if current:
                         try:
                             process_job(session, current, settings, embedder, worker_id)
                         except Exception:
@@ -106,6 +170,32 @@ def run(deterministic: bool = False, once: bool = False) -> int:
             renewer.join(timeout=2)
         if once:
             break
+        jobs_in_burst += 1
+        if jobs_in_burst >= settings.worker_burst_jobs:
+            try:
+                with SessionLocal() as session:
+                    heartbeat(
+                        session,
+                        worker_id,
+                        "cooldown",
+                        metadata={
+                            **policy,
+                            "pause_requested": False,
+                            "cooldown_reason": "burst_limit",
+                        },
+                    )
+                    session.commit()
+            except Exception:
+                pass
+            logger.info(
+                "worker_burst_cooldown",
+                completed_jobs=jobs_in_burst,
+                cooldown_seconds=settings.worker_burst_cooldown_seconds,
+            )
+            stopping.wait(settings.worker_burst_cooldown_seconds)
+            jobs_in_burst = 0
+        else:
+            stopping.wait(settings.worker_job_cooldown_seconds)
     try:
         with SessionLocal() as session:
             heartbeat(session, worker_id, "stopped")
@@ -116,6 +206,7 @@ def run(deterministic: bool = False, once: bool = False) -> int:
 
 
 def main() -> int:
+    configure_logging("worker")
     parser = argparse.ArgumentParser()
     parser.add_argument("--deterministic-test-embedding", action="store_true")
     parser.add_argument("--once", action="store_true")
