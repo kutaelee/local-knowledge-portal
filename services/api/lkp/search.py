@@ -29,6 +29,7 @@ LEXICAL_SQL = text(
            OR lower(d.relative_path) LIKE lower(:path_filter))
       AND (
         c.lexical_search_vector @@ websearch_to_tsquery('simple', :query)
+        OR lower(c.content) LIKE lower(:contains)
         OR lower(d.relative_path) LIKE lower(:contains)
         OR similarity(d.relative_path, :query) > 0.15
         OR lower(coalesce(c.symbol_name, '')) = lower(:query)

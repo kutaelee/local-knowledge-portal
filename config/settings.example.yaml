@@ -19,6 +19,18 @@ chunking:
   chunker_version: "lkp-heading-symbol-v1"
 pipeline:
   version: "1.0.0"
+codex_capture:
+  enabled: true
+  source: "%USERPROFILE%\\.codex\\sessions"
+  managed_output: "E:\\LocalKnowledgePortal\\vault\\_generated\\codex-sessions"
+  poll_seconds: 5
+  include_roles:
+    - user
+    - assistant
+  exclude_system_instructions: true
+  exclude_reasoning: true
+  exclude_tool_io: true
+  redact_likely_secrets: true
 search:
   default_top_k: 10
   minimum_similarity: 0.2

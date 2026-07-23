@@ -56,6 +56,28 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\scan.ps1
 uv run python -m lkp_indexer.cli work-once
 ```
 
+## Codex session capture
+
+Codex transcripts remain read-only under `%USERPROFILE%\.codex\sessions`. The capture process
+extracts only displayed user and assistant messages, redacts common secret shapes, and writes
+managed Markdown below `E:\LocalKnowledgePortal\vault\_generated\codex-sessions`. It excludes
+system/developer instructions, internal reasoning, and tool inputs/outputs.
+
+Start live capture with lexical indexing. Semantic embeddings stay explicitly pending when Ollama
+is unavailable:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-codex-capture.ps1 -Index
+```
+
+For turn-completion capture without polling, install the user-level Codex `Stop` hook. The
+installer refuses to overwrite an existing hook file. A new Codex session must review and trust
+non-managed hooks using `/hooks`, as required by Codex:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-codex-hook.ps1
+```
+
 Production embedding defaults to Ollama model `qwen3-embedding:0.6b`, dimension 1024. A provider response with a different dimension fails closed. Model changes require a new `LKP_EMBEDDING_REVISION`; vectors are never silently mixed.
 
 ## Tests

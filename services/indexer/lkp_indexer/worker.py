@@ -61,11 +61,60 @@ def heartbeat(
     row.failed_count += int(failure)
 
 
+def _embed_missing(
+    session: Session,
+    version: DocumentVersion,
+    settings: Settings,
+    embedder: Embedder,
+) -> None:
+    chunks = list(
+        session.scalars(
+            select(DocumentChunk)
+            .where(DocumentChunk.document_version_id == version.id)
+            .order_by(DocumentChunk.chunk_index)
+        )
+    )
+    if not chunks:
+        return
+    existing_chunk_ids = set(
+        session.scalars(
+            select(ChunkEmbedding.chunk_id).where(
+                ChunkEmbedding.embedding_revision == settings.embedding_revision,
+                ChunkEmbedding.chunk_id.in_([chunk.id for chunk in chunks]),
+            )
+        )
+    )
+    missing = [chunk for chunk in chunks if chunk.id not in existing_chunk_ids]
+    if not missing:
+        return
+    vectors = embedder.embed([chunk.content for chunk in missing])
+    if any(len(vector) != settings.embedding_dimension for vector in vectors):
+        raise RuntimeError("embedding dimension mismatch; pipeline stopped fail-closed")
+    for chunk, vector in zip(missing, vectors, strict=True):
+        session.add(
+            ChunkEmbedding(
+                chunk_id=chunk.id,
+                embedding_revision=settings.embedding_revision,
+                provider=embedder.provider,
+                model=embedder.model,
+                model_digest=embedder.digest,
+                dimension=embedder.dimension,
+                embedding=vector,
+            )
+        )
+    version.metadata_json = {
+        **version.metadata_json,
+        "embedding_revision": settings.embedding_revision,
+        "embedding_status": "complete",
+        "indexed_at": _utcnow().isoformat(),
+    }
+
+
 def process_job(
     session: Session,
     job: IngestJob,
     settings: Settings,
-    embedder: Embedder,
+    embedder: Embedder | None,
     worker_id: str,
 ) -> None:
     heartbeat(session, worker_id, "busy", job.id)
@@ -140,6 +189,10 @@ def process_job(
         existing.size_bytes = info.st_size
         existing.state = DocumentState.active
         if existing.current_content_hash == digest:
+            if embedder and existing.current_version_id:
+                current_version = session.get(DocumentVersion, existing.current_version_id)
+                if current_version:
+                    _embed_missing(session, current_version, settings, embedder)
             finish(session, job)
             heartbeat(session, worker_id, "idle", success=True)
             return
@@ -152,12 +205,14 @@ def process_job(
         if duplicate:
             existing.current_content_hash = digest
             existing.current_version_id = duplicate.id
+            if embedder:
+                _embed_missing(session, duplicate, settings, embedder)
             finish(session, job)
             heartbeat(session, worker_id, "idle", success=True)
             return
         chunks, parsed_metadata = chunk_document(canonical, content)
-        vectors = embedder.embed([chunk.content for chunk in chunks]) if chunks else []
-        if any(len(vector) != settings.embedding_dimension for vector in vectors):
+        vectors = embedder.embed([chunk.content for chunk in chunks]) if embedder and chunks else []
+        if embedder and any(len(vector) != settings.embedding_dimension for vector in vectors):
             raise RuntimeError("embedding dimension mismatch; pipeline stopped fail-closed")
         version = DocumentVersion(
             document_id=existing.id,
@@ -170,7 +225,8 @@ def process_job(
             metadata_json={
                 **parsed_metadata,
                 "pipeline_version": settings.pipeline_version,
-                "embedding_revision": settings.embedding_revision,
+                "embedding_revision": settings.embedding_revision if embedder else None,
+                "embedding_status": "complete" if embedder else "pending",
                 "indexed_at": _utcnow().isoformat(),
             },
             previous_version_id=existing.current_version_id,
@@ -179,7 +235,7 @@ def process_job(
         )
         session.add(version)
         session.flush()
-        for parsed, vector in zip(chunks, vectors, strict=True):
+        for index, parsed in enumerate(chunks):
             chunk = DocumentChunk(
                 document_version_id=version.id,
                 chunk_index=parsed.index,
@@ -196,17 +252,18 @@ def process_job(
             )
             session.add(chunk)
             session.flush()
-            session.add(
-                ChunkEmbedding(
-                    chunk_id=chunk.id,
-                    embedding_revision=settings.embedding_revision,
-                    provider=embedder.provider,
-                    model=embedder.model,
-                    model_digest=embedder.digest,
-                    dimension=embedder.dimension,
-                    embedding=vector,
+            if embedder:
+                session.add(
+                    ChunkEmbedding(
+                        chunk_id=chunk.id,
+                        embedding_revision=settings.embedding_revision,
+                        provider=embedder.provider,
+                        model=embedder.model,
+                        model_digest=embedder.digest,
+                        dimension=embedder.dimension,
+                        embedding=vectors[index],
+                    )
                 )
-            )
         existing.current_content_hash = digest
         existing.current_version_id = version.id
         session.add(
