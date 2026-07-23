@@ -35,7 +35,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .top-actions { justify-self: end; padding-right: 16px; display: flex; gap: 9px; align-items: center; }
 .health { display: flex; gap: 7px; align-items: center; color: var(--muted); font-size: 12px; }.health span { width: 7px; height: 7px; border-radius: 50%; }.health.ok span { background: var(--accent); box-shadow: 0 0 9px var(--accent); }.health.bad span { background: var(--danger); }
 .language-select { height: 34px; display: flex; align-items: center; gap: 5px; border: 1px solid var(--border); background: var(--panel); border-radius: 7px; padding: 0 7px; color: var(--muted); }
-.language-select select { max-width: 76px; border: 0; outline: 0; color: var(--text); background: transparent; cursor: pointer; font-size: 11px; }
+.language-select select { max-width: 76px; border: 0; outline: 0; color: var(--text); background: var(--panel); color-scheme: dark; cursor: pointer; font-size: 11px; }
+:root[data-theme="light"] .language-select select { color-scheme: light; }
+.language-select select option { color: var(--text); background: var(--panel); }
 .icon-button { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--border); background: var(--panel); border-radius: 7px; cursor: pointer; }
 .sidebar { grid-area: side; display: flex; flex-direction: column; justify-content: space-between; border-right: 1px solid var(--border); background: var(--panel); padding: 16px 10px; }
 .nav-heading, .eyebrow { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; margin: 0 8px 8px; }

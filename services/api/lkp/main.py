@@ -788,6 +788,7 @@ def timeline(limit: int = Query(100, le=500), db: Session = Depends(get_db)) -> 
 @app.get("/api/v1/metrics/summary")
 def metrics_summary(db: Session = Depends(get_db)) -> dict:
     now = datetime.now(timezone.utc)
+    queue_window_hours = 3
     counts = dict(
         db.execute(select(IngestJob.status, func.count()).group_by(IngestJob.status)).all()
     )
@@ -795,6 +796,29 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
         select(func.extract("epoch", func.now() - func.min(IngestJob.created_at))).where(
             IngestJob.status == JobStatus.pending
         )
+    )
+    succeeded_in_window = db.scalar(
+        select(func.count())
+        .select_from(IngestJob)
+        .where(
+            IngestJob.status == JobStatus.succeeded,
+            IngestJob.finished_at >= now - timedelta(hours=queue_window_hours),
+        )
+    ) or 0
+    failed_in_window = db.scalar(
+        select(func.count())
+        .select_from(IngestJob)
+        .where(
+            IngestJob.status.in_([JobStatus.failed, JobStatus.dead_letter]),
+            IngestJob.finished_at >= now - timedelta(hours=1),
+        )
+    ) or 0
+    queue_rate_per_hour = float(succeeded_in_window) / queue_window_hours
+    pending_count = int(counts.get(JobStatus.pending, 0))
+    queue_eta_seconds = (
+        pending_count / queue_rate_per_hour * 3600
+        if pending_count and queue_rate_per_hour > 0
+        else None
     )
     latest_indexed_at = db.scalar(
         select(func.max(DocumentVersion.detected_at))
@@ -939,6 +963,10 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
         ),
         "jobs": {key.value: value for key, value in counts.items()},
         "oldest_pending_seconds": float(oldest or 0),
+        "queue_rate_per_hour": queue_rate_per_hour,
+        "queue_eta_seconds": queue_eta_seconds,
+        "succeeded_last_3h": int(succeeded_in_window),
+        "failed_last_hour": int(failed_in_window),
         "workers": sum(
             count for state, count in worker_states.items() if state in active_worker_states
         ),

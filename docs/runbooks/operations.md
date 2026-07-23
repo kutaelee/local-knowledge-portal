@@ -25,7 +25,10 @@ API, or database. `scripts/start-hook-collector.ps1` imports raw envelopes idemp
 reported results separate from exit-code-backed verified results. Malformed, unsupported, and
 oversized envelopes are quarantined; a fallback spool is replayed after recovery.
 
-Ordinary work remains activity history and is not promoted to a wiki page. Create a knowledge
+Only meaningful instructions, changed files, failures, verification/operation commands, and
+reported outcomes become activity history. Session lifecycle, acknowledgements, and read-only
+inspection events remain compact `filtered_low_signal` spool records and do not appear as portal
+activities. Ordinary retained activity is still not promoted to a wiki page. Create a knowledge
 candidate explicitly and publish only after its category-specific evidence gate passes. Exact
 problem/root-cause/resolution duplicates add occurrences and revisions to the existing canonical
 case; uncertain similarity remains `NEEDS_REVIEW`.
@@ -46,6 +49,17 @@ stable. Generated summaries never satisfy an evidence gate without independent e
 ## Queue recovery
 
 An interrupted processing job becomes claimable after `lease_expires_at`. Failed jobs back off exponentially and become `dead_letter` after `max_attempts`. The UI retry action creates a new job whose `error_details.retry_of` points to the original.
+
+One source file is one durable job. Do not combine unrelated files merely to reduce the visible
+pending count: file-level jobs preserve idempotency and provenance. The portal distinguishes active
+backlog from cumulative completed history and estimates drain time from the preceding three hours.
+Ready and expired-lease partial indexes keep claims bounded as history grows.
+
+Before embedding, the worker applies `deterministic-knowledge-value-v1`. Generated tokenizer
+payloads are ignored. Lockfiles, minified/generated files, documents above 128 chunks, and documents
+above 250,000 characters are indexed lexically but receive
+`embedding_status=skipped_cost_limit`. Change these limits through configuration only after
+retrieval evaluation; do not remove the guard to make an initial scan appear faster.
 
 ## Watcher incident
 
@@ -104,6 +118,11 @@ The expected worker heartbeat metadata includes `resource_guard_enabled=true`, b
 values, and `pause_requested`. During a long job, both `last_seen_at` and `lease_expires_at` must
 continue advancing. If either stalls, stop the worker and inspect transaction locks before adding
 another worker.
+
+The Ollama container mount must resolve to
+`E:\AI\Models\Ollama -> /root/.ollama`. PostgreSQL remains in the Docker Desktop named volume on
+C:, application data/spool/vault remains on E:, and append-only backups remain on D:. Verify the
+effective mount with `docker inspect`; do not infer model placement from the Docker VHDX location.
 
 Detailed evidence:
 `docs/evidence/ollama-embedding-cpu-remediation-2026-07-23.md`.

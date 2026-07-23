@@ -310,3 +310,80 @@ Verdict for this remediation: **VERIFIED**, excluding long-duration thermal/endu
 
 Verdict for the localized dashboard: **VERIFIED** by production build, live API data, and interactive
 browser checks. The newly added Playwright CLI scenario remains **NOT_EXECUTED** in this pass.
+
+## 2026-07-23 full localization, knowledge-value filtering, and queue scale correction
+
+### Cause and implementation
+
+- The first localization pass covered the shell and overview only. Explorer, search, activity,
+  knowledge cases, operations, timeline, graph, document versions, table headers, statuses,
+  empty/error states, and evidence labels still contained English literals.
+- The first ingestion policy also treated every supported text payload as semantic knowledge. A
+  524,619-byte, 48,895-line generated tokenizer `merges.txt` held one file-level job for more than
+  34 minutes. The normal succeeded-job median was 1.16 seconds and p95 was 9.96 seconds.
+- All portal screens now follow the selected Korean/English locale. The native language select uses
+  the active theme; the verified dark computed style was background `rgb(16, 24, 32)`, foreground
+  `rgb(232, 238, 243)`, and `color-scheme: dark`.
+- `deterministic-knowledge-value-v1` now separates raw transport, meaningful activity, lexical
+  documents, semantic vectors, and evidence-gated canonical cases:
+  - lifecycle acknowledgements and read-only tool calls are `filtered_low_signal`;
+  - meaningful instructions, changed files, failures, verification/operation commands, and
+    reported outcomes become activity rows;
+  - generated tokenizer payloads are ignored;
+  - lockfiles, minified/generated files, documents over 128 chunks, and documents over 250,000
+    characters remain lexical-only with an explicit semantic skip reason.
+- One file remains one durable job for idempotency and provenance. Long work is bounded inside the
+  file unit. Ready-job, expired-lease, status-history, ingest-event, and hook-status indexes were
+  added in non-destructive migration `0003_queue_scale_indexes`.
+- The overview now labels completed jobs as cumulative audit history and reports recent three-hour
+  completions, measured hourly throughput, and estimated active-backlog drain time.
+- Reconciliation now reloads each `source_root` in its own session. This fixed the false two-hour
+  stale value while current `reconciled` events were being written.
+
+### Executed verification
+
+- `bash scripts/validate-container.sh .`: ruff passed; 26 unit tests passed.
+- Dedicated temporary PostgreSQL 18.4 + pgvector database:
+  `LKP_TEST_DATABASE_URL=... bash scripts/test-integration-container.sh .`: 7 integration tests
+  passed; clean schema revision was `0003_queue_scale_indexes`. The temporary container used tmpfs
+  and was removed after the run.
+- Docker Next.js 16.2.11 production build and TypeScript validation passed.
+- Live production migration reached `0003_queue_scale_indexes`; all three queue indexes and the
+  status-history index were present.
+- The known failed tokenizer job was promoted once for validation. It moved from `failed` to
+  `succeeded` immediately with an `ignored` event and reason `ignore_rule`; Ollama performed no
+  work for that file. Its prior failure and attempt history were retained.
+- The first post-deployment reconciliation classified all 20 previously active documents below
+  `tokenizer_configs` as `ignored`. Existing document versions, chunks, embeddings, and ingest
+  history were retained, while default retrieval now excludes those documents.
+- In-app browser checks passed for Korean overview, explorer, search, activity, knowledge cases,
+  operations, timeline, graph, English switching, Korean switching, queue rate/ETA content, and
+  dark-theme language control.
+- Live queue sample after final restart: pending 1,531; processing 1; cumulative succeeded 2,324;
+  succeeded in the previous three hours 2,004; measured rate 668.0 jobs/hour; estimated drain 2.29
+  hours. Cumulative succeeded rows are history, not active backlog.
+- Live resource sample after final restart: API 1.09%, watcher 0.24%, worker 0.41%, hook collector
+  0.00%, and Ollama 78.45%. Ollama remained within its 2-CPU quota and the worker within its 1-CPU
+  quota.
+
+### Filesystem and model placement
+
+- Repository: WSL ext4 `/home/kutae/src/local-knowledge-portal`.
+- Operational configuration: `C:\Docker\local-knowledge-portal`.
+- Runtime data/spool/vault: `E:\Data\LocalKnowledgePortal`.
+- Ollama model mount verified by `docker inspect`:
+  `/mnt/e/AI/Models/Ollama -> /root/.ollama`.
+- Installed model verified by `ollama list`: `qwen3-embedding:0.6b`, digest prefix
+  `ac6da0dfba84`, 639 MB. Host model files occupied 0.595 GiB under
+  `E:\AI\Models\Ollama`; the model is not stored as an application model copy on C:.
+- PostgreSQL is the documented exception: Docker named volume
+  `local-knowledge-portal_postgres-data` inside Docker Desktop's C: VHDX.
+- Append-only backups remain under `D:\LocalBackup\LocalKnowledgePortal`.
+
+The Playwright CLI suite was not rerun because the installed Windows pnpm runtime cannot safely run
+from the WSL UNC checkout. The new all-screen localization scenario remains committed and the same
+flow was executed through the in-app browser. No long-duration endurance or thermal soak was
+claimed.
+
+Verdict for this correction: **VERIFIED** for full localization, deterministic knowledge-value
+selection, migration, live queue behavior, filesystem placement, and interactive browser flow.

@@ -10,6 +10,7 @@ from lkp_indexer.codex_capture import (
     write_managed_page,
 )
 from lkp_indexer.generation import GenerationResult, KnowledgeEnrichment
+from lkp_indexer.hook_collector import activity_signal
 
 
 def _write_transcript(path: Path) -> None:
@@ -137,3 +138,33 @@ def test_enrichment_is_separate_and_identifies_local_model(tmp_path: Path):
     assert "generation_provider: ollama" in content
     assert "generation_model_digest: sha256:model-v1" in content
     assert "확인이 필요합니다" in content
+
+
+def test_activity_signal_filters_noise_and_keeps_reusable_evidence():
+    def envelope(event: str, **payload):
+        return {"event_name": event, "payload": {"hook_event_name": event, **payload}}
+
+    assert activity_signal(envelope("SessionStart")) == (False, ["lifecycle_only"])
+    assert activity_signal(envelope("UserPromptSubmit", prompt="?"))[0] is False
+    assert activity_signal(
+        envelope("UserPromptSubmit", prompt="검색 실패 원인을 찾아 재발하지 않게 수정해줘")
+    )[0] is True
+    assert activity_signal(
+        envelope(
+            "PostToolUse",
+            tool_name="shell_command",
+            tool_input={"command": "Get-ChildItem"},
+            exit_code=0,
+        )
+    )[0] is False
+    assert activity_signal(
+        envelope(
+            "PostToolUse",
+            tool_name="shell_command",
+            tool_input={"command": "pytest tests/unit"},
+            exit_code=0,
+        )
+    )[0] is True
+    assert activity_signal(
+        envelope("Stop", last_assistant_message="테스트를 실행하지 않고 성공이라고 보고했습니다.")
+    )[0] is True

@@ -171,5 +171,7 @@ async def reconciliation_loop(
             )
         except TimeoutError:
             with session_factory() as session:
-                reconcile_root(session, source_root, settings)
-                session.commit()
+                current_root = session.get(SourceRoot, source_root.id)
+                if current_root is not None and current_root.enabled:
+                    reconcile_root(session, current_root, settings)
+                    session.commit()

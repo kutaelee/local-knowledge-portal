@@ -21,6 +21,13 @@ DEFAULT_IGNORES = [
     "vendor/",
     "tmp/",
     "temp/",
+    # Generated tokenizer payloads are model artifacts rather than human knowledge.
+    # They can contain tens of thousands of merge/vocabulary records and otherwise
+    # monopolize a single embedding job for many minutes.
+    "**/tokenizer_configs/",
+    "**/tokenizer/merges.txt",
+    "**/tokenizer/vocab.json",
+    "**/tokenizer/tokenizer.json",
 ]
 
 

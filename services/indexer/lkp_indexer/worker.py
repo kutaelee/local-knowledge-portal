@@ -23,12 +23,46 @@ from sqlalchemy.orm import Session
 
 from .chunking import chunk_document
 from .embedding import Embedder
+from .ignore import IgnoreRules
 from .paths import canonicalize
 from .queue import fail, finish
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+LOW_VALUE_EMBEDDING_NAMES = {
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "uv.lock",
+    "poetry.lock",
+    "cargo.lock",
+    "go.sum",
+}
+
+
+def embedding_cost_decision(
+    chunks: list,
+    *,
+    max_chunks: int,
+    max_chars: int,
+    path: Path | None = None,
+) -> tuple[bool, str | None]:
+    if path is not None:
+        name = path.name.casefold()
+        if (
+            name in LOW_VALUE_EMBEDDING_NAMES
+            or ".min." in name
+            or ".generated." in name
+        ):
+            return False, "low_value_artifact"
+    if len(chunks) > max_chunks:
+        return False, "chunk_limit"
+    if sum(len(chunk.content) for chunk in chunks) > max_chars:
+        return False, "character_limit"
+    return True, None
 
 
 def heartbeat(
@@ -87,6 +121,22 @@ def _embed_missing(
     )
     missing = [chunk for chunk in chunks if chunk.id not in existing_chunk_ids]
     if not missing:
+        return
+    document = session.get(Document, version.document_id)
+    allowed, reason = embedding_cost_decision(
+        chunks,
+        max_chunks=settings.embedding_max_chunks_per_document,
+        max_chars=settings.embedding_max_chars_per_document,
+        path=Path(document.canonical_path) if document else None,
+    )
+    if not allowed:
+        version.metadata_json = {
+            **version.metadata_json,
+            "embedding_status": "skipped_cost_limit",
+            "embedding_skip_reason": reason,
+            "embedding_chunk_count": len(chunks),
+            "embedding_character_count": sum(len(chunk.content) for chunk in chunks),
+        }
         return
     vectors = embedder.embed([chunk.content for chunk in missing])
     if any(len(vector) != settings.embedding_dimension for vector in vectors):
@@ -176,6 +226,24 @@ def process_job(
             return
         canonical = canonicalize(path, root_path)
         info = canonical.stat()
+        relative = canonical.relative_to(root_path).as_posix()
+        if IgnoreRules(root_path, root.exclude_patterns).matches(relative):
+            if existing:
+                existing.state = DocumentState.ignored
+                existing.last_seen_at = _utcnow()
+                job.document_id = existing.id
+            session.add(
+                IngestEvent(
+                    source_root_id=root.id,
+                    document_id=existing.id if existing else None,
+                    event_type="ignored",
+                    path=str(canonical),
+                    details={"reason": "ignore_rule", "relative_path": relative},
+                )
+            )
+            finish(session, job)
+            heartbeat(session, worker_id, "idle", success=True)
+            return
         if info.st_size > settings.max_file_bytes:
             raise ValueError(f"file exceeds {settings.max_file_bytes} bytes")
         raw = canonical.read_bytes()
@@ -183,7 +251,6 @@ def process_job(
             raise ValueError("binary file rejected")
         content = raw.decode("utf-8")
         digest = hashlib.sha256(raw).hexdigest()
-        relative = canonical.relative_to(root_path).as_posix()
         modified = datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)
         if existing is None:
             project_key = relative.split("/", 1)[0] if "/" in relative else root.name
@@ -234,9 +301,27 @@ def process_job(
             heartbeat(session, worker_id, "idle", success=True)
             return
         chunks, parsed_metadata = chunk_document(canonical, content)
-        vectors = embedder.embed([chunk.content for chunk in chunks]) if embedder and chunks else []
-        if embedder and any(len(vector) != settings.embedding_dimension for vector in vectors):
+        embedding_allowed, embedding_skip_reason = embedding_cost_decision(
+            chunks,
+            max_chunks=settings.embedding_max_chunks_per_document,
+            max_chars=settings.embedding_max_chars_per_document,
+            path=canonical,
+        )
+        should_embed = bool(embedder and chunks and embedding_allowed)
+        vectors = embedder.embed([chunk.content for chunk in chunks]) if should_embed else []
+        if should_embed and any(
+            len(vector) != settings.embedding_dimension for vector in vectors
+        ):
             raise RuntimeError("embedding dimension mismatch; pipeline stopped fail-closed")
+        embedding_status = (
+            "complete"
+            if should_embed
+            else "skipped_cost_limit"
+            if embedder and chunks and not embedding_allowed
+            else "pending"
+            if not embedder and chunks
+            else "not_required"
+        )
         version = DocumentVersion(
             document_id=existing.id,
             content_hash=digest,
@@ -248,8 +333,12 @@ def process_job(
             metadata_json={
                 **parsed_metadata,
                 "pipeline_version": settings.pipeline_version,
-                "embedding_revision": settings.embedding_revision if embedder else None,
-                "embedding_status": "complete" if embedder else "pending",
+                "embedding_revision": settings.embedding_revision if should_embed else None,
+                "embedding_status": embedding_status,
+                "embedding_skip_reason": embedding_skip_reason,
+                "embedding_chunk_count": len(chunks),
+                "embedding_character_count": sum(len(chunk.content) for chunk in chunks),
+                "embedding_policy": "deterministic-knowledge-value-v1",
                 "indexed_at": _utcnow().isoformat(),
             },
             previous_version_id=existing.current_version_id,
@@ -275,7 +364,7 @@ def process_job(
             )
             session.add(chunk)
             session.flush()
-            if embedder:
+            if should_embed:
                 session.add(
                     ChunkEmbedding(
                         chunk_id=chunk.id,
@@ -296,7 +385,12 @@ def process_job(
                 document_id=existing.id,
                 event_type="indexed",
                 path=str(canonical),
-                details={"version_id": str(version.id), "chunks": len(chunks)},
+                details={
+                    "version_id": str(version.id),
+                    "chunks": len(chunks),
+                    "embedding_status": embedding_status,
+                    "embedding_skip_reason": embedding_skip_reason,
+                },
             )
         )
         finish(session, job)

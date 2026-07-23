@@ -171,3 +171,47 @@ def test_reconciliation_recovers_missed_delete(database_url: str, tmp_path: Path
         assert recovered is not None
         recovered.status = JobStatus.cancelled
         session.commit()
+
+
+def test_reconciliation_quarantines_newly_ignored_documents(
+    database_url: str, tmp_path: Path
+):
+    engine = create_engine(database_url)
+    settings = Settings(database_url=database_url)
+    generated = tmp_path / "tokenizer_configs" / "model" / "merges.txt"
+    generated.parent.mkdir(parents=True)
+    generated.write_text("generated merge records", encoding="utf-8")
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        root = SourceRoot(
+            name=f"ignore-{uuid.uuid4()}",
+            canonical_path=str(tmp_path),
+            source_type="validation",
+            data_scope="validation",
+            read_only=True,
+            enabled=True,
+            include_patterns=["**/*"],
+            exclude_patterns=[],
+        )
+        session.add(root)
+        session.flush()
+        document = Document(
+            source_root_id=root.id,
+            canonical_path=str(generated),
+            relative_path="tokenizer_configs/model/merges.txt",
+            filename="merges.txt",
+            extension=".txt",
+            mime_type="text/plain",
+            project_key="fixture",
+            parent_path="tokenizer_configs/model",
+            size_bytes=generated.stat().st_size,
+            modified_at_fs=now,
+            state=DocumentState.active,
+        )
+        session.add(document)
+        session.commit()
+        stats = reconcile_root(session, root, settings)
+        session.commit()
+        session.refresh(document)
+        assert stats.ignored == 1
+        assert document.state == DocumentState.ignored

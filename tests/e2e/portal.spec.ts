@@ -23,6 +23,20 @@ test("localized overview explains freshness and persists language", async ({ pag
   await expect(page.getByRole("heading", {
     name: "지금 무엇이 최신인지 한눈에 확인하세요.",
   })).toBeVisible();
+
+  const localizedScreens = [
+    ["문서 탐색", "프로젝트와 문서"],
+    ["검색", "원본 지식 검색"],
+    ["활동 이력", "활동 이력"],
+    ["지식 사례", "지식 사례"],
+    ["운영", "지속형 작업 큐"],
+    ["변경 타임라인", "변경 타임라인"],
+    ["지식 그래프", "지식 그래프"],
+  ] as const;
+  for (const [navigation, heading] of localizedScreens) {
+    await page.getByRole("button", { name: navigation, exact: true }).click();
+    await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
+  }
 });
 
 test("overview, explorer, document versions, and provenance", async ({ page, request }) => {
@@ -108,6 +122,7 @@ test("keyword, semantic, hybrid, failed retry, and worker heartbeat", async ({ p
   await expect(page.getByText("codex-capture", { exact: false }).first()).toBeVisible();
   await expect(page.getByText(/idle|stale|healthy/).first()).toBeVisible();
   await page.getByRole("button", { name: "Backups" }).click();
-  await expect(page.getByText("succeeded", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText(/D:\\Backups\\LocalKnowledgePortal/).first()).toBeVisible();
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(/D:\\(LocalBackup|Backups)\\LocalKnowledgePortal/).first())
+    .toBeVisible();
 });

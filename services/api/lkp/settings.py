@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     embedding_model_digest: str = "unresolved"
     embedding_batch_size: int = Field(default=2, ge=1, le=32)
     embedding_batch_cooldown_seconds: float = Field(default=0.5, ge=0, le=60)
+    embedding_max_chunks_per_document: int = Field(default=128, ge=1, le=4096)
+    embedding_max_chars_per_document: int = Field(
+        default=250_000, ge=1_000, le=100_000_000
+    )
     generation_provider: str = "disabled"
     generation_base_url: str = "http://127.0.0.1:11434"
     generation_model: str = ""
@@ -45,7 +49,7 @@ class Settings(BaseSettings):
     )
     hook_collector_poll_seconds: float = 2.0
     hook_claim_stale_seconds: int = 60
-    pipeline_version: str = "1.0.0"
+    pipeline_version: str = "1.1.0"
     parser_version: str = "markdown-it-py-4"
     chunker_version: str = "lkp-heading-symbol-v1"
     max_file_bytes: int = 10 * 1024 * 1024

@@ -98,7 +98,11 @@ const translations = {
       queue: "작업 큐",
       failed: "실패",
       processing: "처리 중",
-      succeeded: "완료",
+      succeeded: "누적 완료 이력",
+      recentSucceeded: "최근 3시간 완료",
+      queueRate: "시간당 처리량",
+      estimatedDrain: "예상 대기 해소",
+      estimateUnavailable: "산정 불가",
       oldestPending: "최장 대기",
       recentTitle: "최근 반영된 문서",
       recentHelp: "인덱스에 가장 최근 새 버전이 만들어진 문서입니다.",
@@ -121,6 +125,81 @@ const translations = {
       timelineNote: "관측된 파일 변경을 시간순 확인",
       never: "기록 없음",
       justNow: "방금",
+    },
+    explorer: {
+      eyebrow: "읽기 전용 탐색기",
+      title: "프로젝트와 문서",
+      visible: "표시 문서",
+      limited: "일부만 표시",
+      treeLabel: "소스 트리",
+      loadError: "소스 트리를 불러오지 못했습니다.",
+      emptyTitle: "인덱싱된 문서가 없습니다",
+      emptyDetail: "스캔과 worker를 실행하면 문서 트리가 채워집니다.",
+    },
+    searchView: {
+      eyebrow: "근거 기반 검색",
+      title: "원본 지식 검색",
+      subtitle: "모든 결과에 문서·버전·검색 단위·경로·원본 줄 출처가 포함됩니다.",
+      placeholder: "파일명, 오류, ADR, 심볼 또는 자연어…",
+      mode: "검색 방식",
+      modes: { hybrid: "하이브리드", keyword: "키워드", semantic: "의미", path: "경로", symbol: "심볼" },
+      submit: "검색",
+      results: "개 결과",
+      confidence: "신뢰도",
+      loadError: "검색에 실패했습니다. 의미 검색에는 Ollama가 필요하지만 키워드 검색은 계속 사용할 수 있습니다.",
+      emptyTitle: "근거가 있는 결과가 없습니다",
+      emptyDetail: "파일명, 경로 일부, 정확한 심볼 또는 더 넓은 표현으로 검색해 보세요.",
+      scores: { lexical: "키워드", vector: "의미", fused: "종합" },
+    },
+    operations: {
+      eyebrow: "운영",
+      title: "지속형 작업 큐",
+      subtitle: "재시도는 새 작업으로 기록되며 기존 이력은 보존됩니다.",
+      refresh: "새로고침",
+      tabs: { jobs: "작업", workers: "Worker", backups: "백업" },
+      headers: {
+        status: "상태", type: "유형", path: "경로", attempts: "시도",
+        error: "오류", worker: "Worker", host: "호스트", mode: "감시 방식",
+        guard: "부하 보호", cpu: "CPU", heartbeat: "Heartbeat",
+        processed: "처리", failed: "실패", created: "생성 시각",
+        revision: "리비전", checksum: "SHA-256",
+      },
+      retry: "재시도",
+      enabled: "적용",
+      paused: "일시 정지",
+      queueEmpty: "작업 이력이 없습니다",
+      queueEmptyDetail: "아직 생성된 수집 작업이 없습니다.",
+      noHeartbeat: "Worker heartbeat가 없습니다",
+      noHeartbeatDetail: "인덱서 worker를 시작하세요.",
+      noBackup: "백업 증거가 없습니다",
+      noBackupDetail: "백업 스크립트를 실행하세요.",
+    },
+    timelineView: {
+      eyebrow: "관측된 변경 이력",
+      title: "변경 타임라인",
+      subtitle: "파일시스템과 수집 파이프라인 이벤트를 최신순으로 표시합니다.",
+      system: "시스템 이벤트",
+      emptyTitle: "아직 이벤트가 없습니다",
+      emptyDetail: "인덱싱·실패·재시도 이력이 여기에 표시됩니다.",
+      events: {
+        reconciled: "전체 대조", indexed: "인덱싱 완료", watcher_batch: "파일 변경 감지",
+        ignored: "수집 제외", deleted: "삭제 감지", renamed: "이름 변경",
+        restored: "복원", failed: "처리 실패", retried: "재시도",
+      },
+    },
+    graphView: {
+      eyebrow: "문서 관계",
+      title: "지식 그래프",
+      subtitle: "범위를 제한해 브라우저가 무제한 데이터를 한 번에 그리지 않도록 합니다.",
+      emptyTitle: "링크 추출을 위한 그래프 어댑터가 준비되었습니다",
+      emptyDetail: "Markdown 위키링크와 문서 링크가 추출되면 표시됩니다. 기본 탐색은 문서 탐색과 검색을 사용합니다.",
+    },
+    statusLabels: {
+      healthy: "정상", succeeded: "완료", active: "활성", idle: "대기",
+      processing: "처리 중", busy: "처리 중", cooldown: "냉각 중",
+      paused: "일시 정지", pending: "대기", failed: "실패",
+      dead_letter: "격리", cancelled: "취소", stopped: "중지",
+      error: "오류", stale: "응답 지연", offline: "연결 안 됨",
     },
   },
   en: {
@@ -177,7 +256,11 @@ const translations = {
       queue: "Job queue",
       failed: "Failed",
       processing: "Processing",
-      succeeded: "Succeeded",
+      succeeded: "Cumulative history",
+      recentSucceeded: "Succeeded in 3h",
+      queueRate: "Hourly throughput",
+      estimatedDrain: "Estimated drain",
+      estimateUnavailable: "Unavailable",
       oldestPending: "Oldest pending",
       recentTitle: "Recently indexed documents",
       recentHelp: "Documents whose newest version most recently entered the index.",
@@ -200,6 +283,65 @@ const translations = {
       timelineNote: "Follow observed file changes",
       never: "No record",
       justNow: "just now",
+    },
+    explorer: {
+      eyebrow: "Read-only explorer", title: "Projects & documents",
+      visible: "visible documents", limited: "limited view", treeLabel: "Source tree",
+      loadError: "The source tree could not be loaded.",
+      emptyTitle: "No indexed documents",
+      emptyDetail: "Run a scan and worker to populate the tree.",
+    },
+    searchView: {
+      eyebrow: "Retrieval", title: "Search the source of truth",
+      subtitle: "Every result carries document, version, chunk, path, and line provenance.",
+      placeholder: "Filename, error, ADR, symbol, or natural language…",
+      mode: "Search mode",
+      modes: { hybrid: "Hybrid", keyword: "Keyword", semantic: "Semantic", path: "Path", symbol: "Symbol" },
+      submit: "Search", results: " results", confidence: "confidence",
+      loadError: "Search failed. Semantic mode requires Ollama; keyword mode remains available.",
+      emptyTitle: "No grounded result",
+      emptyDetail: "Try a filename, path segment, exact symbol, or broader wording.",
+      scores: { lexical: "lex", vector: "vec", fused: "rrf" },
+    },
+    operations: {
+      eyebrow: "Operations", title: "Durable queue",
+      subtitle: "Retries create a new auditable job; original history is retained.",
+      refresh: "Refresh", tabs: { jobs: "Jobs", workers: "Workers", backups: "Backups" },
+      headers: {
+        status: "Status", type: "Type", path: "Path", attempts: "Attempts",
+        error: "Error", worker: "Worker", host: "Host", mode: "Mode",
+        guard: "Guard", cpu: "CPU", heartbeat: "Heartbeat",
+        processed: "Processed", failed: "Failed", created: "Created",
+        revision: "Revision", checksum: "SHA-256",
+      },
+      retry: "Retry", enabled: "Enabled", paused: "Paused",
+      queueEmpty: "Queue is empty", queueEmptyDetail: "No ingest jobs have been created yet.",
+      noHeartbeat: "No worker heartbeat", noHeartbeatDetail: "Start the indexer worker.",
+      noBackup: "No backup evidence", noBackupDetail: "Run the backup script.",
+    },
+    timelineView: {
+      eyebrow: "Observed history", title: "Timeline",
+      subtitle: "Filesystem and pipeline events, newest first.", system: "system event",
+      emptyTitle: "No events yet",
+      emptyDetail: "Indexed, failed, and retried work will appear here.",
+      events: {
+        reconciled: "Reconciled", indexed: "Indexed", watcher_batch: "Watcher batch",
+        ignored: "Ignored", deleted: "Deleted", renamed: "Renamed",
+        restored: "Restored", failed: "Failed", retried: "Retried",
+      },
+    },
+    graphView: {
+      eyebrow: "Relationships", title: "Knowledge graph",
+      subtitle: "Scoped graph views prevent the browser from rendering an unbounded dataset.",
+      emptyTitle: "Graph adapter is ready for links",
+      emptyDetail: "Markdown wikilinks and document links will appear after link extraction. Explorer and search remain the primary navigation.",
+    },
+    statusLabels: {
+      healthy: "Healthy", succeeded: "Succeeded", active: "Active", idle: "Idle",
+      processing: "Processing", busy: "Busy", cooldown: "Cooldown",
+      paused: "Paused", pending: "Pending", failed: "Failed",
+      dead_letter: "Dead letter", cancelled: "Cancelled", stopped: "Stopped",
+      error: "Error", stale: "Stale", offline: "Offline",
     },
   },
 } as const;
@@ -332,20 +474,21 @@ export function Portal() {
       <main ref={main} className="main">
         <div className="view-enter" key={view}>
           {view === "overview" && <Overview onNavigate={setView} locale={locale} />}
-          {view === "explorer" && <Explorer onOpen={(item) => {
+          {view === "explorer" && <Explorer locale={locale} onOpen={(item) => {
             setDocumentId(item.id); setView("document");
           }} />}
-          {view === "document" && documentId && <DocumentViewer documentId={documentId} />}
+          {view === "document" && documentId &&
+            <DocumentViewer documentId={documentId} locale={locale} />}
           {view === "search" && (
-            <SearchView initialQuery={query} onSelect={(item) => {
+            <SearchView locale={locale} initialQuery={query} onSelect={(item) => {
               setSelected(item); setContextOpen(true);
             }} />
           )}
-          {view === "operations" && <Operations />}
-          {view === "activities" && <ActivityHistory />}
-          {view === "knowledge" && <KnowledgeCases />}
-          {view === "timeline" && <Timeline />}
-          {view === "graph" && <GraphNotice />}
+          {view === "operations" && <Operations locale={locale} />}
+          {view === "activities" && <ActivityHistory locale={locale} />}
+          {view === "knowledge" && <KnowledgeCases locale={locale} />}
+          {view === "timeline" && <Timeline locale={locale} />}
+          {view === "graph" && <GraphNotice locale={locale} />}
         </div>
       </main>
 
@@ -546,8 +689,14 @@ function Overview({ onNavigate, locale }: {
           <div><dt>{text.processing}</dt><dd>{number.format(processing)}</dd></div>
           <div><dt>{text.pending}</dt><dd>{number.format(pending)}</dd></div>
           <div><dt>{text.failed}</dt><dd className={failed ? "danger-text" : ""}>{number.format(failed)}</dd></div>
-          <div><dt>{text.succeeded}</dt><dd>{number.format(data?.jobs?.succeeded ?? 0)}</dd></div>
-          <div><dt>{text.oldestPending}</dt><dd>{formatDuration(data?.oldest_pending_seconds ?? 0, locale)}</dd></div>
+          <div title={`${text.succeeded}: ${number.format(data?.jobs?.succeeded ?? 0)}`}>
+            <dt>{text.recentSucceeded}</dt><dd>{number.format(data?.succeeded_last_3h ?? 0)}</dd>
+          </div>
+          <div><dt>{text.queueRate}</dt><dd>{number.format(
+            Math.round(data?.queue_rate_per_hour ?? 0)
+          )}/h</dd></div>
+          <div><dt>{text.estimatedDrain}</dt><dd>{data?.queue_eta_seconds == null
+            ? text.estimateUnavailable : formatDuration(data.queue_eta_seconds, locale)}</dd></div>
         </dl>
       </article>
       <div className="quick-actions">
@@ -559,7 +708,11 @@ function Overview({ onNavigate, locale }: {
   );
 }
 
-function Explorer({ onOpen }: { onOpen: (item: TreeItem) => void }) {
+function Explorer({ onOpen, locale }: {
+  onOpen: (item: TreeItem) => void;
+  locale: Locale;
+}) {
+  const text = translations[locale].explorer;
   const tree = useQuery({ queryKey: ["tree"], queryFn: () => api<{ items: TreeItem[]; truncated: boolean }>("/api/v1/tree?limit=20000") });
   const [open, setOpen] = useState<Set<string>>(new Set());
   const grouped = useMemo(() => {
@@ -571,12 +724,12 @@ function Explorer({ onOpen }: { onOpen: (item: TreeItem) => void }) {
     return map;
   }, [tree.data]);
   if (tree.isLoading) return <SkeletonRows />;
-  if (tree.isError) return <ErrorState message="The source tree could not be loaded." />;
+  if (tree.isError) return <ErrorState message={text.loadError} />;
   return (
     <section>
-      <div className="page-title compact"><div><p className="eyebrow">READ-ONLY EXPLORER</p><h1>Projects & documents</h1>
-        <p>{tree.data?.items.length ?? 0} visible documents{tree.data?.truncated ? " · limited view" : ""}</p></div></div>
-      <div className="panel tree-panel" role="tree" aria-label="Source tree">
+      <div className="page-title compact"><div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
+        <p>{tree.data?.items.length ?? 0} {text.visible}{tree.data?.truncated ? ` · ${text.limited}` : ""}</p></div></div>
+      <div className="panel tree-panel" role="tree" aria-label={text.treeLabel}>
         {[...grouped.entries()].map(([project, items]) => {
           const expanded = open.has(project);
           return <div key={project}>
@@ -589,18 +742,26 @@ function Explorer({ onOpen }: { onOpen: (item: TreeItem) => void }) {
             </button>
             {expanded && <div role="group" className="tree-children">
               {items.slice(0, 250).map((item) => <button key={item.id} role="treeitem" onClick={() => onOpen(item)}>
-                <FileCode2 size={15} /><span>{item.path}</span><em>{item.state}</em>
+                <FileCode2 size={15} /><span>{item.path}</span>
+                <em>{translations[locale].statusLabels[
+                  item.state as keyof typeof translations.ko.statusLabels
+                ] ?? item.state}</em>
               </button>)}
             </div>}
           </div>;
         })}
-        {!grouped.size && <EmptyState title="No indexed documents" detail="Run a scan and worker to populate the tree." />}
+        {!grouped.size && <EmptyState title={text.emptyTitle} detail={text.emptyDetail} />}
       </div>
     </section>
   );
 }
 
-function SearchView({ initialQuery, onSelect }: { initialQuery: string; onSelect: (result: SearchResult) => void }) {
+function SearchView({ initialQuery, onSelect, locale }: {
+  initialQuery: string;
+  onSelect: (result: SearchResult) => void;
+  locale: Locale;
+}) {
+  const text = translations[locale].searchView;
   const [value, setValue] = useState(initialQuery);
   const [mode, setMode] = useState("hybrid");
   const [submitted, setSubmitted] = useState(initialQuery);
@@ -618,19 +779,20 @@ function SearchView({ initialQuery, onSelect }: { initialQuery: string; onSelect
   });
   return (
     <section>
-      <div className="page-title compact"><div><p className="eyebrow">RETRIEVAL</p><h1>Search the source of truth</h1>
-        <p>Every result carries document, version, chunk, path, and line provenance.</p></div></div>
+      <div className="page-title compact"><div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
+        <p>{text.subtitle}</p></div></div>
       <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(value); }}>
-        <Search size={18} /><input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Filename, error, ADR, symbol, or natural language…" />
-        <select value={mode} onChange={(e) => setMode(e.target.value)} aria-label="Search mode">
-          <option value="hybrid">Hybrid</option><option value="keyword">Keyword</option>
-          <option value="semantic">Semantic</option><option value="path">Path</option><option value="symbol">Symbol</option>
-        </select><button className="primary">Search</button>
+        <Search size={18} /><input value={value} onChange={(e) => setValue(e.target.value)} placeholder={text.placeholder} />
+        <select value={mode} onChange={(e) => setMode(e.target.value)} aria-label={text.mode}>
+          {Object.entries(text.modes).map(([value, label]) =>
+            <option key={value} value={value}>{label}</option>)}
+        </select><button className="primary">{text.submit}</button>
       </form>
-      <div className="result-meta"><span>{results.data?.total ?? 0} results</span>
-        {results.data && <span className={`confidence ${results.data.confidence}`}>{results.data.confidence} confidence</span>}</div>
+      <div className="result-meta"><span>{results.data?.total ?? 0}{text.results}</span>
+        {results.data && <span className={`confidence ${results.data.confidence}`}>
+          {results.data.confidence} {text.confidence}</span>}</div>
       {results.isLoading && <SkeletonRows />}
-      {results.isError && <ErrorState message="Search failed. Semantic mode requires Ollama; keyword mode remains available." />}
+      {results.isError && <ErrorState message={text.loadError} />}
       <div ref={parent} className="result-scroll">
         <div style={{ height: virtual.getTotalSize(), position: "relative" }}>
           {virtual.getVirtualItems().map((row) => {
@@ -644,21 +806,24 @@ function SearchView({ initialQuery, onSelect }: { initialQuery: string; onSelect
               {result.heading_or_symbol && <h3>{result.heading_or_symbol}</h3>}
               <p className="snippet">{result.snippet}</p>
               <div className="score-row">
-                {result.lexical_rank != null && <span>lex {result.lexical_rank.toFixed(3)}</span>}
-                {result.vector_similarity != null && <span>vec {result.vector_similarity.toFixed(3)}</span>}
-                <span>rrf {result.fused_rank.toFixed(4)}</span>
+                {result.lexical_rank != null && <span>{text.scores.lexical} {result.lexical_rank.toFixed(3)}</span>}
+                {result.vector_similarity != null && <span>{text.scores.vector} {result.vector_similarity.toFixed(3)}</span>}
+                <span>{text.scores.fused} {result.fused_rank.toFixed(4)}</span>
                 <em>{result.match_reason.join(" + ")}</em>
               </div>
             </button>;
           })}
         </div>
       </div>
-      {!results.isLoading && submitted && !results.data?.results.length && <EmptyState title="No grounded result" detail="Try a filename, path segment, exact symbol, or broader wording." />}
+      {!results.isLoading && submitted && !results.data?.results.length &&
+        <EmptyState title={text.emptyTitle} detail={text.emptyDetail} />}
     </section>
   );
 }
 
-function Operations() {
+function Operations({ locale }: { locale: Locale }) {
+  const text = translations[locale].operations;
+  const statusLabels = translations[locale].statusLabels;
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<"jobs" | "workers" | "backups">("jobs");
   const jobs = useQuery({
@@ -701,26 +866,31 @@ function Operations() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["jobs"] }),
   });
   const columns = useMemo<ColumnDef<Job>[]>(() => [
-    { accessorKey: "status", header: "Status", cell: ({ getValue }) => <Status value={String(getValue())} /> },
-    { accessorKey: "job_type", header: "Type" },
-    { accessorKey: "path", header: "Path", cell: ({ getValue }) => <span className="table-path">{String(getValue())}</span> },
-    { id: "attempts", header: "Attempts", cell: ({ row }) => `${row.original.attempt_count}/${row.original.max_attempts}` },
-    { accessorKey: "error_type", header: "Error", cell: ({ row }) => <span title={row.original.error_message ?? ""}>{row.original.error_type ?? "—"}</span> },
+    { accessorKey: "status", header: text.headers.status, cell: ({ getValue }) => {
+      const value = String(getValue());
+      return <Status value={value} label={
+        statusLabels[value as keyof typeof statusLabels] ?? value
+      } />;
+    } },
+    { accessorKey: "job_type", header: text.headers.type },
+    { accessorKey: "path", header: text.headers.path, cell: ({ getValue }) => <span className="table-path">{String(getValue())}</span> },
+    { id: "attempts", header: text.headers.attempts, cell: ({ row }) => `${row.original.attempt_count}/${row.original.max_attempts}` },
+    { accessorKey: "error_type", header: text.headers.error, cell: ({ row }) => <span title={row.original.error_message ?? ""}>{row.original.error_type ?? "—"}</span> },
     { id: "action", header: "", cell: ({ row }) => row.original.status === "failed" || row.original.status === "dead_letter"
-      ? <button className="retry" onClick={() => retry.mutate(row.original.id)}><RefreshCcw size={13} /> Retry</button> : null },
-  ], [retry]);
+      ? <button className="retry" onClick={() => retry.mutate(row.original.id)}><RefreshCcw size={13} /> {text.retry}</button> : null },
+  ], [retry, statusLabels, text]);
   const table = useReactTable({ data: jobs.data?.items ?? [], columns, getCoreRowModel: getCoreRowModel() });
   return (
     <section>
-      <div className="page-title compact"><div><p className="eyebrow">OPERATIONS</p><h1>Durable queue</h1>
-        <p>Retries create a new auditable job; original history is retained.</p></div>
-        <button className="secondary" onClick={() => jobs.refetch()}><RefreshCcw size={15} /> Refresh</button></div>
+      <div className="page-title compact"><div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
+        <p>{text.subtitle}</p></div>
+        <button className="secondary" onClick={() => jobs.refetch()}><RefreshCcw size={15} /> {text.refresh}</button></div>
       <div className="tabs"><button className={tab === "jobs" ? "active" : ""}
-        onClick={() => setTab("jobs")}>Jobs</button><button
+        onClick={() => setTab("jobs")}>{text.tabs.jobs}</button><button
         className={tab === "workers" ? "active" : ""}
-        onClick={() => setTab("workers")}>Workers</button><button
+        onClick={() => setTab("workers")}>{text.tabs.workers}</button><button
         className={tab === "backups" ? "active" : ""}
-        onClick={() => setTab("backups")}>Backups</button></div>
+        onClick={() => setTab("backups")}>{text.tabs.backups}</button></div>
       {tab === "jobs" && <div className="panel table-wrap">
         <table>
           <thead>{table.getHeaderGroups().map((group) => <tr key={group.id}>{group.headers.map((header) =>
@@ -728,21 +898,27 @@ function Operations() {
           <tbody>{table.getRowModel().rows.map((row) => <tr key={row.id}>{row.getVisibleCells().map((cell) =>
             <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>)}</tbody>
         </table>
-        {!jobs.isLoading && !jobs.data?.items.length && <EmptyState title="Queue is empty" detail="No ingest jobs have been created yet." />}
+        {!jobs.isLoading && !jobs.data?.items.length &&
+          <EmptyState title={text.queueEmpty} detail={text.queueEmptyDetail} />}
       </div>}
       {tab === "workers" && <div className="panel table-wrap">
-        <table><thead><tr><th>Worker</th><th>Host</th><th>State</th>
-          <th>Mode</th><th>Guard</th><th>CPU</th><th>Heartbeat</th><th>Processed</th><th>Failed</th></tr></thead>
+        <table><thead><tr><th>{text.headers.worker}</th><th>{text.headers.host}</th>
+          <th>{text.headers.status}</th><th>{text.headers.mode}</th>
+          <th>{text.headers.guard}</th><th>{text.headers.cpu}</th>
+          <th>{text.headers.heartbeat}</th><th>{text.headers.processed}</th>
+          <th>{text.headers.failed}</th></tr></thead>
           <tbody>{workers.data?.map((worker) => <tr key={worker.worker_id}>
             <td className="mono">{worker.worker_id}</td><td>{worker.hostname}</td>
-            <td><Status value={worker.state} /></td>
+            <td><Status value={worker.state} label={
+              statusLabels[worker.state as keyof typeof statusLabels] ?? worker.state
+            } /></td>
             <td>{worker.metadata.watch_mode ?? "—"}</td>
             <td title={worker.metadata.resource_guard_enabled
               ? `Batch ${worker.metadata.embedding_batch_size ?? "?"}, burst ${worker.metadata.burst_jobs ?? "?"}`
               : undefined}>
               {worker.metadata.pause_requested
-                ? "PAUSED"
-                : worker.metadata.resource_guard_enabled ? "ENABLED" : "—"}
+                ? text.paused
+                : worker.metadata.resource_guard_enabled ? text.enabled : "—"}
             </td>
             <td title={worker.metadata.cpu_alert
               ? `Warning threshold: ${worker.metadata.cpu_warning_percent ?? "?"}%`
@@ -751,44 +927,57 @@ function Operations() {
                 ? `${worker.metadata.process_cpu_percent.toFixed(2)}%`
                 : "—"}
             </td>
-            <td>{new Date(worker.last_seen_at).toLocaleString()}</td>
+            <td>{new Date(worker.last_seen_at).toLocaleString(
+              locale === "ko" ? "ko-KR" : "en-US"
+            )}</td>
             <td>{worker.processed_count}</td><td>{worker.failed_count}</td>
           </tr>)}</tbody></table>
         {!workers.isLoading && !workers.data?.length &&
-          <EmptyState title="No worker heartbeat" detail="Start the indexer worker." />}
+          <EmptyState title={text.noHeartbeat} detail={text.noHeartbeatDetail} />}
       </div>}
       {tab === "backups" && <div className="panel table-wrap">
-        <table><thead><tr><th>Status</th><th>Created</th><th>Path</th>
-          <th>Revision</th><th>SHA-256</th></tr></thead>
+        <table><thead><tr><th>{text.headers.status}</th><th>{text.headers.created}</th>
+          <th>{text.headers.path}</th><th>{text.headers.revision}</th>
+          <th>{text.headers.checksum}</th></tr></thead>
           <tbody>{backups.data?.map((backup) => <tr key={backup.id}>
-            <td><Status value={backup.status} /></td>
-            <td>{new Date(backup.created_at).toLocaleString()}</td>
+            <td><Status value={backup.status} label={
+              statusLabels[backup.status as keyof typeof statusLabels] ?? backup.status
+            } /></td>
+            <td>{new Date(backup.created_at).toLocaleString(
+              locale === "ko" ? "ko-KR" : "en-US"
+            )}</td>
             <td className="table-path">{backup.path}</td>
             <td className="mono">{backup.manifest.schema_revision ?? "—"}</td>
             <td className="mono">{backup.manifest.sha256?.slice(0, 12) ?? "—"}</td>
           </tr>)}</tbody></table>
         {!backups.isLoading && !backups.data?.length &&
-          <EmptyState title="No backup evidence" detail="Run scripts/backup.ps1." />}
+          <EmptyState title={text.noBackup} detail={text.noBackupDetail} />}
       </div>}
     </section>
   );
 }
 
-function Timeline() {
+function Timeline({ locale }: { locale: Locale }) {
+  const text = translations[locale].timelineView;
   const events = useQuery({ queryKey: ["timeline"], queryFn: () => api<Array<{ id: number; event: string; path: string; details: object; created_at: string }>>("/api/v1/timeline") });
-  return <section><div className="page-title compact"><div><p className="eyebrow">OBSERVED HISTORY</p><h1>Timeline</h1>
-    <p>Filesystem and pipeline events, newest first.</p></div></div><div className="timeline">
-      {events.data?.map((item) => <article key={item.id}><span className="timeline-dot" /><div><strong>{item.event}</strong>
-        <p>{item.path ?? "system event"}</p><small>{new Date(item.created_at).toLocaleString()}</small></div></article>)}
-      {!events.isLoading && !events.data?.length && <EmptyState title="No events yet" detail="Indexed, failed, and retried work will appear here." />}
+  return <section><div className="page-title compact"><div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
+    <p>{text.subtitle}</p></div></div><div className="timeline">
+      {events.data?.map((item) => <article key={item.id}><span className="timeline-dot" /><div>
+        <strong>{text.events[item.event as keyof typeof text.events] ?? item.event}</strong>
+        <p>{item.path ?? text.system}</p><small>{new Date(item.created_at).toLocaleString(
+          locale === "ko" ? "ko-KR" : "en-US"
+        )}</small></div></article>)}
+      {!events.isLoading && !events.data?.length &&
+        <EmptyState title={text.emptyTitle} detail={text.emptyDetail} />}
     </div></section>;
 }
 
-function GraphNotice() {
-  return <section><div className="page-title compact"><div><p className="eyebrow">RELATIONSHIPS</p><h1>Knowledge graph</h1>
-    <p>Scoped graph views prevent the browser from rendering an unbounded dataset.</p></div></div>
-    <div className="panel graph-placeholder"><Network size={38} /><h2>Graph adapter is ready for links</h2>
-      <p>Markdown wikilinks and document links will appear after link extraction. Explorer and search remain the primary navigation.</p>
+function GraphNotice({ locale }: { locale: Locale }) {
+  const text = translations[locale].graphView;
+  return <section><div className="page-title compact"><div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
+    <p>{text.subtitle}</p></div></div>
+    <div className="panel graph-placeholder"><Network size={38} /><h2>{text.emptyTitle}</h2>
+      <p>{text.emptyDetail}</p>
       <div className="fake-nodes"><span /><span /><span /><span /></div></div></section>;
 }
 

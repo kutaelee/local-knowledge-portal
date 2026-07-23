@@ -72,6 +72,15 @@ freshness, queue age and state, worker state, and the active embedding/pipeline 
 charts use measured database events; they do not display placeholder series. API and RAG clients
 continue to use the same provenance-bearing endpoints independently of the display language.
 
+All portal screens, evidence labels, operations tables, empty/error states, document versions, and
+search controls follow the selected Korean/English locale. Native select controls inherit the
+active light/dark color scheme.
+
+Readable input is not automatically embedded knowledge. A deterministic policy removes lifecycle
+and read-only Codex noise before activity storage, ignores generated tokenizer payloads, and keeps
+lockfiles or over-budget documents lexical-only. Canonical cases still require verified evidence.
+See [ADR 0006](docs/adr/0006-knowledge-value-selection.md).
+
 ## Global Codex activity capture
 
 The user-level `%USERPROFILE%\.codex\hooks.json` records activity from every trusted Codex

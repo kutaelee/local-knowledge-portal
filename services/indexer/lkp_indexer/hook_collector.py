@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,25 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .service_runtime import service_pid
+
+_LOW_SIGNAL_PROMPTS = {
+    "",
+    "?",
+    "응",
+    "네",
+    "ㅇㅇ",
+    "확인",
+    "계속",
+    "진행",
+    "ok",
+    "okay",
+    "continue",
+}
+_EVIDENCE_COMMAND = re.compile(
+    r"(?i)\b(pytest|ruff|playwright|test|build|lint|typecheck|migrate|alembic|"
+    r"backup|restore|benchmark|profile|docker\s+(build|restart|stop|compose)|git\s+commit)\b"
+)
+_MUTATING_TOOLS = {"apply_patch", "write_file", "edit_file"}
 
 
 def _parse_time(value: str | None) -> datetime:
@@ -91,6 +111,40 @@ def _reported_result(payload: dict[str, Any], event_name: str) -> str | None:
 def _tool_name(envelope: dict[str, Any], payload: dict[str, Any]) -> str | None:
     value = envelope.get("tool_name") or payload.get("tool_name") or payload.get("toolName")
     return str(value)[:200] if value else None
+
+
+def activity_signal(envelope: dict[str, Any]) -> tuple[bool, list[str]]:
+    payload = envelope.get("payload") or {}
+    event_name = str(envelope.get("event_name") or "")
+    reasons: list[str] = []
+    if event_name in {"SessionStart", "SubagentStart"}:
+        return False, ["lifecycle_only"]
+    if event_name == "UserPromptSubmit":
+        instruction = (_instruction(payload, event_name) or "").strip()
+        normalized = instruction.casefold().rstrip(".!")
+        if len(instruction) >= 12 and normalized not in _LOW_SIGNAL_PROMPTS:
+            return True, ["meaningful_instruction"]
+        return False, ["acknowledgement_or_short_prompt"]
+    if event_name == "PostToolUse":
+        exit_code = _exit_code(payload)
+        changed_files = _changed_files(payload)
+        command = _command(payload) or ""
+        tool_name = (_tool_name(envelope, payload) or "").casefold()
+        if exit_code not in {None, 0}:
+            reasons.append("command_failure")
+        if changed_files:
+            reasons.append("changed_files")
+        if tool_name in _MUTATING_TOOLS:
+            reasons.append("mutating_tool")
+        if _EVIDENCE_COMMAND.search(command):
+            reasons.append("verification_or_operation_command")
+        return bool(reasons), reasons or ["read_only_low_signal_tool"]
+    if event_name in {"Stop", "SubagentStop"}:
+        reported = (_reported_result(payload, event_name) or "").strip()
+        if len(reported) >= 12:
+            return True, ["reported_outcome"]
+        return False, ["empty_or_short_outcome"]
+    return False, ["unsupported_activity_signal"]
 
 
 def _document_versions(
@@ -187,6 +241,7 @@ def collect_file(session: Session, path: Path) -> bool:
     existing = session.get(HookSpoolEvent, event_id)
     if existing:
         return False
+    promote, signal_reasons = activity_signal(envelope)
     session.add(
         HookSpoolEvent(
             event_id=event_id,
@@ -197,13 +252,17 @@ def collect_file(session: Session, path: Path) -> bool:
             cwd=envelope.get("cwd"),
             tool_name=envelope.get("tool_name"),
             payload_hash=str(envelope["payload_hash"]),
-            payload_json=envelope["payload"],
+            payload_json={
+                "signal_reasons": signal_reasons,
+                "payload_bytes": envelope.get("payload_bytes"),
+            },
             spool_path=str(path),
-            status="processed",
+            status="promoted_activity" if promote else "filtered_low_signal",
             processed_at=datetime.now(timezone.utc),
         )
     )
-    envelope_to_activity(session, envelope)
+    if promote:
+        envelope_to_activity(session, envelope)
     return True
 
 

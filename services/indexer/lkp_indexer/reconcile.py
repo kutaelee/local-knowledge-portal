@@ -9,6 +9,7 @@ from lkp.settings import Settings
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .ignore import IgnoreRules
 from .paths import idempotency_key
 from .queue import enqueue
 from .scanner import scan_root
@@ -19,6 +20,7 @@ class ReconcileStats:
     visited: int = 0
     queued: int = 0
     missing: int = 0
+    ignored: int = 0
     errors: int = 0
 
 
@@ -32,6 +34,7 @@ def reconcile_root(
         errors=scan.errors,
     )
     root_path = Path(source_root.canonical_path)
+    ignore_rules = IgnoreRules(root_path, source_root.exclude_patterns)
     documents = session.scalars(
         select(Document).where(
             Document.source_root_id == source_root.id,
@@ -41,8 +44,25 @@ def reconcile_root(
     for document in documents:
         path = Path(document.canonical_path)
         try:
-            path.relative_to(root_path)
+            relative = path.relative_to(root_path).as_posix()
         except ValueError:
+            continue
+        if ignore_rules.matches(relative):
+            document.state = DocumentState.ignored
+            document.last_seen_at = datetime.now(timezone.utc)
+            stats.ignored += 1
+            session.add(
+                IngestEvent(
+                    source_root_id=source_root.id,
+                    document_id=document.id,
+                    event_type="ignored",
+                    path=document.canonical_path,
+                    details={
+                        "reason": "policy_reconciliation",
+                        "relative_path": relative,
+                    },
+                )
+            )
             continue
         if path.exists():
             continue
@@ -72,6 +92,7 @@ def reconcile_root(
                 "visited": stats.visited,
                 "queued": stats.queued,
                 "missing": stats.missing,
+                "ignored": stats.ignored,
                 "errors": stats.errors,
             },
         )

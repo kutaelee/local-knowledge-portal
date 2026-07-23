@@ -2,7 +2,8 @@
 
 ```mermaid
 flowchart LR
-  FS[Read-only repositories and Markdown] --> SCAN[Scanner]
+  FS[Read-only repositories and Markdown] --> SELECT[Deterministic knowledge-value filter]
+  SELECT --> SCAN[Scanner]
   CODEX[Read-only Codex transcripts] --> CAPTURE[Filtered managed-page capture]
   CAPTURE --> VAULT[Managed Vault pages]
   CAPTURE -. optional .-> LOCAL_LLM[Local generation provider]
@@ -13,9 +14,11 @@ flowchart LR
   RECON[Periodic reconciliation] --> JOBS[(PostgreSQL queue)]
   SCAN --> JOBS
   WATCH --> JOBS
-  JOBS --> WORKER[Leased worker]
+  JOBS --> WORKER[Leased file-level worker]
   WORKER --> PARSE[Deterministic parser and chunker]
-  PARSE --> EMBED[Ollama embedding adapter]
+  PARSE --> COST[Semantic cost and value gate]
+  COST -->|eligible| EMBED[Ollama embedding adapter]
+  COST -->|lexical only| DB
   EMBED --> DB[(PostgreSQL 18 + pgvector)]
   DB --> API[FastAPI]
   API --> WEB[Next.js portal]
@@ -24,7 +27,7 @@ flowchart LR
   BACKUP --> D[D drive immutable directory]
 ```
 
-The PostgreSQL queue uses `FOR UPDATE SKIP LOCKED`, lease expiry, bounded retry, dead-letter status, idempotency keys, and per-document advisory locks. A watcher only enqueues work. Periodic reconciliation is the correctness backstop.
+The PostgreSQL queue uses `FOR UPDATE SKIP LOCKED`, lease expiry, bounded retry, dead-letter status, idempotency keys, per-document advisory locks, and partial claim/recovery indexes. A watcher only enqueues work. Periodic reconciliation is the correctness backstop.
 
 Windows paths are resolved before use, compared with `os.path.commonpath`, stored using canonical Windows separators, and compared case-insensitively for idempotency. Reparse points are not traversed. `(source_root_id, canonical_path)` is unique.
 
@@ -40,6 +43,12 @@ implemented Ollama adapter uses `/api/chat` with a JSON schema, non-streaming re
 temperature zero, and explicit model digest validation. Its output is a separate managed page
 whose frontmatter records provider, model, digest, source hash, and pipeline revision. An LLM
 failure leaves raw capture and lexical search healthy.
+
+Raw hook transport, activity history, searchable documents, semantic vectors, and canonical
+knowledge cases are separate promotion levels. The collector filters lifecycle/read-only noise
+before creating an activity row. Generated tokenizer payloads are excluded; lockfiles and
+oversized/high-chunk documents remain lexical-only with an explicit skip reason. See
+[ADR 0006](../adr/0006-knowledge-value-selection.md).
 
 References: [Ollama chat API](https://docs.ollama.com/api/chat) and
 [structured outputs](https://docs.ollama.com/capabilities/structured-outputs).

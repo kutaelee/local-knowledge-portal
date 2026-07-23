@@ -16,6 +16,10 @@ export type Metrics = {
   chunks: number;
   jobs: Record<string, number>;
   oldest_pending_seconds: number;
+  queue_rate_per_hour: number;
+  queue_eta_seconds: number | null;
+  succeeded_last_3h: number;
+  failed_last_hour: number;
   workers: number;
   worker_states: Record<string, number>;
   latest_indexed_at: string | null;
