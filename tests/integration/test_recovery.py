@@ -24,6 +24,7 @@ from lkp.models import (
 from lkp.settings import Settings
 from lkp_indexer.hook_collector import collect_file
 from lkp_indexer.paths import idempotency_key
+from lkp_indexer.purpose_migration import migrate_purpose_scope
 from lkp_indexer.queue import enqueue, lease
 from lkp_indexer.reconcile import reconcile_root
 from lkp_indexer.watcher import watch_root
@@ -363,3 +364,122 @@ def test_low_signal_hook_is_not_persisted(database_url: str, tmp_path: Path):
         assert session.scalar(
             select(ActivityEvent).where(ActivityEvent.session_id == session_id)
         ) is None
+
+
+def test_purpose_migration_reclassifies_projects_and_keeps_doc_vectors(
+    database_url: str, tmp_path: Path
+):
+    engine = create_engine(database_url)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    source_root = tmp_path / "src"
+    repository = source_root / "ai" / "ExampleRepo"
+    (repository / ".git").mkdir(parents=True)
+    code_path = repository / "src" / "model.py"
+    doc_path = repository / "README.md"
+    code_path.parent.mkdir(parents=True)
+    code_path.write_text("def model():\n    return 1\n", encoding="utf-8")
+    doc_path.write_text("# Example\nReusable design", encoding="utf-8")
+    now = datetime.now(timezone.utc)
+    with factory() as session:
+        root = SourceRoot(
+            name=f"purpose-{uuid.uuid4()}",
+            canonical_path=str(source_root),
+            source_type="repositories",
+            data_scope="validation",
+            read_only=True,
+            enabled=True,
+            include_patterns=["**/*"],
+            exclude_patterns=[],
+        )
+        session.add(root)
+        session.flush()
+        chunk_ids: dict[str, uuid.UUID] = {}
+        document_ids: dict[str, uuid.UUID] = {}
+        for index, path in enumerate((code_path, doc_path)):
+            relative = path.relative_to(source_root).as_posix()
+            document = Document(
+                source_root_id=root.id,
+                canonical_path=str(path),
+                relative_path=relative,
+                filename=path.name,
+                extension=path.suffix,
+                mime_type="text/plain",
+                project_key="ai",
+                project_relative_path=relative,
+                parent_path=path.parent.relative_to(source_root).as_posix(),
+                size_bytes=path.stat().st_size,
+                modified_at_fs=now,
+                state=DocumentState.active,
+            )
+            session.add(document)
+            session.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                content_hash=str(index) * 64,
+                byte_size=path.stat().st_size,
+                created_at_fs=now,
+                modified_at_fs=now,
+                parser_version="test",
+                chunker_version="test",
+                line_count=2,
+                metadata_json={"embedding_status": "complete"},
+                change_type="created",
+                diff_summary={},
+            )
+            session.add(version)
+            session.flush()
+            chunk = DocumentChunk(
+                document_version_id=version.id,
+                chunk_index=0,
+                chunk_type="section",
+                start_line=1,
+                end_line=2,
+                content=path.read_text(encoding="utf-8"),
+                content_hash=str(index + 2) * 64,
+                token_estimate=8,
+                metadata_json={},
+            )
+            session.add(chunk)
+            session.flush()
+            session.add(
+                ChunkEmbedding(
+                    chunk_id=chunk.id,
+                    embedding_revision="test-d1024-v1",
+                    provider="deterministic",
+                    model="fixture",
+                    model_digest="fixture",
+                    dimension=1024,
+                    embedding=[float(index)] * 1024,
+                )
+            )
+            document.current_version_id = version.id
+            document.current_content_hash = version.content_hash
+            chunk_ids[path.name] = chunk.id
+            document_ids[path.name] = document.id
+        session.commit()
+
+    result = migrate_purpose_scope(
+        apply=True,
+        repository_mode="docs_only",
+        session_factory=factory,
+    )
+    assert result["project_documents_reclassified"] >= 2
+    with factory() as session:
+        code_document = session.get(Document, document_ids["model.py"])
+        doc_document = session.get(Document, document_ids["README.md"])
+        assert code_document is not None
+        assert doc_document is not None
+        assert code_document.project_key == "ExampleRepo"
+        assert code_document.project_relative_path == "src/model.py"
+        assert doc_document.project_key == "ExampleRepo"
+        assert doc_document.project_relative_path == "README.md"
+        assert session.scalar(
+            select(ChunkEmbedding).where(
+                ChunkEmbedding.chunk_id == chunk_ids["model.py"]
+            )
+        ) is None
+        assert session.scalar(
+            select(ChunkEmbedding).where(
+                ChunkEmbedding.chunk_id == chunk_ids["README.md"]
+            )
+        ) is not None

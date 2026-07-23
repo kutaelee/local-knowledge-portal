@@ -82,6 +82,7 @@ class Document(Base):
     extension: Mapped[str] = mapped_column(String(32))
     mime_type: Mapped[str | None] = mapped_column(String(200))
     project_key: Mapped[str | None] = mapped_column(String(200))
+    project_relative_path: Mapped[str] = mapped_column(Text, default="")
     parent_path: Mapped[str] = mapped_column(Text)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     modified_at_fs: Mapped[datetime] = mapped_column(DateTime(timezone=True))

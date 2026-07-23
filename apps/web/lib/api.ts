@@ -14,6 +14,17 @@ export type Metrics = {
   projects: number;
   documents: number;
   chunks: number;
+  semantic_chunks: number;
+  semantic_coverage: number;
+  document_breakdown: {
+    knowledge_documents: number;
+    code_files: number;
+    support_files: number;
+  };
+  pending_breakdown: {
+    initial_scan: number;
+    live_changes: number;
+  };
   jobs: Record<string, number>;
   oldest_pending_seconds: number;
   queue_rate_per_hour: number;
@@ -46,6 +57,7 @@ export type Metrics = {
   embedding_model: string;
   embedding_revision: string;
   pipeline_version: string;
+  repository_embedding_mode: string;
 };
 
 export type TreeItem = {
@@ -53,6 +65,7 @@ export type TreeItem = {
   source_root_id: string;
   project: string;
   path: string;
+  source_relative_path: string;
   state: string;
 };
 

@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+const apiURL = process.env.LKP_E2E_API_URL ?? "http://127.0.0.1:8010";
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     if (!localStorage.getItem("lkp-locale")) {
@@ -29,7 +31,7 @@ test("localized overview explains freshness and persists language", async ({ pag
   })).toBeVisible();
 
   const localizedScreens = [
-    ["문서 탐색", "프로젝트와 문서"],
+    ["문서 탐색", "저장소와 파일"],
     ["검색", "원본 지식 검색"],
     ["활동 이력", "활동 이력"],
     ["지식 사례", "지식 사례"],
@@ -48,10 +50,10 @@ test("overview, explorer, document versions, and provenance", async ({ page, req
   await expect(page.getByRole("heading", { name: "See what is current, at a glance." }))
     .toBeVisible();
   await page.getByRole("button", { name: "Explorer" }).click();
-  await expect(page.getByRole("heading", { name: "Projects & documents" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Repositories & files" })).toBeVisible();
 
   const tree = await (
-    await request.get("http://127.0.0.1:8010/api/v1/tree?limit=20000")
+    await request.get(`${apiURL}/api/v1/tree?limit=20000`)
   ).json();
   let target: { id: string; project: string; path: string } | null = null;
   const visiblePerProject = new Map<string, number>();
@@ -60,7 +62,7 @@ test("overview, explorer, document versions, and provenance", async ({ page, req
     visiblePerProject.set(item.project, visibleIndex + 1);
     if (visibleIndex >= 250) continue;
     const versions = await (
-      await request.get(`http://127.0.0.1:8010/api/v1/documents/${item.id}/versions`)
+      await request.get(`${apiURL}/api/v1/documents/${item.id}/versions`)
     ).json();
     if (versions.length > 1) {
       target = item;

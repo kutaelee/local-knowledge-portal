@@ -5,21 +5,45 @@ import signal
 import socket
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import structlog
 from lkp.db import SessionLocal
 from lkp.logging import configure_logging
-from lkp.models import IngestJob, JobStatus, WorkerHeartbeat
+from lkp.models import IngestJob, JobStatus, SourceRoot, WorkerHeartbeat
 from lkp.settings import get_settings
 from sqlalchemy import update
 
 from .cli import get_embedder
 from .queue import lease
+from .selection import semantic_policy
 from .service_runtime import service_pid
 from .worker import heartbeat, process_job
 
 logger = structlog.get_logger()
+
+
+@dataclass(frozen=True, slots=True)
+class WorkloadPolicy:
+    cooldown_seconds: float
+    burst_jobs: int
+    burst_cooldown_seconds: float
+
+
+def workload_policy(resource_class: str, settings) -> WorkloadPolicy:
+    if resource_class == "lexical":
+        return WorkloadPolicy(
+            cooldown_seconds=settings.worker_lexical_job_cooldown_seconds,
+            burst_jobs=settings.worker_lexical_burst_jobs,
+            burst_cooldown_seconds=settings.worker_lexical_burst_cooldown_seconds,
+        )
+    return WorkloadPolicy(
+        cooldown_seconds=settings.worker_job_cooldown_seconds,
+        burst_jobs=settings.worker_burst_jobs,
+        burst_cooldown_seconds=settings.worker_burst_cooldown_seconds,
+    )
 
 
 def _resource_policy(settings) -> dict:
@@ -29,6 +53,13 @@ def _resource_policy(settings) -> dict:
         "job_cooldown_seconds": settings.worker_job_cooldown_seconds,
         "burst_jobs": settings.worker_burst_jobs,
         "burst_cooldown_seconds": settings.worker_burst_cooldown_seconds,
+        "lexical_job_cooldown_seconds": (
+            settings.worker_lexical_job_cooldown_seconds
+        ),
+        "lexical_burst_jobs": settings.worker_lexical_burst_jobs,
+        "lexical_burst_cooldown_seconds": (
+            settings.worker_lexical_burst_cooldown_seconds
+        ),
         "pause_file": str(settings.worker_pause_file),
         "resource_guard_enabled": True,
     }
@@ -75,7 +106,7 @@ def run(deterministic: bool = False, once: bool = False) -> int:
     signal.signal(signal.SIGTERM, request_stop)
     embedder = get_embedder(settings, deterministic)
     policy = _resource_policy(settings)
-    jobs_in_burst = 0
+    jobs_in_burst = {"semantic": 0, "lexical": 0}
     pause_logged = False
     logger.info("worker_resource_policy", **policy)
     while not stopping.is_set():
@@ -116,6 +147,18 @@ def run(deterministic: bool = False, once: bool = False) -> int:
                     metadata={**policy, "pause_requested": False},
                 )
                 job = lease(session, worker_id, settings.lease_seconds)
+                resource_class = "semantic"
+                if job is not None:
+                    root = session.get(SourceRoot, job.source_root_id)
+                    if root is not None:
+                        semantic_allowed, _ = semantic_policy(
+                            Path(job.canonical_path),
+                            root,
+                            repository_mode=settings.repository_embedding_mode,
+                        )
+                        resource_class = (
+                            "semantic" if semantic_allowed else "lexical"
+                        )
                 session.commit()
         except Exception:
             stopping.wait(2)
@@ -170,8 +213,9 @@ def run(deterministic: bool = False, once: bool = False) -> int:
             renewer.join(timeout=2)
         if once:
             break
-        jobs_in_burst += 1
-        if jobs_in_burst >= settings.worker_burst_jobs:
+        selected_policy = workload_policy(resource_class, settings)
+        jobs_in_burst[resource_class] += 1
+        if jobs_in_burst[resource_class] >= selected_policy.burst_jobs:
             try:
                 with SessionLocal() as session:
                     heartbeat(
@@ -182,6 +226,7 @@ def run(deterministic: bool = False, once: bool = False) -> int:
                             **policy,
                             "pause_requested": False,
                             "cooldown_reason": "burst_limit",
+                            "resource_class": resource_class,
                         },
                     )
                     session.commit()
@@ -189,13 +234,14 @@ def run(deterministic: bool = False, once: bool = False) -> int:
                 pass
             logger.info(
                 "worker_burst_cooldown",
-                completed_jobs=jobs_in_burst,
-                cooldown_seconds=settings.worker_burst_cooldown_seconds,
+                completed_jobs=jobs_in_burst[resource_class],
+                cooldown_seconds=selected_policy.burst_cooldown_seconds,
+                resource_class=resource_class,
             )
-            stopping.wait(settings.worker_burst_cooldown_seconds)
-            jobs_in_burst = 0
+            stopping.wait(selected_policy.burst_cooldown_seconds)
+            jobs_in_burst[resource_class] = 0
         else:
-            stopping.wait(settings.worker_job_cooldown_seconds)
+            stopping.wait(selected_policy.cooldown_seconds)
     try:
         with SessionLocal() as session:
             heartbeat(session, worker_id, "stopped")

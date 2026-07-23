@@ -1,6 +1,7 @@
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
@@ -35,6 +36,12 @@ class Settings(BaseSettings):
     embedding_max_chars_per_document: int = Field(
         default=250_000, ge=1_000, le=100_000_000
     )
+    semantic_high_confidence_similarity: float = Field(
+        default=0.6, ge=-1, le=1
+    )
+    repository_embedding_mode: Literal[
+        "docs_only", "code_and_docs", "lexical_only"
+    ] = "docs_only"
     generation_provider: str = "disabled"
     generation_base_url: str = "http://127.0.0.1:11434"
     generation_model: str = ""
@@ -49,7 +56,7 @@ class Settings(BaseSettings):
     )
     hook_collector_poll_seconds: float = 2.0
     hook_claim_stale_seconds: int = 60
-    pipeline_version: str = "1.1.0"
+    pipeline_version: str = "1.2.0"
     parser_version: str = "markdown-it-py-4"
     chunker_version: str = "lkp-heading-symbol-v1"
     max_file_bytes: int = 10 * 1024 * 1024
@@ -60,6 +67,11 @@ class Settings(BaseSettings):
     worker_job_cooldown_seconds: float = Field(default=1.0, ge=0, le=300)
     worker_burst_jobs: int = Field(default=20, ge=1, le=10000)
     worker_burst_cooldown_seconds: float = Field(default=15.0, ge=0, le=3600)
+    worker_lexical_job_cooldown_seconds: float = Field(default=0.05, ge=0, le=300)
+    worker_lexical_burst_jobs: int = Field(default=200, ge=1, le=10000)
+    worker_lexical_burst_cooldown_seconds: float = Field(
+        default=2.0, ge=0, le=3600
+    )
     worker_pause_file: Path = Path("runtime/embedding.pause")
     worker_pause_poll_seconds: float = Field(default=5.0, ge=0.5, le=300)
     reconciliation_seconds: int = 300

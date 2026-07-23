@@ -12,7 +12,7 @@ class SearchRequest(BaseModel):
     project: str | None = None
     path_prefix: str | None = None
     embedding_revision: str | None = None
-    minimum_similarity: float = Field(default=0.2, ge=-1, le=1)
+    minimum_similarity: float = Field(default=0.5, ge=-1, le=1)
 
 
 class Provenance(BaseModel):

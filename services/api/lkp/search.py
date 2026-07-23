@@ -63,6 +63,27 @@ VECTOR_SQL = text(
 )
 
 
+def classify_confidence(
+    results: list[SearchResult],
+    mode: str,
+    *,
+    high_similarity: float,
+) -> str:
+    if not results:
+        return "none"
+    if mode in {"keyword", "path", "symbol"}:
+        return "high"
+    if mode == "hybrid" and any(
+        (result.lexical_rank or 0) > 0 for result in results
+    ):
+        return "high"
+    best_similarity = max(
+        (result.vector_similarity or -1 for result in results),
+        default=-1,
+    )
+    return "high" if best_similarity >= high_similarity else "low"
+
+
 def _params(request: SearchRequest) -> dict:
     return {
         "query": request.query,
@@ -151,8 +172,11 @@ def search(
             duration_ms=elapsed,
         )
     )
-    best = max((item.fused_rank for item in results), default=0)
-    confidence = "none" if not results else ("high" if best >= 1 / 61 else "low")
+    confidence = classify_confidence(
+        results,
+        request.mode,
+        high_similarity=settings.semantic_high_confidence_similarity,
+    )
     return SearchResponse(
         query=request.query,
         mode=request.mode,

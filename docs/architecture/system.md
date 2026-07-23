@@ -44,11 +44,19 @@ temperature zero, and explicit model digest validation. Its output is a separate
 whose frontmatter records provider, model, digest, source hash, and pipeline revision. An LLM
 failure leaves raw capture and lexical search healthy.
 
-Raw hook transport, activity history, searchable documents, semantic vectors, and canonical
-knowledge cases are separate promotion levels. The collector filters lifecycle/read-only noise
-before creating an activity row. Generated tokenizer payloads are excluded; lockfiles and
-oversized/high-chunk documents remain lexical-only with an explicit skip reason. See
-[ADR 0006](../adr/0006-knowledge-value-selection.md).
+Raw hook transport, activity history, searchable files, semantic vectors, and canonical knowledge
+cases are separate promotion levels. The collector filters lifecycle/read-only noise before
+creating an activity row. Generated tokenizer payloads are excluded; code, nested Git dependencies,
+lockfiles, and oversized/high-chunk documents remain lexical-only by default with an explicit skip
+reason. Project identity uses the top-level Git repository below the source root, while provenance
+retains both source-root-relative and project-relative paths. See
+[ADR 0006](../adr/0006-knowledge-value-selection.md) and
+[ADR 0007](../adr/0007-purpose-scoped-retrieval.md).
+
+The durable unit remains one file, but execution policy is workload-aware. Semantic Markdown jobs
+use conservative model cooldowns; lexical code/dependency jobs use a larger burst under a one-CPU
+worker limit and never call Ollama. This preserves per-file recovery while preventing an initial
+catalog scan from becoming a model workload.
 
 References: [Ollama chat API](https://docs.ollama.com/api/chat) and
 [structured outputs](https://docs.ollama.com/capabilities/structured-outputs).

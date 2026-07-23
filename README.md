@@ -78,8 +78,11 @@ active light/dark color scheme.
 
 Readable input is not automatically embedded knowledge. A deterministic policy removes lifecycle
 and read-only Codex noise before activity storage, ignores generated tokenizer payloads, and keeps
-lockfiles or over-budget documents lexical-only. Canonical cases still require verified evidence.
-See [ADR 0006](docs/adr/0006-knowledge-value-selection.md).
+repository code, nested Git dependencies, lockfiles, and over-budget documents lexical-only by
+default. Explorer projects are the top-level Git repositories below the source root, not an
+incidental parent such as `ai`. Canonical cases still require verified evidence. See
+[ADR 0006](docs/adr/0006-knowledge-value-selection.md) and
+[ADR 0007](docs/adr/0007-purpose-scoped-retrieval.md).
 
 ## Global Codex activity capture
 
@@ -128,9 +131,10 @@ Production embedding uses Ollama `qwen3-embedding:0.6b`, digest
 digest mismatch fails closed. Model changes require a new revision; vectors are never silently
 mixed. Tests use a separate deterministic revision.
 
-The WSL2 runtime keeps embedding thermally bounded: Ollama has a two-CPU Docker quota, the worker
-has a one-CPU quota, model concurrency is one, requests use small batches, and worker job/burst
-cooldowns prevent an initial scan backlog from saturating every core. Operators can create
+The WSL2 runtime keeps embedding thermally bounded: Ollama and the worker each have a one-CPU
+Docker quota, model concurrency is one, and requests use one-chunk batches. Semantic and lexical
+jobs have separate cooldown/burst policies, so an initial code catalog scan drains without calling
+the model while semantic work remains conservative. Operators can create
 `E:\Data\LocalKnowledgePortal\runtime\embedding.pause` to stop new leases while keeping the portal
 and lexical search online. See the operations runbook before changing these defaults.
 

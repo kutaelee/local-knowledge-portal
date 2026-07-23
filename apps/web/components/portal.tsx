@@ -75,15 +75,21 @@ const translations = {
       dataAsOf: "데이터 기준",
       latestIndex: "마지막 인덱싱",
       statusGood: "지식베이스가 최신 상태입니다",
-      statusIndexing: "새 문서를 인덱싱하고 있습니다",
+      statusIndexing: "새 파일을 인덱싱하고 있습니다",
       statusAttention: "확인이 필요한 작업이 있습니다",
       statusGoodDetail: "대기 중이거나 실패한 수집 작업이 없습니다.",
       projects: "프로젝트",
       projectsNote: "등록된 소스에서 식별한 프로젝트 수",
-      documents: "현재 문서",
-      documentsNote: "삭제 문서를 제외한 최신 문서 수",
-      chunks: "검색 단위",
-      chunksNote: "검색과 RAG에서 인용 가능한 문단·코드 조각",
+      documents: "인덱싱된 파일",
+      documentsNote: "지식 문서, 코드, 설정·데이터 파일의 최신 상태",
+      chunks: "검색 조각",
+      chunksNote: "전체는 키워드·심볼 검색, 선별 문서만 의미 검색",
+      knowledgeDocs: "지식 문서",
+      codeFiles: "코드",
+      supportFiles: "설정·데이터",
+      semanticCoverage: "의미 검색",
+      initialScan: "초기 스캔",
+      liveChanges: "실시간 변경",
       pending: "대기 작업",
       pendingNote: "가장 오래된 대기",
       ingestion: "실제 수집량",
@@ -94,6 +100,8 @@ const translations = {
       embedding: "임베딩 모델",
       revision: "벡터 리비전",
       pipelineVersion: "파이프라인 버전",
+      repositoryMode: "저장소 의미 검색 범위",
+      docsOnly: "문서만 · 코드는 키워드/심볼",
       workers: "현재 동작 중인 서비스",
       queue: "작업 큐",
       failed: "실패",
@@ -128,13 +136,13 @@ const translations = {
     },
     explorer: {
       eyebrow: "읽기 전용 탐색기",
-      title: "프로젝트와 문서",
-      visible: "표시 문서",
+      title: "저장소와 파일",
+      visible: "표시 파일",
       limited: "일부만 표시",
       treeLabel: "소스 트리",
       loadError: "소스 트리를 불러오지 못했습니다.",
-      emptyTitle: "인덱싱된 문서가 없습니다",
-      emptyDetail: "스캔과 worker를 실행하면 문서 트리가 채워집니다.",
+      emptyTitle: "인덱싱된 파일이 없습니다",
+      emptyDetail: "스캔과 worker를 실행하면 저장소 트리가 채워집니다.",
     },
     searchView: {
       eyebrow: "근거 기반 검색",
@@ -233,15 +241,21 @@ const translations = {
       dataAsOf: "Data as of",
       latestIndex: "Latest indexing",
       statusGood: "Knowledge is up to date",
-      statusIndexing: "New documents are being indexed",
+      statusIndexing: "New files are being indexed",
       statusAttention: "Some jobs need attention",
       statusGoodDetail: "No pending or failed ingest work.",
       projects: "Projects",
       projectsNote: "Project groups identified in registered sources",
-      documents: "Current documents",
-      documentsNote: "Latest active documents, excluding deleted files",
-      chunks: "Search passages",
-      chunksNote: "Citable text and code units used by search and RAG",
+      documents: "Indexed files",
+      documentsNote: "Current knowledge, code, and support files",
+      chunks: "Search chunks",
+      chunksNote: "All support lexical/symbol search; selected documents support semantics",
+      knowledgeDocs: "knowledge docs",
+      codeFiles: "code",
+      supportFiles: "support",
+      semanticCoverage: "semantic",
+      initialScan: "initial scan",
+      liveChanges: "live changes",
       pending: "Pending jobs",
       pendingNote: "Oldest pending",
       ingestion: "Actual ingestion",
@@ -252,6 +266,8 @@ const translations = {
       embedding: "Embedding model",
       revision: "Vector revision",
       pipelineVersion: "Pipeline version",
+      repositoryMode: "Repository semantic scope",
+      docsOnly: "Docs only · code uses keyword/symbol",
       workers: "Active services",
       queue: "Job queue",
       failed: "Failed",
@@ -285,8 +301,8 @@ const translations = {
       justNow: "just now",
     },
     explorer: {
-      eyebrow: "Read-only explorer", title: "Projects & documents",
-      visible: "visible documents", limited: "limited view", treeLabel: "Source tree",
+      eyebrow: "Read-only explorer", title: "Repositories & files",
+      visible: "visible files", limited: "limited view", treeLabel: "Source tree",
       loadError: "The source tree could not be loaded.",
       emptyTitle: "No indexed documents",
       emptyDetail: "Run a scan and worker to populate the tree.",
@@ -561,13 +577,33 @@ function Overview({ onNavigate, locale }: {
       : text.statusGoodDetail;
   const cards = [
     [text.projects, data?.projects ?? 0, GitBranch, text.projectsNote],
-    [text.documents, data?.documents ?? 0, Files, text.documentsNote],
-    [text.chunks, data?.chunks ?? 0, Blocks, text.chunksNote],
+    [
+      text.documents,
+      data?.documents ?? 0,
+      Files,
+      data
+        ? `${number.format(data.document_breakdown.knowledge_documents)} ${text.knowledgeDocs} · ${
+          number.format(data.document_breakdown.code_files)} ${text.codeFiles} · ${
+          number.format(data.document_breakdown.support_files)} ${text.supportFiles}`
+        : text.documentsNote,
+    ],
+    [
+      text.chunks,
+      data?.chunks ?? 0,
+      Blocks,
+      data
+        ? `${number.format(data.semantic_chunks)} ${text.semanticCoverage} (${
+          Math.round(data.semantic_coverage * 100)}%)`
+        : text.chunksNote,
+    ],
     [
       text.pending,
       pending,
       Clock3,
-      `${text.pendingNote} ${formatDuration(data?.oldest_pending_seconds ?? 0, locale)}`,
+      data
+        ? `${number.format(data.pending_breakdown.initial_scan)} ${text.initialScan} · ${
+          number.format(data.pending_breakdown.live_changes)} ${text.liveChanges}`
+        : text.pendingNote,
     ],
   ] as const;
   const throughput = data?.throughput ?? [];
@@ -632,6 +668,8 @@ function Overview({ onNavigate, locale }: {
             <div><dt>{text.embedding}</dt><dd>{data?.embedding_model ?? "—"}</dd></div>
             <div><dt>{text.revision}</dt><dd className="mono">{data?.embedding_revision ?? "—"}</dd></div>
             <div><dt>{text.pipelineVersion}</dt><dd>{data?.pipeline_version ?? "—"}</dd></div>
+            <div><dt>{text.repositoryMode}</dt><dd>{data?.repository_embedding_mode === "docs_only"
+              ? text.docsOnly : data?.repository_embedding_mode ?? "—"}</dd></div>
             <div><dt>{text.workers}</dt><dd>{data?.workers ?? 0}</dd></div>
           </dl>
         </article>

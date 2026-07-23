@@ -11,7 +11,8 @@ from fastapi.responses import PlainTextResponse
 from lkp_indexer.embedding import OllamaEmbedder
 from lkp_indexer.knowledge import create_candidate, evaluate_gate, publish_candidate
 from lkp_indexer.queue import retry_as_new
-from sqlalchemy import func, select, text
+from lkp_indexer.selection import CODE_EXTENSIONS
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from .db import get_db
@@ -19,6 +20,7 @@ from .logging import configure_logging
 from .models import (
     ActivityEvent,
     BackupRun,
+    ChunkEmbedding,
     Document,
     DocumentChunk,
     DocumentLink,
@@ -658,14 +660,17 @@ def tree(
     )
     if project:
         statement = statement.where(Document.project_key == project)
-    rows = db.scalars(statement.order_by(Document.relative_path).limit(limit)).all()
+    rows = db.scalars(
+        statement.order_by(Document.project_key, Document.project_relative_path).limit(limit)
+    ).all()
     return {
         "items": [
             {
                 "id": str(row.id),
                 "source_root_id": str(row.source_root_id),
                 "project": row.project_key,
-                "path": row.relative_path,
+                "path": row.project_relative_path,
+                "source_relative_path": row.relative_path,
                 "state": row.state.value,
             }
             for row in rows
@@ -934,12 +939,81 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
     for item in current_workers:
         worker_states[item["state"]] = worker_states.get(item["state"], 0) + 1
     active_worker_states = {"healthy", "busy", "idle", "cooldown", "paused"}
+    document_breakdown_row = db.execute(
+        select(
+            func.count(Document.id)
+            .filter(
+                or_(
+                    SourceRoot.source_type == "obsidian",
+                    Document.extension.in_([".md", ".mdx"]),
+                )
+            )
+            .label("knowledge_documents"),
+            func.count(Document.id)
+            .filter(Document.extension.in_(sorted(CODE_EXTENSIONS)))
+            .label("code_files"),
+            func.count(Document.id)
+            .filter(
+                ~Document.extension.in_(
+                    sorted(CODE_EXTENSIONS | {".md", ".mdx"})
+                ),
+                SourceRoot.source_type != "obsidian",
+            )
+            .label("support_files"),
+        )
+        .select_from(Document)
+        .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+        .where(
+            Document.state == DocumentState.active,
+            SourceRoot.data_scope == "production",
+        )
+    ).one()
+    current_chunks = int(
+        db.scalar(
+            select(func.count())
+            .select_from(DocumentChunk)
+            .join(Document, Document.current_version_id == DocumentChunk.document_version_id)
+            .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+            .where(
+                Document.state == DocumentState.active,
+                SourceRoot.data_scope == "production",
+            )
+        )
+        or 0
+    )
+    semantic_chunks = int(
+        db.scalar(
+            select(func.count())
+            .select_from(ChunkEmbedding)
+            .join(DocumentChunk, DocumentChunk.id == ChunkEmbedding.chunk_id)
+            .join(Document, Document.current_version_id == DocumentChunk.document_version_id)
+            .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+            .where(
+                Document.state == DocumentState.active,
+                SourceRoot.data_scope == "production",
+                ChunkEmbedding.embedding_revision == settings.embedding_revision,
+            )
+        )
+        or 0
+    )
+    pending_initial = int(
+        db.scalar(
+            select(func.count())
+            .select_from(IngestJob)
+            .where(IngestJob.status == JobStatus.pending, IngestJob.job_type == "index")
+        )
+        or 0
+    )
+    pending_live = max(0, int(counts.get(JobStatus.pending, 0)) - pending_initial)
     return {
         "generated_at": now,
         "projects": db.scalar(
             select(func.count(func.distinct(Document.project_key)))
             .join(SourceRoot, SourceRoot.id == Document.source_root_id)
-            .where(SourceRoot.data_scope == "production")
+            .where(
+                Document.state == DocumentState.active,
+                SourceRoot.data_scope == "production",
+            )
         ),
         "documents": db.scalar(
             select(func.count())
@@ -950,17 +1024,20 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
                 SourceRoot.data_scope == "production",
             )
         ),
-        "chunks": db.scalar(
-            select(func.count())
-            .select_from(DocumentChunk)
-            .join(
-                DocumentVersion,
-                DocumentVersion.id == DocumentChunk.document_version_id,
-            )
-            .join(Document, Document.id == DocumentVersion.document_id)
-            .join(SourceRoot, SourceRoot.id == Document.source_root_id)
-            .where(SourceRoot.data_scope == "production")
+        "chunks": current_chunks,
+        "semantic_chunks": semantic_chunks,
+        "semantic_coverage": (
+            semantic_chunks / current_chunks if current_chunks else 0.0
         ),
+        "document_breakdown": {
+            "knowledge_documents": int(document_breakdown_row.knowledge_documents),
+            "code_files": int(document_breakdown_row.code_files),
+            "support_files": int(document_breakdown_row.support_files),
+        },
+        "pending_breakdown": {
+            "initial_scan": pending_initial,
+            "live_changes": pending_live,
+        },
         "jobs": {key.value: value for key, value in counts.items()},
         "oldest_pending_seconds": float(oldest or 0),
         "queue_rate_per_hour": queue_rate_per_hour,
@@ -979,6 +1056,7 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
         "embedding_model": settings.embedding_model,
         "embedding_revision": settings.embedding_revision,
         "pipeline_version": settings.pipeline_version,
+        "repository_embedding_mode": settings.repository_embedding_mode,
     }
 
 

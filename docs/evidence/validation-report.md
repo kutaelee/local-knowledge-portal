@@ -13,7 +13,7 @@ Linux 컨테이너로 실행하고 localhost에만 공개한다.
 
 ## 구현 결과
 
-- PostgreSQL 18.4 + pgvector 0.8.2, schema `0003_queue_scale_indexes`.
+- PostgreSQL 18.4 + pgvector 0.8.2, schema `0004_project_semantic_scope`.
 - Linux-native source repository는 WSL ext4, 운영 데이터와 managed Vault는
   `E:\Data\LocalKnowledgePortal`, Ollama model은 `E:\AI\Models\Ollama`, Codex raw spool은
   `E:\LocalKnowledgePortal`, immutable backup은 `D:\LocalBackup\LocalKnowledgePortal`에
@@ -432,3 +432,142 @@ backup/restore.
 
 Verdict: **VERIFIED**. No source repository file, verified case, managed Runbook, or backup was
 deleted. Codex hook trust remains **MANUAL_APPROVAL_REQUIRED**.
+
+## 2026-07-24 purpose-scoped repository retrieval
+
+### Root cause and design correction
+
+- The user-visible values `2,311 documents`, `21,023 chunks`, and `1,509 pending jobs` were not
+  2,311 curated knowledge documents. They were a source-file catalog whose code files were labelled
+  as documents and sent through the same semantic path.
+- `project_key` used the first source-root-relative directory, so all repositories below
+  `/home/kutae/src/ai` appeared as one project named `ai`.
+- The first correction that selected the nearest `.git` directory exposed a second defect:
+  vendored Eigen was incorrectly split from `TRELLIS.2`. The final rule selects the top-level Git
+  repository below the source root and keeps nested Git repositories as dependencies.
+- Catalog, lexical search, semantic retrieval, and evidence-gated canonical knowledge are now
+  separate scopes. The default `LKP_REPOSITORY_EMBEDDING_MODE=docs_only` keeps code available to
+  path/keyword/symbol search but embeds only project-owned Markdown and managed Vault content.
+  Nested Git dependency documentation is lexical-only.
+- One file remains one durable lease/idempotency/version boundary. Semantic and lexical jobs use
+  separate scheduling policies: semantic `1 s / 20 jobs / 15 s`, lexical
+  `0.05 s / 200 jobs / 2 s`. This fixes throughput without losing per-file recovery.
+- Dashboard terminology now says indexed files and search chunks, reports knowledge/code/support
+  counts, semantic coverage, and separates initial-scan backlog from live changes. Explorer shows
+  repository names and project-relative paths.
+- Semantic search defaults to minimum similarity `0.5`; `high` requires `0.6`. RRF position no
+  longer makes a low-similarity first result appear high-confidence.
+
+The accepted design is recorded in
+`docs/adr/0007-purpose-scoped-retrieval.md`. Migration
+`0004_project_semantic_scope` adds `project_relative_path` without deleting existing rows.
+
+### Safe production conversion
+
+- watcher and worker were stopped before conversion.
+- Pre-conversion immutable backup:
+  `D:\LocalBackup\LocalKnowledgePortal\database\2026-07-23T154714Z`,
+  dump size `119,978,290` bytes. Its separate restore test passed at schema
+  `0003_queue_scale_indexes` with 2,316 documents, 21,374 chunks, 21,309 vectors, and zero
+  activities.
+- First dry-run examined 2,316 active files, found zero missing sources, and selected 20,772
+  rebuildable code vectors. Apply removed only those vectors and reclassified projects:
+  `TRELLIS.2=1,710`, `pytorch3d=369`, `Step1X-3D=143`, `FlashVSR=92`, managed `_generated=2`.
+- A live job then exposed vendored CUTLASS Markdown. The worker was stopped, nested Git dependency
+  exclusion was added, and a second dry-run selected 278 dependency vectors. Apply removed only
+  those vectors.
+- Atomic manifests:
+  `/data/exports/purpose-migration-20260723T155100Z.json` and
+  `/data/exports/purpose-migration-dependencies-20260723T155700Z.json`.
+- Source files, document rows, append-only versions, chunks, jobs, and audit history were not
+  deleted. Post-conversion orphan vector count was zero.
+
+Final production state after backlog drain:
+
+| Item | Verified value |
+|---|---:|
+| active indexed files | 3,817 |
+| current chunks | 39,758 |
+| current semantic chunks | 269 |
+| projects | 6 |
+| initial/live pending | 0 / 0 |
+| knowledge/code/support files | 70 / 3,458 / 289 |
+| current code vectors | 0 |
+| current vector extensions | `.md` only |
+| skipped nested dependency files | 2,920 |
+| skipped repository code/support files | 879 |
+
+All 286 retained historical/current vectors use one production revision:
+`ollama-qwen3-embedding-0.6b-ac6da0df-d1024-v1`, provider Ollama,
+model `qwen3-embedding:0.6b`, digest
+`ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d`,
+dimension 1024.
+
+### Load and search verification
+
+- Before the final thermal correction, watcher was `0.14–0.47%` but Ollama reached `191.92%`
+  under its former two-CPU quota. This confirms the heat source was embedding, not the watcher.
+- Ollama is now hard-capped at one CPU, model parallelism one, embedding batch one, and a
+  one-second inter-batch delay. A three-sample active run measured Ollama
+  `77.12%, 98.26%, 12.91%`; watcher remained `0.13–0.27%`.
+- With dependency Markdown excluded, a live lexical run reduced pending work
+  `1,275 → 1,113` in ten seconds. worker measured `10.69–27.12%`, watcher
+  `0.19–0.34%`, and Ollama `0–3.28%`. The log recorded a 200-job lexical burst and two-second
+  cooldown.
+- Final idle sample: watcher `0.91%`, worker `0.23%`, Ollama `0.00%`, API `0.15%`.
+- Code keyword search for `flash_attn` returned Python/shell symbol chunks with source path,
+  version, hash, and line provenance while code had no vector.
+- Weak semantic query `PostgreSQL queue recovery` returned `confidence=none`, zero results.
+  Incident query `Ollama embedding CPU overheat guard` returned the managed Runbook with
+  similarity `0.9076` and `confidence=high`.
+
+Long-duration thermal/endurance testing remains explicitly excluded; no package-temperature sensor
+was available to verify the user's reported 92°C directly.
+
+### Final executed verification
+
+```text
+bash scripts/validate-container.sh .
+  PASS: ruff, 30 unit tests
+LKP_TEST_DATABASE_URL=<ephemeral tmpfs PostgreSQL 18> \
+  bash scripts/test-integration-container.sh .
+  PASS: 10 integration tests; clean schema 0004
+docker compose ... build api web
+  PASS: API image; Next.js 16.2.11 production build and TypeScript
+python tests/retrieval/evaluate.py  # isolated DB, real Ollama
+  PASS: baseline unchanged; no-answer and stale exclusion passed
+playwright test  # restored isolated DB, API 18010, Web 13010
+  PASS: 4/4 scenarios
+bash scripts/backup-wsl-docker.sh
+bash scripts/restore-test-wsl-docker.sh <new backup>
+  PASS: checksum and separate PostgreSQL restore
+```
+
+Retrieval baseline remained:
+
+| mode | Hit@5 | Hit@10 | MRR | filter | citation |
+|---|---:|---:|---:|---:|---:|
+| keyword | 0.6667 | 0.6667 | 0.6667 | 1.00 | 1.00 |
+| semantic | 1.00 | 1.00 | 0.8519 | 1.00 | 1.00 |
+| hybrid | 1.00 | 1.00 | 0.9259 | 1.00 | 1.00 |
+
+The production-data Playwright attempt passed 2/4 but correctly found no Activity fixture and no
+retryable failed job after cleanup. Tests were redesigned to restore a backup into an ephemeral
+tmpfs database, seed validation-only rows there, and run on isolated ports. The isolated run passed
+4/4 and left production activity count at zero. Earlier integration/retrieval orchestration attempts
+also failed closed on the dedicated-DB guard, PostgreSQL 18 tmpfs path, PowerShell hostname
+interpolation, and model-host allowlist; each was corrected without weakening the guard.
+
+Final append-only backup:
+
+- path: `D:\LocalBackup\LocalKnowledgePortal\database\2026-07-23T160749Z`
+- status: `succeeded`
+- dump size: `27,115,408` bytes
+- SHA-256: `f0c50a5b09f0d50908c53663399939820b3fd53aa7decb44579ad7cd492de9c6`
+- schema: `0004_project_semantic_scope`
+- restore result: documents 3,817, chunks 39,775, vectors 286, activities 0
+
+Verified canonical cases: 2, distinct dedup keys: 2, exact duplicates: 0. The only remaining manual
+approval is Codex `/hooks` trust review; status remains `MANUAL_APPROVAL_REQUIRED`.
+
+Verdict for this correction: **VERIFIED**. No long-duration endurance or thermal soak is claimed.

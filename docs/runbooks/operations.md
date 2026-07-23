@@ -56,11 +56,12 @@ pending count: file-level jobs preserve idempotency and provenance. The portal d
 backlog from cumulative completed history and estimates drain time from the preceding three hours.
 Ready and expired-lease partial indexes keep claims bounded as history grows.
 
-Before embedding, the worker applies `deterministic-knowledge-value-v1`. Generated tokenizer
-payloads are ignored. Lockfiles, minified/generated files, documents above 128 chunks, and documents
-above 250,000 characters are indexed lexically but receive
-`embedding_status=skipped_cost_limit`. Change these limits through configuration only after
-retrieval evaluation; do not remove the guard to make an initial scan appear faster.
+Before embedding, the worker applies `purpose-aware-v2`. Generated tokenizer payloads are ignored.
+Repository code and nested Git dependencies are lexical-only in the default `docs_only` mode.
+Lockfiles, minified/generated files, documents above 128 chunks, and documents above 250,000
+characters are also indexed lexically with an explicit skip reason. Change the mode or limits
+through configuration only after retrieval evaluation; do not remove the guard to make an initial
+scan appear faster.
 
 ## Watcher incident
 
@@ -89,10 +90,11 @@ If Ollama is unavailable, new embedding jobs fail and retry; keyword retrieval o
 
 ### CPU and thermal guard
 
-The WSL2 Compose deployment applies a hard two-CPU quota to Ollama and a one-CPU quota to the
-worker. Do not remove these limits to accelerate an initial scan. Throughput is intentionally
-bounded with two-chunk embedding batches, inter-batch and inter-job delays, and a 20-job burst
-cooldown.
+The WSL2 Compose deployment applies a hard one-CPU quota to both Ollama and the worker. Do not
+remove these limits to accelerate an initial scan. Semantic throughput is intentionally bounded
+with one-chunk embedding batches, inter-batch and inter-job delays, and a 20-job burst cooldown.
+Lexical-only jobs never call Ollama and use a separate 200-job burst with a short cooldown under
+the same worker CPU limit.
 
 Inspect the effective cgroup limits and current load:
 

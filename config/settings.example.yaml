@@ -12,10 +12,12 @@ worker:
   lease_seconds: 120
   max_attempts: 5
   retry_base_seconds: 2
-  embedding_batch_size: 2
-  embedding_batch_cooldown_seconds: 0.5
+  embedding_batch_size: 1
+  embedding_batch_cooldown_seconds: 1
+  semantic_high_confidence_similarity: 0.6
   embedding_max_chunks_per_document: 128
   embedding_max_chars_per_document: 250000
+  repository_embedding_mode: "docs_only"
   job_cooldown_seconds: 1
   burst_jobs: 20
   burst_cooldown_seconds: 15
@@ -26,8 +28,8 @@ chunking:
   parser_version: "markdown-it-py-4"
   chunker_version: "lkp-heading-symbol-v1"
 pipeline:
-  version: "1.1.0"
-  knowledge_value_policy: "deterministic-knowledge-value-v1"
+  version: "1.2.0"
+  knowledge_value_policy: "purpose-aware-v2"
 codex_capture:
   enabled: true
   source: "%USERPROFILE%\\.codex\\sessions"

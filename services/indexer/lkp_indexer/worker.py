@@ -25,7 +25,9 @@ from .chunking import chunk_document
 from .embedding import Embedder
 from .ignore import IgnoreRules
 from .paths import canonicalize
+from .projects import project_identity
 from .queue import fail, finish
+from .selection import semantic_policy
 
 
 def _utcnow() -> datetime:
@@ -123,6 +125,25 @@ def _embed_missing(
     if not missing:
         return
     document = session.get(Document, version.document_id)
+    root = session.get(SourceRoot, document.source_root_id) if document else None
+    if document and root:
+        policy_allowed, policy_reason = semantic_policy(
+            Path(document.canonical_path),
+            root,
+            repository_mode=settings.repository_embedding_mode,
+        )
+        if not policy_allowed:
+            version.metadata_json = {
+                **version.metadata_json,
+                "embedding_status": "skipped_policy",
+                "embedding_skip_reason": policy_reason,
+                "embedding_policy": "purpose-aware-v2",
+                "embedding_chunk_count": len(chunks),
+                "embedding_character_count": sum(
+                    len(chunk.content) for chunk in chunks
+                ),
+            }
+            return
     allowed, reason = embedding_cost_decision(
         chunks,
         max_chunks=settings.embedding_max_chunks_per_document,
@@ -227,6 +248,7 @@ def process_job(
         canonical = canonicalize(path, root_path)
         info = canonical.stat()
         relative = canonical.relative_to(root_path).as_posix()
+        identity = project_identity(canonical, root_path)
         if IgnoreRules(root_path, root.exclude_patterns).matches(relative):
             if existing:
                 existing.state = DocumentState.ignored
@@ -253,7 +275,6 @@ def process_job(
         digest = hashlib.sha256(raw).hexdigest()
         modified = datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)
         if existing is None:
-            project_key = relative.split("/", 1)[0] if "/" in relative else root.name
             existing = Document(
                 source_root_id=root.id,
                 canonical_path=str(canonical),
@@ -261,7 +282,8 @@ def process_job(
                 filename=canonical.name,
                 extension=canonical.suffix.lower(),
                 mime_type=mimetypes.guess_type(canonical.name)[0] or "text/plain",
-                project_key=project_key,
+                project_key=identity.key,
+                project_relative_path=identity.relative_path,
                 parent_path=canonical.parent.relative_to(root_path).as_posix(),
                 size_bytes=info.st_size,
                 modified_at_fs=modified,
@@ -276,6 +298,8 @@ def process_job(
         existing.modified_at_fs = modified
         existing.size_bytes = info.st_size
         existing.state = DocumentState.active
+        existing.project_key = identity.key
+        existing.project_relative_path = identity.relative_path
         if existing.current_content_hash == digest:
             if embedder and existing.current_version_id:
                 current_version = session.get(DocumentVersion, existing.current_version_id)
@@ -301,12 +325,19 @@ def process_job(
             heartbeat(session, worker_id, "idle", success=True)
             return
         chunks, parsed_metadata = chunk_document(canonical, content)
-        embedding_allowed, embedding_skip_reason = embedding_cost_decision(
+        policy_allowed, policy_reason = semantic_policy(
+            canonical,
+            root,
+            repository_mode=settings.repository_embedding_mode,
+        )
+        cost_allowed, cost_reason = embedding_cost_decision(
             chunks,
             max_chunks=settings.embedding_max_chunks_per_document,
             max_chars=settings.embedding_max_chars_per_document,
             path=canonical,
         )
+        embedding_allowed = policy_allowed and cost_allowed
+        embedding_skip_reason = policy_reason if not policy_allowed else cost_reason
         should_embed = bool(embedder and chunks and embedding_allowed)
         vectors = embedder.embed([chunk.content for chunk in chunks]) if should_embed else []
         if should_embed and any(
@@ -316,10 +347,12 @@ def process_job(
         embedding_status = (
             "complete"
             if should_embed
+            else "skipped_policy"
+            if chunks and not policy_allowed
             else "skipped_cost_limit"
-            if embedder and chunks and not embedding_allowed
+            if chunks and policy_allowed and not cost_allowed
             else "pending"
-            if not embedder and chunks
+            if not embedder and chunks and embedding_allowed
             else "not_required"
         )
         version = DocumentVersion(
@@ -338,7 +371,9 @@ def process_job(
                 "embedding_skip_reason": embedding_skip_reason,
                 "embedding_chunk_count": len(chunks),
                 "embedding_character_count": sum(len(chunk.content) for chunk in chunks),
-                "embedding_policy": "deterministic-knowledge-value-v1",
+                "embedding_policy": "purpose-aware-v2",
+                "project_key": identity.key,
+                "project_relative_path": identity.relative_path,
                 "indexed_at": _utcnow().isoformat(),
             },
             previous_version_id=existing.current_version_id,
