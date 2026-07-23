@@ -281,3 +281,32 @@ Verdict for this remediation: **VERIFIED**.
   `docs/evidence/ollama-embedding-cpu-remediation-2026-07-23.md`.
 
 Verdict for this remediation: **VERIFIED**, excluding long-duration thermal/endurance testing.
+
+## 2026-07-23 Korean localization and dashboard freshness
+
+- The portal now defaults to Korean and exposes an explicit Korean/English selector. The preference
+  persists in `localStorage`, and the document `lang` attribute follows the selected language.
+- The overview now reports the API snapshot time, last indexed time, latest source modification,
+  recently indexed documents, per-source reconciliation freshness, queue age/state, active worker
+  states, and the active embedding and pipeline revision.
+- The previous static throughput example was removed. The chart is backed by indexed-event counts
+  from PostgreSQL over the preceding 12 hours.
+- Human-readable explanations distinguish source modification time, detection/index time, and
+  reconciliation time. Recent documents link to the document viewer; stale sources are visibly
+  labelled rather than silently presented as current.
+- The API summary contract was extended without changing the provenance-bearing search and RAG
+  contracts used by agents or local LLM adapters.
+- Executed validation:
+  - `bash scripts/validate-container.sh .`: ruff passed and 24 unit tests passed.
+  - Docker Next.js 16.2.11 production build and TypeScript validation passed.
+  - Live `/api/v1/metrics/summary` returned measured throughput, eight recent documents, two source
+    roots, queue state, worker states, and indexing/source timestamps.
+  - In-app browser validation confirmed Korean rendering, English switching, Korean switching,
+    persistence after reload, freshness content, recent-document content, and localized provenance.
+- A Playwright localization scenario was added. Its CLI run was not reported as passed in this
+  change because Windows pnpm crashed while traversing the WSL UNC checkout. The partial root-owned
+  `node_modules` created by that failed attempt was identified as disposable derived data and
+  removed from the exact repository path. Existing production runtime data was not changed.
+
+Verdict for the localized dashboard: **VERIFIED** by production build, live API data, and interactive
+browser checks. The newly added Playwright CLI scenario remains **NOT_EXECUTED** in this pass.

@@ -61,6 +61,17 @@ cd ~/src/local-knowledge-portal
 Portal, API docs, live health, and readiness remain available only on loopback at ports 3010 and
 8010. PostgreSQL and Ollama are not published to the host network.
 
+## Human-facing portal
+
+The portal defaults to Korean and can be switched to English from the top bar. The preference is
+saved in the browser and the document language is updated for assistive technology.
+
+The overview is intended for human verification rather than model consumption. It shows the data
+snapshot time, last indexed source time, most recently indexed documents, per-source reconciliation
+freshness, queue age and state, worker state, and the active embedding/pipeline revision. Throughput
+charts use measured database events; they do not display placeholder series. API and RAG clients
+continue to use the same provenance-bearing endpoints independently of the display language.
+
 ## Global Codex activity capture
 
 The user-level `%USERPROFILE%\.codex\hooks.json` records activity from every trusted Codex

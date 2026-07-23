@@ -2,6 +2,19 @@
 
 Status: accepted
 
-Git and source code live at `C:\Dev\Repos\local-knowledge-portal`. Active database, models, cache, ingest artifacts, logs, vault, and exports live below `E:\LocalKnowledgePortal`. Backups are immutable timestamped directories below `D:\Backups\LocalKnowledgePortal`.
+The repository is Linux-native and lives in the WSL ext4 filesystem at
+`/home/kutae/src/local-knowledge-portal`. Operational Compose configuration,
+ignored secrets, and the stable Windows hook wrapper live under
+`C:\Docker\local-knowledge-portal`.
 
-Paths are supplied through environment variables or YAML. No operational absolute path is embedded in application logic. Existing repositories and protected D:/E: trees are outside the write allowlist.
+Application runtime data, ingest artifacts, logs, managed vault content, cache,
+and exports live under `E:\Data\LocalKnowledgePortal`. Ollama embedding models
+live under `E:\AI\Models\Ollama`. PostgreSQL/pgvector uses the Docker-managed
+named volume `local-knowledge-portal_postgres-data` inside Docker Desktop's C:
+VHDX and is backed up through PostgreSQL logical dumps rather than filesystem
+copies. Append-only dated backups live under
+`D:\LocalBackup\LocalKnowledgePortal`.
+
+The application containers receive these paths through environment variables
+and read-only or explicit writable mounts. Existing repositories and protected
+D:/E: trees remain outside the write allowlist.

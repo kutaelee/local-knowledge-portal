@@ -1,8 +1,34 @@
 import { expect, test } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("lkp-locale", "en"));
+});
+
+test("localized overview explains freshness and persists language", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "See what is current, at a glance." }))
+    .toBeVisible();
+  await expect(page.getByText("Latest indexing", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Recently indexed documents" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Source freshness" })).toBeVisible();
+
+  await page.getByLabel("Language").selectOption("ko");
+  await expect(page.getByRole("heading", {
+    name: "지금 무엇이 최신인지 한눈에 확인하세요.",
+  })).toBeVisible();
+  await expect(page.getByText("마지막 인덱싱", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "최근 반영된 문서" })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole("heading", {
+    name: "지금 무엇이 최신인지 한눈에 확인하세요.",
+  })).toBeVisible();
+});
+
 test("overview, explorer, document versions, and provenance", async ({ page, request }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Your knowledge, observable." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "See what is current, at a glance." }))
+    .toBeVisible();
   await page.getByRole("button", { name: "Explorer" }).click();
   await expect(page.getByRole("heading", { name: "Projects & documents" })).toBeVisible();
 

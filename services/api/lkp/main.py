@@ -787,6 +787,7 @@ def timeline(limit: int = Query(100, le=500), db: Session = Depends(get_db)) -> 
 
 @app.get("/api/v1/metrics/summary")
 def metrics_summary(db: Session = Depends(get_db)) -> dict:
+    now = datetime.now(timezone.utc)
     counts = dict(
         db.execute(select(IngestJob.status, func.count()).group_by(IngestJob.status)).all()
     )
@@ -795,7 +796,122 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
             IngestJob.status == JobStatus.pending
         )
     )
+    latest_indexed_at = db.scalar(
+        select(func.max(DocumentVersion.detected_at))
+        .join(Document, Document.current_version_id == DocumentVersion.id)
+        .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+        .where(
+            Document.state == DocumentState.active,
+            SourceRoot.data_scope == "production",
+        )
+    )
+    latest_source_modified_at = db.scalar(
+        select(func.max(Document.modified_at_fs))
+        .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+        .where(
+            Document.state == DocumentState.active,
+            SourceRoot.data_scope == "production",
+        )
+    )
+    throughput = [
+        {"bucket": bucket, "count": count}
+        for bucket, count in db.execute(
+            text(
+                """
+                SELECT date_trunc('hour', created_at) AS bucket, count(*) AS count
+                FROM ingest_event
+                WHERE event_type = 'indexed'
+                  AND created_at >= now() - interval '12 hours'
+                GROUP BY bucket
+                ORDER BY bucket
+                """
+            )
+        ).all()
+    ]
+    recent_documents = [
+        {
+            "id": str(document_id),
+            "filename": filename,
+            "relative_path": relative_path,
+            "project": project_key,
+            "source_root": source_root_name,
+            "modified_at": modified_at,
+            "indexed_at": indexed_at,
+            "change_type": change_type,
+        }
+        for (
+            document_id,
+            filename,
+            relative_path,
+            project_key,
+            source_root_name,
+            modified_at,
+            indexed_at,
+            change_type,
+        ) in db.execute(
+            select(
+                Document.id,
+                Document.filename,
+                Document.relative_path,
+                Document.project_key,
+                SourceRoot.name,
+                Document.modified_at_fs,
+                DocumentVersion.detected_at,
+                DocumentVersion.change_type,
+            )
+            .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+            .join(DocumentVersion, DocumentVersion.id == Document.current_version_id)
+            .where(
+                Document.state == DocumentState.active,
+                SourceRoot.data_scope == "production",
+            )
+            .order_by(DocumentVersion.detected_at.desc())
+            .limit(8)
+        ).all()
+    ]
+    source_roots = [
+        {
+            "id": str(root_id),
+            "name": name,
+            "source_type": source_type,
+            "document_count": document_count,
+            "last_reconciled_at": last_reconciled_at,
+            "last_seen_at": last_seen_at,
+        }
+        for (
+            root_id,
+            name,
+            source_type,
+            last_reconciled_at,
+            document_count,
+            last_seen_at,
+        ) in db.execute(
+            select(
+                SourceRoot.id,
+                SourceRoot.name,
+                SourceRoot.source_type,
+                SourceRoot.last_reconciled_at,
+                func.count(Document.id).filter(Document.state == DocumentState.active),
+                func.max(Document.last_seen_at),
+            )
+            .outerjoin(Document, Document.source_root_id == SourceRoot.id)
+            .where(
+                SourceRoot.enabled.is_(True),
+                SourceRoot.data_scope == "production",
+            )
+            .group_by(SourceRoot.id)
+            .order_by(SourceRoot.name)
+        ).all()
+    ]
+    current_workers = [
+        item for item in workers(db) if not item["metadata"].get("retired", False)
+    ]
+    worker_states: dict[str, int] = {}
+    for item in current_workers:
+        worker_states[item["state"]] = worker_states.get(item["state"], 0) + 1
+    active_worker_states = {"healthy", "busy", "idle", "cooldown", "paused"}
     return {
+        "generated_at": now,
         "projects": db.scalar(
             select(func.count(func.distinct(Document.project_key)))
             .join(SourceRoot, SourceRoot.id == Document.source_root_id)
@@ -823,7 +939,15 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
         ),
         "jobs": {key.value: value for key, value in counts.items()},
         "oldest_pending_seconds": float(oldest or 0),
-        "workers": len(workers(db)),
+        "workers": sum(
+            count for state, count in worker_states.items() if state in active_worker_states
+        ),
+        "worker_states": worker_states,
+        "latest_indexed_at": latest_indexed_at,
+        "latest_source_modified_at": latest_source_modified_at,
+        "throughput": throughput,
+        "recent_documents": recent_documents,
+        "source_roots": source_roots,
         "embedding_model": settings.embedding_model,
         "embedding_revision": settings.embedding_revision,
         "pipeline_version": settings.pipeline_version,

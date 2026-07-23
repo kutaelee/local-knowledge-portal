@@ -10,12 +10,35 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export type Metrics = {
+  generated_at: string;
   projects: number;
   documents: number;
   chunks: number;
   jobs: Record<string, number>;
   oldest_pending_seconds: number;
   workers: number;
+  worker_states: Record<string, number>;
+  latest_indexed_at: string | null;
+  latest_source_modified_at: string | null;
+  throughput: { bucket: string; count: number }[];
+  recent_documents: {
+    id: string;
+    filename: string;
+    relative_path: string;
+    project: string | null;
+    source_root: string;
+    modified_at: string;
+    indexed_at: string;
+    change_type: string;
+  }[];
+  source_roots: {
+    id: string;
+    name: string;
+    source_type: string;
+    document_count: number;
+    last_reconciled_at: string | null;
+    last_seen_at: string | null;
+  }[];
   embedding_model: string;
   embedding_revision: string;
   pipeline_version: string;

@@ -10,7 +10,7 @@ import {
   Activity, AlertTriangle, Blocks, BookOpen, ChevronDown, ChevronRight,
   CircleCheck, Clock3, Command, Database, FileCode2, Files, Folder,
   GitBranch, HeartPulse, LayoutDashboard, Moon, Network, PanelRightClose,
-  RefreshCcw, Search, ServerCog, Sun, TerminalSquare, BookCheck,
+  RefreshCcw, Search, ServerCog, Sun, TerminalSquare, BookCheck, Languages,
 } from "lucide-react";
 import gsap from "gsap";
 import {
@@ -30,17 +30,179 @@ type Job = {
   id: string; status: string; job_type: string; path: string; attempt_count: number;
   max_attempts: number; error_type: string | null; error_message: string | null; created_at: string;
 };
+type Locale = "ko" | "en";
 
-const nav: { id: View; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
-  { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "explorer", label: "Explorer", icon: Folder },
-  { id: "search", label: "Search", icon: Search },
-  { id: "activities", label: "Activity", icon: Activity },
-  { id: "knowledge", label: "Knowledge cases", icon: BookCheck },
-  { id: "operations", label: "Operations", icon: ServerCog },
-  { id: "timeline", label: "Timeline", icon: Clock3 },
-  { id: "graph", label: "Knowledge graph", icon: Network },
+const nav: { id: View; icon: React.ComponentType<{ size?: number }> }[] = [
+  { id: "overview", icon: LayoutDashboard },
+  { id: "explorer", icon: Folder },
+  { id: "search", icon: Search },
+  { id: "activities", icon: Activity },
+  { id: "knowledge", icon: BookCheck },
+  { id: "operations", icon: ServerCog },
+  { id: "timeline", icon: Clock3 },
+  { id: "graph", icon: Network },
 ];
+
+const translations = {
+  ko: {
+    nav: {
+      overview: "현황", explorer: "문서 탐색", document: "문서",
+      search: "검색", activities: "활동 이력", knowledge: "지식 사례",
+      operations: "운영", timeline: "변경 타임라인", graph: "지식 그래프",
+    },
+    workspace: "작업 공간",
+    globalSearch: "문서, 경로, 코드 심볼 검색…",
+    globalSearchLabel: "전체 검색",
+    healthy: "정상",
+    offline: "연결 안 됨",
+    language: "언어",
+    theme: "테마 전환",
+    context: "정보 패널 전환",
+    pipeline: "수집 파이프라인",
+    indexingService: "인덱싱 서비스",
+    localOnly: "로컬 전용 · 원본 읽기 전용",
+    contextPanel: {
+      title: "선택 항목 정보", lines: "원본 줄", version: "문서 버전", chunk: "검색 단위",
+      hash: "콘텐츠 해시", indexed: "인덱싱 시각", copy: "인용 정보 복사",
+      empty: "검색 결과를 선택하면 원본 경로와 변경 불가능한 출처 정보를 확인할 수 있습니다.",
+      services: "연결 상태", healthy: "정상", offline: "연결 안 됨", unavailable: "사용 불가",
+    },
+    overview: {
+      eyebrow: "지식베이스 운영 현황",
+      title: "지금 무엇이 최신인지 한눈에 확인하세요.",
+      subtitle: "문서 갱신 시각, 수집 대기열, 실패 작업, 소스 상태를 실제 데이터 기준으로 보여줍니다.",
+      search: "지식 검색",
+      dataAsOf: "데이터 기준",
+      latestIndex: "마지막 인덱싱",
+      statusGood: "지식베이스가 최신 상태입니다",
+      statusIndexing: "새 문서를 인덱싱하고 있습니다",
+      statusAttention: "확인이 필요한 작업이 있습니다",
+      statusGoodDetail: "대기 중이거나 실패한 수집 작업이 없습니다.",
+      projects: "프로젝트",
+      projectsNote: "등록된 소스에서 식별한 프로젝트 수",
+      documents: "현재 문서",
+      documentsNote: "삭제 문서를 제외한 최신 문서 수",
+      chunks: "검색 단위",
+      chunksNote: "검색과 RAG에서 인용 가능한 문단·코드 조각",
+      pending: "대기 작업",
+      pendingNote: "가장 오래된 대기",
+      ingestion: "실제 수집량",
+      throughput: "최근 12시간 인덱싱",
+      noThroughput: "최근 12시간에 완료된 인덱싱이 없습니다.",
+      pipelineRevision: "검색 인덱스 기준",
+      activeRevision: "현재 적용 중인 모델과 파이프라인",
+      embedding: "임베딩 모델",
+      revision: "벡터 리비전",
+      pipelineVersion: "파이프라인 버전",
+      workers: "현재 동작 중인 서비스",
+      queue: "작업 큐",
+      failed: "실패",
+      processing: "처리 중",
+      succeeded: "완료",
+      oldestPending: "최장 대기",
+      recentTitle: "최근 반영된 문서",
+      recentHelp: "인덱스에 가장 최근 새 버전이 만들어진 문서입니다.",
+      sourceTitle: "소스 최신성",
+      sourceHelp: "마지막 전체 대조 시각과 현재 활성 문서 수입니다.",
+      reconciled: "전체 대조",
+      indexed: "인덱싱",
+      sourceModified: "원본 수정",
+      fresh: "최신",
+      aging: "확인 필요",
+      stale: "오래됨",
+      created: "새 문서",
+      modified: "수정",
+      restored: "복원",
+      browse: "문서 둘러보기",
+      browseNote: "프로젝트와 폴더 구조로 탐색",
+      jobs: "작업 상태 확인",
+      jobsNote: "실패 원인과 재시도 확인",
+      timeline: "변경 흐름 보기",
+      timelineNote: "관측된 파일 변경을 시간순 확인",
+      never: "기록 없음",
+      justNow: "방금",
+    },
+  },
+  en: {
+    nav: {
+      overview: "Overview", explorer: "Explorer", document: "Document",
+      search: "Search", activities: "Activity", knowledge: "Knowledge cases",
+      operations: "Operations", timeline: "Timeline", graph: "Knowledge graph",
+    },
+    workspace: "Workspace",
+    globalSearch: "Search documents, paths, symbols…",
+    globalSearchLabel: "Global search",
+    healthy: "Healthy",
+    offline: "Offline",
+    language: "Language",
+    theme: "Toggle theme",
+    context: "Toggle context panel",
+    pipeline: "Pipeline",
+    indexingService: "Indexing service",
+    localOnly: "localhost only · read-only sources",
+    contextPanel: {
+      title: "Context", lines: "Lines", version: "Version", chunk: "Chunk",
+      hash: "Hash", indexed: "Indexed", copy: "Copy citation",
+      empty: "Select a result to inspect immutable provenance.",
+      services: "Services", healthy: "healthy", offline: "offline", unavailable: "unavailable",
+    },
+    overview: {
+      eyebrow: "Knowledge base status",
+      title: "See what is current, at a glance.",
+      subtitle: "Live document freshness, queue state, failures, and source reconciliation from the database.",
+      search: "Search knowledge",
+      dataAsOf: "Data as of",
+      latestIndex: "Latest indexing",
+      statusGood: "Knowledge is up to date",
+      statusIndexing: "New documents are being indexed",
+      statusAttention: "Some jobs need attention",
+      statusGoodDetail: "No pending or failed ingest work.",
+      projects: "Projects",
+      projectsNote: "Project groups identified in registered sources",
+      documents: "Current documents",
+      documentsNote: "Latest active documents, excluding deleted files",
+      chunks: "Search passages",
+      chunksNote: "Citable text and code units used by search and RAG",
+      pending: "Pending jobs",
+      pendingNote: "Oldest pending",
+      ingestion: "Actual ingestion",
+      throughput: "Indexed in the last 12 hours",
+      noThroughput: "No indexing completed in the last 12 hours.",
+      pipelineRevision: "Search index basis",
+      activeRevision: "Active model and pipeline",
+      embedding: "Embedding model",
+      revision: "Vector revision",
+      pipelineVersion: "Pipeline version",
+      workers: "Active services",
+      queue: "Job queue",
+      failed: "Failed",
+      processing: "Processing",
+      succeeded: "Succeeded",
+      oldestPending: "Oldest pending",
+      recentTitle: "Recently indexed documents",
+      recentHelp: "Documents whose newest version most recently entered the index.",
+      sourceTitle: "Source freshness",
+      sourceHelp: "Last full reconciliation and current active document count.",
+      reconciled: "Reconciled",
+      indexed: "Indexed",
+      sourceModified: "Source modified",
+      fresh: "Fresh",
+      aging: "Check soon",
+      stale: "Stale",
+      created: "Created",
+      modified: "Modified",
+      restored: "Restored",
+      browse: "Browse sources",
+      browseNote: "Navigate projects and folders",
+      jobs: "Inspect job health",
+      jobsNote: "Review failures and retries",
+      timeline: "View change timeline",
+      timelineNote: "Follow observed file changes",
+      never: "No record",
+      justNow: "just now",
+    },
+  },
+} as const;
 
 function useTheme() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -59,6 +221,23 @@ function useTheme() {
   return { theme, toggle };
 }
 
+function useLocale() {
+  const [locale, setLocaleState] = useState<Locale>("ko");
+  useEffect(() => {
+    const saved = localStorage.getItem("lkp-locale");
+    const next: Locale = saved === "en" || saved === "ko"
+      ? saved : navigator.language.toLowerCase().startsWith("ko") ? "ko" : "en";
+    setLocaleState(next);
+    document.documentElement.lang = next;
+  }, []);
+  const setLocale = (next: Locale) => {
+    setLocaleState(next);
+    localStorage.setItem("lkp-locale", next);
+    document.documentElement.lang = next;
+  };
+  return { locale, setLocale };
+}
+
 export function Portal() {
   const [view, setView] = useState<View>("overview");
   const [contextOpen, setContextOpen] = useState(true);
@@ -66,6 +245,8 @@ export function Portal() {
   const [documentId, setDocumentId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const { theme, toggle } = useTheme();
+  const { locale, setLocale } = useLocale();
+  const text = translations[locale];
   const main = useRef<HTMLElement>(null);
   const health = useQuery({
     queryKey: ["health"],
@@ -95,7 +276,7 @@ export function Portal() {
   return (
     <div className={`portal ${contextOpen ? "" : "context-collapsed"}`}>
       <header className="topbar">
-        <button className="brand" onClick={() => setView("overview")} aria-label="Overview">
+        <button className="brand" onClick={() => setView("overview")} aria-label={text.nav.overview}>
           <span className="brand-mark"><Blocks size={17} /></span>
           <span>Local Knowledge</span>
           <span className="local-pill">LOCAL</span>
@@ -104,46 +285,53 @@ export function Portal() {
           <Search size={17} />
           <input
             id="global-search" value={query} onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search documents, paths, symbols…" aria-label="Global search"
+            placeholder={text.globalSearch} aria-label={text.globalSearchLabel}
           />
           <kbd><Command size={12} />K</kbd>
         </form>
         <div className="top-actions">
           <span className={`health ${health.isSuccess ? "ok" : "bad"}`}>
-            <span /> {health.isSuccess ? "Healthy" : "Offline"}
+            <span /> {health.isSuccess ? text.healthy : text.offline}
           </span>
-          <button className="icon-button" onClick={toggle} aria-label="Toggle theme">
+          <label className="language-select" aria-label={text.language}>
+            <Languages size={15} />
+            <select value={locale} onChange={(event) => setLocale(event.target.value as Locale)}>
+              <option value="ko">한국어</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <button className="icon-button" onClick={toggle} aria-label={text.theme}>
             {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
           </button>
           <button
             className="icon-button" onClick={() => setContextOpen((value) => !value)}
-            aria-label="Toggle context panel"
+            aria-label={text.context}
           ><PanelRightClose size={17} /></button>
         </div>
       </header>
 
       <aside className="sidebar">
         <nav aria-label="Primary navigation">
-          <p className="nav-heading">Workspace</p>
+          <p className="nav-heading">{text.workspace}</p>
           {nav.map((item) => (
             <button
               key={item.id} className={view === item.id ? "active" : ""}
               onClick={() => setView(item.id)}
             >
-              <item.icon size={17} /> {item.label}
+              <item.icon size={17} /> {text.nav[item.id]}
             </button>
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <p>Pipeline</p>
-          <div><span className="pulse-dot" /> Indexing service</div>
-          <small>localhost only · read-only sources</small>
+          <p>{text.pipeline}</p>
+          <div><span className="pulse-dot" /> {text.indexingService}</div>
+          <small>{text.localOnly}</small>
         </div>
       </aside>
 
       <main ref={main} className="main">
         <div className="view-enter" key={view}>
-          {view === "overview" && <Overview onNavigate={setView} />}
+          {view === "overview" && <Overview onNavigate={setView} locale={locale} />}
           {view === "explorer" && <Explorer onOpen={(item) => {
             setDocumentId(item.id); setView("document");
           }} />}
@@ -162,72 +350,210 @@ export function Portal() {
       </main>
 
       <aside className="context">
-        <ContextPanel selected={selected} health={health.data} />
+        <ContextPanel selected={selected} health={health.data} locale={locale} />
       </aside>
     </div>
   );
 }
 
-function Overview({ onNavigate }: { onNavigate: (view: View) => void }) {
+function formatRelative(value: string | null | undefined, locale: Locale, empty: string) {
+  if (!value) return empty;
+  const deltaSeconds = Math.round((Date.parse(value) - Date.now()) / 1000);
+  const absolute = Math.abs(deltaSeconds);
+  if (absolute < 30) return locale === "ko" ? "방금" : "just now";
+  const formatter = new Intl.RelativeTimeFormat(locale === "ko" ? "ko-KR" : "en-US", {
+    numeric: "auto",
+  });
+  if (absolute < 3600) return formatter.format(Math.round(deltaSeconds / 60), "minute");
+  if (absolute < 86400) return formatter.format(Math.round(deltaSeconds / 3600), "hour");
+  return formatter.format(Math.round(deltaSeconds / 86400), "day");
+}
+
+function formatDuration(seconds: number, locale: Locale) {
+  if (seconds < 60) return locale === "ko" ? `${Math.round(seconds)}초` : `${Math.round(seconds)}s`;
+  if (seconds < 3600) {
+    const minutes = Math.round(seconds / 60);
+    return locale === "ko" ? `${minutes}분` : `${minutes}m`;
+  }
+  const hours = Math.round(seconds / 3600);
+  return locale === "ko" ? `${hours}시간` : `${hours}h`;
+}
+
+function freshnessLevel(value: string | null): "fresh" | "aging" | "stale" {
+  if (!value) return "stale";
+  const ageMinutes = (Date.now() - Date.parse(value)) / 60000;
+  if (ageMinutes <= 15) return "fresh";
+  if (ageMinutes <= 60) return "aging";
+  return "stale";
+}
+
+function Overview({ onNavigate, locale }: {
+  onNavigate: (view: View) => void;
+  locale: Locale;
+}) {
   const metrics = useQuery({
     queryKey: ["metrics"], queryFn: () => api<Metrics>("/api/v1/metrics/summary"),
     refetchInterval: 10_000,
   });
   const data = metrics.data;
+  const text = translations[locale].overview;
+  const number = useMemo(
+    () => new Intl.NumberFormat(locale === "ko" ? "ko-KR" : "en-US"),
+    [locale],
+  );
+  const pending = data?.jobs?.pending ?? 0;
+  const processing = (data?.jobs?.processing ?? 0) + (data?.jobs?.leased ?? 0);
+  const failed = (data?.jobs?.failed ?? 0) + (data?.jobs?.dead_letter ?? 0);
+  const statusTone = failed > 0 ? "danger" : pending + processing > 0 ? "warning" : "success";
+  const statusTitle = failed > 0
+    ? text.statusAttention : pending + processing > 0 ? text.statusIndexing : text.statusGood;
+  const statusDetail = failed > 0
+    ? locale === "ko"
+      ? `실패 ${number.format(failed)}건 · 대기 ${number.format(pending)}건입니다. 실패 원인을 먼저 확인하세요.`
+      : `${number.format(failed)} failed · ${number.format(pending)} pending. Review failures first.`
+    : pending + processing > 0
+      ? locale === "ko"
+        ? `${number.format(processing)}건 처리 중 · ${number.format(pending)}건 대기 중입니다.`
+        : `${number.format(processing)} processing · ${number.format(pending)} pending.`
+      : text.statusGoodDetail;
   const cards = [
-    ["Projects", data?.projects ?? 0, GitBranch, "Indexed source groups"],
-    ["Documents", data?.documents ?? 0, Files, "Active latest versions"],
-    ["Chunks", data?.chunks ?? 0, Blocks, "Searchable passages"],
-    ["Pending", data?.jobs?.pending ?? 0, Clock3, `${Math.round(data?.oldest_pending_seconds ?? 0)}s oldest`],
+    [text.projects, data?.projects ?? 0, GitBranch, text.projectsNote],
+    [text.documents, data?.documents ?? 0, Files, text.documentsNote],
+    [text.chunks, data?.chunks ?? 0, Blocks, text.chunksNote],
+    [
+      text.pending,
+      pending,
+      Clock3,
+      `${text.pendingNote} ${formatDuration(data?.oldest_pending_seconds ?? 0, locale)}`,
+    ],
   ] as const;
-  const throughput = [18, 34, 25, 48, 39, 64, 57, 72, 68, 81, 73, 88].map((value, i) => ({ i, value }));
+  const throughput = data?.throughput ?? [];
   return (
     <section>
       <div className="page-title">
-        <div><p className="eyebrow">SYSTEM OVERVIEW</p><h1>Your knowledge, observable.</h1>
-          <p>Freshness, retrieval, and operational state in one local workspace.</p></div>
-        <button className="primary" onClick={() => onNavigate("search")}><Search size={16} /> Search knowledge</button>
+        <div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
+          <p>{text.subtitle}</p></div>
+        <button className="primary" onClick={() => onNavigate("search")}><Search size={16} /> {text.search}</button>
       </div>
       {metrics.isError && <ErrorState message="API metrics are unavailable." />}
+      <div className={`freshness-banner ${statusTone}`}>
+        <div className="freshness-icon">
+          {statusTone === "danger" ? <AlertTriangle size={20} /> :
+            statusTone === "warning" ? <RefreshCcw size={20} /> : <CircleCheck size={20} />}
+        </div>
+        <div><strong>{statusTitle}</strong><p>{statusDetail}</p></div>
+        <dl>
+          <div><dt>{text.dataAsOf}</dt><dd title={data?.generated_at
+            ? new Date(data.generated_at).toLocaleString(locale === "ko" ? "ko-KR" : "en-US")
+            : undefined}>{formatRelative(data?.generated_at, locale, text.never)}</dd></div>
+          <div><dt>{text.latestIndex}</dt><dd title={data?.latest_indexed_at
+            ? new Date(data.latest_indexed_at).toLocaleString(locale === "ko" ? "ko-KR" : "en-US")
+            : undefined}>{formatRelative(data?.latest_indexed_at, locale, text.never)}</dd></div>
+        </dl>
+      </div>
       <div className="stat-grid">
         {cards.map(([label, value, Icon, note]) => (
           <article className="stat-card" key={label}>
             <div className="stat-head"><span>{label}</span><Icon size={17} /></div>
-            <strong>{Number(value).toLocaleString()}</strong><small>{note}</small>
+            <strong>{number.format(Number(value))}</strong><small>{note}</small>
           </article>
         ))}
       </div>
       <div className="overview-grid">
         <article className="panel throughput">
-          <div className="panel-head"><div><p className="eyebrow">INGESTION</p><h2>Recent throughput</h2></div>
-            <span className="chip success"><Activity size={13} /> streaming</span></div>
-          <div className="chart">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={throughput}>
-                <defs><linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0" stopColor="var(--accent)" stopOpacity={0.45} />
-                  <stop offset="1" stopColor="var(--accent)" stopOpacity={0} />
-                </linearGradient></defs>
-                <XAxis dataKey="i" hide /><Tooltip contentStyle={{ background: "#111820", border: "1px solid #28323d" }} />
-                <Area type="monotone" dataKey="value" stroke="var(--accent)" fill="url(#fill)" strokeWidth={2} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+          <div className="panel-head"><div><p className="eyebrow">{text.ingestion}</p><h2>{text.throughput}</h2></div>
+            <span className="chip success"><Activity size={13} /> DB</span></div>
+          {throughput.length ? <div className="chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={throughput}>
+                  <defs><linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0" stopColor="var(--accent)" stopOpacity={0.45} />
+                    <stop offset="1" stopColor="var(--accent)" stopOpacity={0} />
+                  </linearGradient></defs>
+                  <XAxis dataKey="bucket" tickFormatter={(value) =>
+                    new Date(value).toLocaleTimeString(locale === "ko" ? "ko-KR" : "en-US", {
+                      hour: "2-digit",
+                    })}
+                    tick={{ fill: "var(--muted)", fontSize: 10 }} axisLine={false} tickLine={false} />
+                  <Tooltip labelFormatter={(value) =>
+                    new Date(String(value)).toLocaleString(locale === "ko" ? "ko-KR" : "en-US")}
+                    contentStyle={{ background: "var(--panel-2)", border: "1px solid var(--border)" }} />
+                  <Area type="monotone" dataKey="count" stroke="var(--accent)" fill="url(#fill)" strokeWidth={2} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div> : <div className="chart-empty">{text.noThroughput}</div>}
         </article>
         <article className="panel system-panel">
-          <div className="panel-head"><div><p className="eyebrow">PIPELINE</p><h2>Active revision</h2></div><Database size={18} /></div>
+          <div className="panel-head"><div><p className="eyebrow">{text.pipelineRevision}</p><h2>{text.activeRevision}</h2></div><Database size={18} /></div>
           <dl>
-            <div><dt>Embedding</dt><dd>{data?.embedding_model ?? "—"}</dd></div>
-            <div><dt>Revision</dt><dd className="mono">{data?.embedding_revision ?? "—"}</dd></div>
-            <div><dt>Pipeline</dt><dd>{data?.pipeline_version ?? "—"}</dd></div>
-            <div><dt>Workers</dt><dd>{data?.workers ?? 0}</dd></div>
+            <div><dt>{text.embedding}</dt><dd>{data?.embedding_model ?? "—"}</dd></div>
+            <div><dt>{text.revision}</dt><dd className="mono">{data?.embedding_revision ?? "—"}</dd></div>
+            <div><dt>{text.pipelineVersion}</dt><dd>{data?.pipeline_version ?? "—"}</dd></div>
+            <div><dt>{text.workers}</dt><dd>{data?.workers ?? 0}</dd></div>
           </dl>
         </article>
       </div>
+      <div className="overview-detail-grid">
+        <article className="panel">
+          <div className="panel-head"><div><p className="eyebrow">{text.indexed}</p>
+            <h2>{text.recentTitle}</h2><p className="panel-help">{text.recentHelp}</p></div>
+            <Clock3 size={18} /></div>
+          <div className="recent-documents">
+            {data?.recent_documents.map((document) => <div key={document.id}>
+              <FileCode2 size={16} />
+              <span><strong>{document.filename}</strong>
+                <small>{document.project ?? document.source_root} · {document.relative_path}</small></span>
+              <span className="recent-time">
+                <em>{text[document.change_type as "created" | "modified" | "restored"] ??
+                  document.change_type}</em>
+                <time title={new Date(document.indexed_at).toLocaleString(
+                  locale === "ko" ? "ko-KR" : "en-US",
+                )}>{formatRelative(document.indexed_at, locale, text.never)}</time>
+              </span>
+            </div>)}
+            {!data?.recent_documents.length && <div className="inline-empty">{text.never}</div>}
+          </div>
+        </article>
+        <article className="panel">
+          <div className="panel-head"><div><p className="eyebrow">{text.reconciled}</p>
+            <h2>{text.sourceTitle}</h2><p className="panel-help">{text.sourceHelp}</p></div>
+            <RefreshCcw size={18} /></div>
+          <div className="source-freshness">
+            {data?.source_roots.map((root) => {
+              const level = freshnessLevel(root.last_reconciled_at);
+              return <div key={root.id}>
+                <span><strong>{root.name}</strong>
+                  <small>{number.format(root.document_count)} {text.documents.toLowerCase()}</small></span>
+                <span className="source-time">
+                  <em className={`freshness-label ${level}`}>{text[level]}</em>
+                  <time title={root.last_reconciled_at
+                    ? new Date(root.last_reconciled_at).toLocaleString(
+                      locale === "ko" ? "ko-KR" : "en-US",
+                    ) : undefined}>
+                    {formatRelative(root.last_reconciled_at, locale, text.never)}
+                  </time>
+                </span>
+              </div>;
+            })}
+            {!data?.source_roots.length && <div className="inline-empty">{text.never}</div>}
+          </div>
+        </article>
+      </div>
+      <article className="queue-explainer panel">
+        <div><p className="eyebrow">{text.queue}</p>
+          <strong>{statusTitle}</strong><small>{statusDetail}</small></div>
+        <dl>
+          <div><dt>{text.processing}</dt><dd>{number.format(processing)}</dd></div>
+          <div><dt>{text.pending}</dt><dd>{number.format(pending)}</dd></div>
+          <div><dt>{text.failed}</dt><dd className={failed ? "danger-text" : ""}>{number.format(failed)}</dd></div>
+          <div><dt>{text.succeeded}</dt><dd>{number.format(data?.jobs?.succeeded ?? 0)}</dd></div>
+          <div><dt>{text.oldestPending}</dt><dd>{formatDuration(data?.oldest_pending_seconds ?? 0, locale)}</dd></div>
+        </dl>
+      </article>
       <div className="quick-actions">
-        <button onClick={() => onNavigate("explorer")}><BookOpen size={18} /><span><strong>Browse sources</strong><small>Project and folder tree</small></span></button>
-        <button onClick={() => onNavigate("operations")}><TerminalSquare size={18} /><span><strong>Inspect jobs</strong><small>Retries and failures</small></span></button>
-        <button onClick={() => onNavigate("timeline")}><Clock3 size={18} /><span><strong>View timeline</strong><small>Observed changes</small></span></button>
+        <button onClick={() => onNavigate("explorer")}><BookOpen size={18} /><span><strong>{text.browse}</strong><small>{text.browseNote}</small></span></button>
+        <button onClick={() => onNavigate("operations")}><TerminalSquare size={18} /><span><strong>{text.jobs}</strong><small>{text.jobsNote}</small></span></button>
+        <button onClick={() => onNavigate("timeline")}><Clock3 size={18} /><span><strong>{text.timeline}</strong><small>{text.timelineNote}</small></span></button>
       </div>
     </section>
   );
@@ -466,28 +792,36 @@ function GraphNotice() {
       <div className="fake-nodes"><span /><span /><span /><span /></div></div></section>;
 }
 
-function ContextPanel({ selected, health }: { selected: SearchResult | null; health?: { database: boolean; ollama: boolean } }) {
-  return <div><p className="nav-heading">Context</p>
+function ContextPanel({ selected, health, locale }: {
+  selected: SearchResult | null;
+  health?: { database: boolean; ollama: boolean };
+  locale: Locale;
+}) {
+  const text = translations[locale].contextPanel;
+  return <div><p className="nav-heading">{text.title}</p>
     {selected ? <><h2>{selected.title}</h2><p className="context-path">{selected.provenance.relative_path}</p>
       <dl className="context-list">
-        <div><dt>Lines</dt><dd>{selected.provenance.start_line}–{selected.provenance.end_line}</dd></div>
-        <div><dt>Version</dt><dd className="mono">{selected.provenance.document_version_id.slice(0, 8)}</dd></div>
-        <div><dt>Chunk</dt><dd className="mono">{selected.provenance.chunk_id.slice(0, 8)}</dd></div>
-        <div><dt>Hash</dt><dd className="mono">{selected.provenance.content_hash.slice(0, 12)}</dd></div>
-        <div><dt>Indexed</dt><dd>{new Date(selected.provenance.indexed_timestamp).toLocaleString()}</dd></div>
+        <div><dt>{text.lines}</dt><dd>{selected.provenance.start_line}–{selected.provenance.end_line}</dd></div>
+        <div><dt>{text.version}</dt><dd className="mono">{selected.provenance.document_version_id.slice(0, 8)}</dd></div>
+        <div><dt>{text.chunk}</dt><dd className="mono">{selected.provenance.chunk_id.slice(0, 8)}</dd></div>
+        <div><dt>{text.hash}</dt><dd className="mono">{selected.provenance.content_hash.slice(0, 12)}</dd></div>
+        <div><dt>{text.indexed}</dt><dd>{new Date(selected.provenance.indexed_timestamp)
+          .toLocaleString(locale === "ko" ? "ko-KR" : "en-US")}</dd></div>
       </dl><button className="secondary copy" onClick={() => navigator.clipboard.writeText(
         `${selected.provenance.canonical_path}:L${selected.provenance.start_line}-L${selected.provenance.end_line}`
-      )}>Copy citation</button></> : <div className="context-empty"><BookOpen size={24} /><p>Select a result to inspect immutable provenance.</p></div>}
-    <div className="service-status"><p className="nav-heading">Services</p>
-      <div><Database size={15} /> PostgreSQL <Status value={health?.database ? "healthy" : "offline"} /></div>
-      <div><HeartPulse size={15} /> Ollama <Status value={health?.ollama ? "healthy" : "unavailable"} /></div>
+      )}>{text.copy}</button></> : <div className="context-empty"><BookOpen size={24} /><p>{text.empty}</p></div>}
+    <div className="service-status"><p className="nav-heading">{text.services}</p>
+      <div><Database size={15} /> PostgreSQL <Status value={health?.database ? "healthy" : "offline"}
+        label={health?.database ? text.healthy : text.offline} /></div>
+      <div><HeartPulse size={15} /> Ollama <Status value={health?.ollama ? "healthy" : "unavailable"}
+        label={health?.ollama ? text.healthy : text.unavailable} /></div>
     </div></div>;
 }
 
-function Status({ value }: { value: string }) {
+function Status({ value, label }: { value: string; label?: string }) {
   const good = ["healthy", "succeeded", "active", "idle", "processing"].includes(value);
   return <span className={`status ${good ? "good" : value === "pending" ? "waiting" : "danger"}`}>
-    {good ? <CircleCheck size={12} /> : value === "pending" ? <Clock3 size={12} /> : <AlertTriangle size={12} />}{value}
+    {good ? <CircleCheck size={12} /> : value === "pending" ? <Clock3 size={12} /> : <AlertTriangle size={12} />}{label ?? value}
   </span>;
 }
 function EmptyState({ title, detail }: { title: string; detail: string }) {
