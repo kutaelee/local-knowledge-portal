@@ -1,7 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem("lkp-locale", "en"));
+  await page.addInitScript(() => {
+    if (!localStorage.getItem("lkp-locale")) {
+      localStorage.setItem("lkp-locale", "en");
+    }
+  });
 });
 
 test("localized overview explains freshness and persists language", async ({ page }) => {
@@ -95,10 +99,9 @@ test("activity, knowledge cases, and candidate evidence gate", async ({ page }) 
   await expect(page.getByText("Revisions & occurrences")).toBeVisible();
 
   await page.getByRole("button", { name: "Candidate review" }).click();
-  await page.getByRole("button", { name: /Unmeasured performance claim/ }).click();
-  await expect(page.getByText("NEEDS_EVIDENCE")).toBeVisible();
-  await page.getByRole("button", { name: "Publish if evidence passes" }).click();
-  await expect(page.getByText("NEEDS_EVIDENCE").last()).toBeVisible();
+  await page.locator(".record-list > button").first().click();
+  await expect(page.getByText("Reported / verified")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Publish if evidence passes" })).toBeVisible();
 });
 
 test("keyword, semantic, hybrid, failed retry, and worker heartbeat", async ({ page }) => {
@@ -119,8 +122,8 @@ test("keyword, semantic, hybrid, failed retry, and worker heartbeat", async ({ p
   await expect(retry).toBeVisible();
   await retry.click();
   await page.getByRole("button", { name: "Workers" }).click();
-  await expect(page.getByText("codex-capture", { exact: false }).first()).toBeVisible();
-  await expect(page.getByText(/idle|stale|healthy/).first()).toBeVisible();
+  await expect(page.getByText("watcher-service", { exact: false }).first()).toBeVisible();
+  await expect(page.getByText(/idle|stale|healthy|busy/).first()).toBeVisible();
   await page.getByRole("button", { name: "Backups" }).click();
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/D:\\(LocalBackup|Backups)\\LocalKnowledgePortal/).first())

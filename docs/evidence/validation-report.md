@@ -2,20 +2,22 @@
 
 검증 시각: 2026-07-23 (Asia/Seoul)
 
-저장소: `C:\Dev\Repos\local-knowledge-portal`
+저장소: WSL ext4 `/home/kutae/src/local-knowledge-portal`
 
 최종 판정: **VERIFIED**
 
 장시간 watcher endurance, 장시간 부하 유지, 실제 Windows 장시간 절전/복귀만 제외했다.
 Codex `/hooks` trust는 제품 보안 경계 때문에 **MANUAL_APPROVAL_REQUIRED**이며, 사용자가
-허용한 유일한 수동 승인 항목이다. 애플리케이션은 WSL2가 아니라 Windows native
-프로세스로 실행하며 PostgreSQL만 Docker Desktop의 Linux 컨테이너를 사용한다.
+허용한 유일한 수동 승인 항목이다. 애플리케이션은 단일 Docker Desktop WSL2 backend의
+Linux 컨테이너로 실행하고 localhost에만 공개한다.
 
 ## 구현 결과
 
-- PostgreSQL 18.4 + pgvector 0.8.2, schema `0002_activity_knowledge`.
-- Windows source repository는 C:, 운영 데이터·Ollama model·raw spool·로그는 E:,
-  immutable backup은 D:에 둔다.
+- PostgreSQL 18.4 + pgvector 0.8.2, schema `0003_queue_scale_indexes`.
+- Linux-native source repository는 WSL ext4, 운영 데이터와 managed Vault는
+  `E:\Data\LocalKnowledgePortal`, Ollama model은 `E:\AI\Models\Ollama`, Codex raw spool은
+  `E:\LocalKnowledgePortal`, immutable backup은 `D:\LocalBackup\LocalKnowledgePortal`에
+  둔다.
 - scanner → PostgreSQL queue → leased worker → append-only version → symbol/heading chunk
   → Ollama embedding → keyword/semantic/hybrid/RAG API 경로가 동작한다.
 - watcher create/modify/delete/rename, 저장 안정화, debounce, reconciliation, lease renewal,
@@ -78,7 +80,7 @@ case 수는 6으로 유지됐다.
 
 ## Ollama와 retrieval
 
-- Ollama Windows stable: `0.32.1`.
+- Ollama Docker stable image: `0.32.1`.
 - installer SHA-256:
   `2f53afab45547896e66b2879174ee78bb1f079f4a20b0858e0e377da0c3631f0`.
 - model: `qwen3-embedding:0.6b`, 639,150,858 bytes, Q8_0.
@@ -121,26 +123,22 @@ score와 match reason을 반환한다.
 ## 실제 실행 명령과 결과
 
 ```text
-uv run alembic upgrade head
-  PASS: 0002_activity_knowledge
-uv run ruff check services scripts tests
-  PASS
-uv run pytest tests/unit -q
-  PASS: 19 passed
-LKP_TEST_DATABASE_URL=<dedicated DB> uv run pytest tests/integration -q
-  PASS: 6 passed, 1 dependency deprecation warning
-pnpm --filter @lkp/web build
-  PASS: Next.js 16.2.11 production build
-docker compose --env-file .env -f infra/docker/compose.yaml --profile app build api
-  PASS: manifest list sha256:5bf874c340d7bd776ba4be51996e480df7261264082c185129e9a54e801921ed
-PLAYWRIGHT_BROWSERS_PATH=E:\Cache\ms-playwright pnpm --filter @lkp/web test
-  PASS: 3 passed
+docker compose --env-file <operational-env> -f infra/docker/compose.wsl.yaml run migrate
+  PASS: 0003_queue_scale_indexes
+bash scripts/validate-container.sh .
+  PASS: ruff and 26 unit tests
+LKP_TEST_DATABASE_URL=<dedicated DB> bash scripts/test-integration-container.sh .
+  PASS: 7 passed, 1 dependency deprecation warning
+docker compose --env-file <operational-env> -f infra/docker/compose.wsl.yaml build web api
+  PASS: Next.js 16.2.11 production build, TypeScript, API image
+docker run --rm --network host mcr.microsoft.com/playwright:v1.61.1-noble ...
+  PASS: 4 passed
 uv run python tests/retrieval/evaluate.py
   PASS: keyword/semantic/hybrid baseline, no-answer, stale exclusion
-scripts\backup.ps1
-  PASS: D:\Backups\LocalKnowledgePortal\database\2026-07-23T193330
-scripts\restore-test.ps1 -BackupDirectory <above>
-  PASS: temporary DB lkp_restore_20260723193404
+bash scripts/backup-wsl-docker.sh
+  PASS: D:\LocalBackup\LocalKnowledgePortal\database\2026-07-23T151129Z
+bash scripts/restore-test-wsl-docker.sh <timestamped-directory>
+  PASS: temporary PostgreSQL 18.4 + pgvector restore
 ```
 
 Playwright는 다음을 실제 확인했다.
@@ -154,16 +152,15 @@ Playwright는 다음을 실제 확인했다.
 
 최종 backup manifest:
 
-- dump size: 295,673,237 bytes.
+- dump size: 115,568,192 bytes.
 - SHA-256:
-  `77e36a88942f60b5e8611acc1a27aad1b5415a674f2406d1333302fa12bc18d8`.
+  `547fa3e346a716dd78ab9136a68af24a02782061ad280ad3092863cb61d66b64`.
 - source configuration hash:
-  `8322feb87b6917fb94aa3712ce04127c36714aadb13bf9ae5dbf71e932b4c5b8`.
-- restore count: documents 7,861, chunks 69,140, vectors 49,081.
-- schema `0002_activity_knowledge`, unvalidated foreign key 0, content query 1,649,
-  canonical duplicate assertion 통과, activities 11 / unverified 6.
-- 설정, managed vault, raw event, source/model/pipeline manifest도 같은 immutable timestamp
-  경로에 저장했다. temp restore DB는 검증 후 제거했다.
+  `9f05c1eff3ee7a658384bc21fbba395e780a607eaf8e5269d78cfb3f8760acb6`.
+- restore count: documents 2,312, chunks 20,500, vectors 20,500, activities 1.
+- schema `0003_queue_scale_indexes`; 별도 임시 DB 복원과 checksum 검증을 통과했다.
+- 설정, managed Vault 2개, raw spool 9개, source/model/pipeline manifest를 같은 immutable
+  timestamp에 저장했다. 임시 restore DB는 검증 후 제거했다.
 
 ## 검증 중 실패와 교정
 
@@ -303,13 +300,12 @@ Verdict for this remediation: **VERIFIED**, excluding long-duration thermal/endu
     roots, queue state, worker states, and indexing/source timestamps.
   - In-app browser validation confirmed Korean rendering, English switching, Korean switching,
     persistence after reload, freshness content, recent-document content, and localized provenance.
-- A Playwright localization scenario was added. Its CLI run was not reported as passed in this
-  change because Windows pnpm crashed while traversing the WSL UNC checkout. The partial root-owned
-  `node_modules` created by that failed attempt was identified as disposable derived data and
-  removed from the exact repository path. Existing production runtime data was not changed.
+- A Playwright localization scenario was added. The Windows pnpm runtime could not safely traverse
+  the WSL UNC checkout, so the locked workspace was copied into an ephemeral official Playwright
+  1.61.1 container and tested against the localhost production services.
 
 Verdict for the localized dashboard: **VERIFIED** by production build, live API data, and interactive
-browser checks. The newly added Playwright CLI scenario remains **NOT_EXECUTED** in this pass.
+browser checks. The final Playwright CLI run passed all four scenarios.
 
 ## 2026-07-23 full localization, knowledge-value filtering, and queue scale correction
 
@@ -380,10 +376,25 @@ browser checks. The newly added Playwright CLI scenario remains **NOT_EXECUTED**
   `local-knowledge-portal_postgres-data` inside Docker Desktop's C: VHDX.
 - Append-only backups remain under `D:\LocalBackup\LocalKnowledgePortal`.
 
-The Playwright CLI suite was not rerun because the installed Windows pnpm runtime cannot safely run
-from the WSL UNC checkout. The new all-screen localization scenario remains committed and the same
-flow was executed through the in-app browser. No long-duration endurance or thermal soak was
-claimed.
+The final Playwright CLI run used
+`mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294a...` with the locked pnpm 11.9.0
+workspace in an ephemeral container: all four scenarios passed in 8.9 seconds. The suite covered
+all-screen localization, persisted language, explorer/version/provenance, activity and knowledge
+details, keyword/semantic/hybrid search, retry, heartbeat, and the recorded backup. No
+long-duration endurance or thermal soak was claimed.
+
+The final append-only WSL backup
+`D:\LocalBackup\LocalKnowledgePortal\database\2026-07-23T151129Z` was recorded in `backup_run` and
+shown by the Operations API. Its dump was 115,568,192 bytes with SHA-256
+`547fa3e346a716dd78ab9136a68af24a02782061ad280ad3092863cb61d66b64`; the manifest also recorded
+schema `0003_queue_scale_indexes`, source configuration hash, two managed Vault files, and nine raw
+spool files. Restore into a separate temporary PostgreSQL instance passed with 2,312 documents,
+20,500 chunks, 20,500 vectors, and one activity. A first restore command incorrectly supplied the
+dump file instead of its directory and failed closed; the corrected invocation passed. One earlier
+backup attempt (`2026-07-23T151058Z`) failed while preserving DrvFS timestamps, was not registered as
+successful, and is explicitly marked `status=failed`; subsequent copies use non-preserving
+recursive copy.
 
 Verdict for this correction: **VERIFIED** for full localization, deterministic knowledge-value
-selection, migration, live queue behavior, filesystem placement, and interactive browser flow.
+selection, migration, live queue behavior, filesystem placement, Playwright E2E, and
+backup/restore.
