@@ -2,12 +2,12 @@
 
 ## Start
 
-1. Run `scripts/bootstrap.ps1` once and review the two gitignored YAML files.
-2. Run `scripts/start.ps1` to start PostgreSQL, migrate, and start the hook collector, watcher,
-   reconciler, and worker.
-3. Start API and web with the commands in the README.
-4. Check `/health/live`; then check `/health/ready`. Readiness requires PostgreSQL, the current
-   schema revision, and the configured Ollama embedding model.
+1. Keep the Linux-native checkout at `~/src/local-knowledge-portal`.
+2. Run `scripts/bootstrap-wsl-docker.ps1` from Windows once; review
+   `C:\Docker\local-knowledge-portal\config`.
+3. Run `./scripts/docker-stack.sh up` inside WSL.
+4. Check `/health/live` and `/health/ready`. The stack starts PostgreSQL, migration, Ollama model
+   pull, API, web, worker, watcher, reconciler, and hook collector in dependency order.
 
 ## Add a source root
 
@@ -17,10 +17,10 @@ Add an explicit existing directory to `config/source-roots.yaml`, keep `read_onl
 
 Run `scripts/install-codex-hook.ps1` to idempotently merge the six global activity hooks into
 `%USERPROFILE%\.codex\hooks.json`. Existing Codex configuration is copied to a timestamped
-directory under `D:\Backups\LocalKnowledgePortal\config\codex` before the merge.
+directory under `D:\LocalBackup\LocalKnowledgePortal\config\codex` before the merge.
 
 Each hook only calls `scripts/codex-hook.ps1`, which redacts and atomically spools a bounded JSON
-envelope to `E:\LocalKnowledgePortal\ingest\codex-spool\pending`. It does not depend on the portal,
+envelope to `E:\Data\LocalKnowledgePortal\ingest\codex-spool\pending`. It does not depend on the portal,
 API, or database. `scripts/start-hook-collector.ps1` imports raw envelopes idempotently and keeps
 reported results separate from exit-code-backed verified results. Malformed, unsupported, and
 oversized envelopes are quarantined; a fallback spool is replayed after recovery.
@@ -58,9 +58,11 @@ If Ollama is unavailable, new embedding jobs fail and retry; keyword retrieval o
 ## Shutdown
 
 Stop worker loops gracefully so their current transaction rolls back and lease recovery can occur.
-Stop API/web, then run `scripts/stop.ps1`. This stops the hook collector, watcher, worker, and
-containers without deleting the E: data directory or raw spool.
+Run `./scripts/docker-stack.sh stop`. This stops every application container without deleting the
+Docker named volume, E: data directory, or raw spool.
 
 ## Logs
 
-Runtime logs belong under `E:\LocalKnowledgePortal\runtime\logs`. JSON application logs include trace, job, worker, document, path, duration, and error fields without full source content.
+Runtime files belong under `E:\Data\LocalKnowledgePortal\runtime`; container logs are available
+through `./scripts/docker-stack.sh logs [service]`. Structured application logs never include full
+source content.

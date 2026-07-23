@@ -10,7 +10,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import frontmatter
@@ -131,7 +131,12 @@ def parse_transcript(path: Path) -> Transcript:
             if event.get("type") == "session_meta":
                 session_id = str(payload.get("session_id") or payload.get("id") or "")
                 started_at = str(payload.get("timestamp") or timestamp or "")
-                workspace = Path(str(payload.get("cwd") or "")).name
+                cwd = str(payload.get("cwd") or "")
+                workspace = (
+                    PureWindowsPath(cwd).name
+                    if "\\" in cwd
+                    else Path(cwd).name
+                )
                 originator = str(payload.get("originator") or originator)
                 cli_version = str(payload.get("cli_version") or "")
                 continue

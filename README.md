@@ -5,63 +5,68 @@ A standalone, localhost-only knowledge portal for read-only local repositories a
 ## Safety model
 
 - Source roots are read-only and allowlisted in `config/source-roots.yaml`.
-- Scanner traversal rejects path escapes and does not follow symlinks or Windows reparse points.
+- Scanner traversal rejects path escapes and does not follow symlinks or reparse points.
 - Binary and oversized files are skipped; generated wiki content is restricted to `_generated`.
 - The API has no source mutation endpoint and rejects non-local bind configuration.
 - Database, vectors, and caches are derived data. Backups are immutable dated directories and are never mirrored or pruned.
-- `C:\Dev\Repos\local-voice-agent` and all other existing repositories are outside this repository's write boundary.
+- Other repositories below `~/src` are read-only source roots and remain outside this
+  repository's write boundary.
 
 ## Layout
 
 | Purpose | Workstation default |
 |---|---|
-| Git and source | `C:\Dev\Repos\local-knowledge-portal` |
-| PostgreSQL/models/cache/ingest/logs/vault/exports | `E:\LocalKnowledgePortal` |
-| Immutable backups | `D:\Backups\LocalKnowledgePortal` |
+| Git and source | WSL2 `/home/kutae/src/local-knowledge-portal` |
+| Active Compose definition and Docker volumes | `C:\Docker\local-knowledge-portal`, Docker Desktop under `C:\Docker` |
+| Ingest/logs/vault/exports | `E:\Data\LocalKnowledgePortal` |
+| Ollama model store | `E:\AI\Models\Ollama` |
+| Immutable backups | `D:\LocalBackup\LocalKnowledgePortal` |
 
 All paths are configuration values. Committed files contain examples only.
 
 ## Prerequisites
 
-- Windows 10/11 with PowerShell 5.1+
-- Docker Desktop
-- Python 3.13.14 managed by `uv` 0.11.30
-- Node.js 24 LTS and `pnpm` 11.9.0
-- Ollama 0.32.1 for production semantic ingestion/search
+- Windows 10/11 with WSL2 Ubuntu and PowerShell 5.1+
+- Docker Desktop with Ubuntu integration and data root under `C:\Docker`
+- Git inside WSL2
 
-The repository pins Python packages in `uv.lock`, JavaScript packages in `pnpm-lock.yaml`, and PostgreSQL/pgvector by exact tag and OCI digest.
+Python, Node, PostgreSQL/pgvector, and Ollama run in pinned container images. Package lockfiles
+remain authoritative inside those builds.
 
 ## Bootstrap and run
 
-PowerShell script execution may require an explicit process-scoped bypass:
+Clone the repository inside the WSL filesystem. Do not place the Linux checkout below `/mnt/c`
+or `/mnt/e`.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
-uv run uvicorn lkp.main:app --host 127.0.0.1 --port 8010
-pnpm --filter @lkp/web dev
+```bash
+mkdir -p ~/src
+git clone https://github.com/kutaelee/local-knowledge-portal.git ~/src/local-knowledge-portal
 ```
 
-Then open:
-
-- Portal: <http://127.0.0.1:3010>
-- API documentation: <http://127.0.0.1:8010/docs>
-- Live health: <http://127.0.0.1:8010/health/live>
-- Readiness: <http://127.0.0.1:8010/health/ready>
-
-Review `config/source-roots.yaml` before the first scan. The example registers `C:\Dev\Repos` read-only and excludes this portal to prevent self-indexing.
+From Windows, create the active Compose/config/data/backup layout and install the standalone
+global Codex spool hook:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\scan.ps1
-uv run python -m lkp_indexer.cli work-once
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  \\wsl.localhost\Ubuntu\home\kutae\src\local-knowledge-portal\scripts\bootstrap-wsl-docker.ps1
 ```
+
+Then run inside WSL:
+
+```bash
+cd ~/src/local-knowledge-portal
+./scripts/docker-stack.sh up
+```
+
+Portal, API docs, live health, and readiness remain available only on loopback at ports 3010 and
+8010. PostgreSQL and Ollama are not published to the host network.
 
 ## Global Codex activity capture
 
 The user-level `%USERPROFILE%\.codex\hooks.json` records activity from every trusted Codex
 workspace, not only this repository. `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`,
 `SubagentStart`, and `SubagentStop` invoke a small PowerShell wrapper that only writes an atomic
-JSON envelope to `E:\LocalKnowledgePortal\ingest\codex-spool\pending`. It never calls the API or
+JSON envelope to `E:\Data\LocalKnowledgePortal\ingest\codex-spool\pending`. It never calls the API or
 database. A bounded fallback spool, deterministic event IDs, secret redaction, malformed and
 oversized quarantine, and collector-side idempotency keep capture available during portal or
 database outages.
@@ -91,7 +96,8 @@ LKP_GENERATION_MODEL=your-local-chat-model:tag
 LKP_GENERATION_MODEL_DIGEST=unresolved
 ```
 
-The adapter uses Ollama `/api/chat` structured outputs with temperature zero and fails closed on a
+The optional adapter uses the private Docker service `ollama` and structured outputs with
+temperature zero, then fails closed on a
 digest change. Other local runtimes can be added behind `GenerationProvider` without changing the
 scanner, queue, evidence, or retrieval data models. Generated text is never accepted as verified
 evidence by itself.
@@ -104,14 +110,10 @@ mixed. Tests use a separate deterministic revision.
 
 ## Tests
 
-```powershell
-uv run ruff check services scripts tests
-uv run pytest -m "not integration"
-$env:LKP_TEST_DATABASE_URL = "postgresql+psycopg://.../dedicated_test_database"
-uv run pytest -m integration
-pnpm --filter @lkp/web build
-$env:PLAYWRIGHT_BROWSERS_PATH = "E:\Cache\ms-playwright"
-pnpm --filter @lkp/web test
+```bash
+docker compose --env-file /mnt/c/Docker/local-knowledge-portal/.env \
+  -f /mnt/c/Docker/local-knowledge-portal/compose.yaml run --rm api \
+  ruff check services scripts tests
 ```
 
 Integration and retrieval tests refuse to target the production database. Unit/integration tests
@@ -133,9 +135,13 @@ See:
 - [Backup and restore](docs/runbooks/backup-restore.md)
 - [Retrieval baseline](docs/evidence/retrieval-evaluation.md)
 - [Validation evidence](docs/evidence/validation-report.md)
+- [WSL2 transition evidence](docs/evidence/wsl2-transition-report.md)
 - [Known limitations](docs/known-limitations.md)
 - [Backlog](docs/backlog.md)
 
 ## Rollback
 
-Stop the API, web, and worker, then stop the Compose project. Source files require no rollback because ingestion never edits them. The derived PostgreSQL directory can be set aside and rebuilt from source roots; do not delete it automatically. Restore uses a verified custom-format dump into a new database first.
+Run `./scripts/docker-stack.sh stop`. Source files require no rollback because ingestion never
+edits them. Keep the named PostgreSQL volume and legacy `E:\LocalKnowledgePortal` data intact;
+never delete either automatically. Restore a custom-format dump into a new database before any
+cutover.

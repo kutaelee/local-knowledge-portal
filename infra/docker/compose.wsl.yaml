@@ -1,0 +1,156 @@
+name: local-knowledge-portal
+
+x-app: &app
+  image: local-knowledge-portal-app:${LKP_IMAGE_TAG:-wsl}
+  build:
+    context: ${LKP_REPO_PATH:?set LKP_REPO_PATH}
+    dockerfile: infra/docker/Dockerfile.api
+  env_file: .env
+  environment:
+    LKP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    LKP_SOURCE_ROOTS_CONFIG: /config/source-roots.yaml
+    LKP_SETTINGS_CONFIG: /config/settings.yaml
+    LKP_RUNTIME_DIR: /data/runtime
+    LKP_INGEST_DIR: /data/ingest
+    LKP_HOOK_SPOOL_DIR: /data/ingest/codex-spool
+    LKP_HOOK_SPOOL_FALLBACK_DIR: /fallback
+    LKP_VAULT_DIR: /data/vault
+    LKP_BACKUP_DIR: /backups
+    LKP_OLLAMA_BASE_URL: http://ollama:11434
+  volumes:
+    - ${LKP_CONFIG_ROOT:?set LKP_CONFIG_ROOT}:/config:ro
+    - ${LKP_DATA_ROOT:?set LKP_DATA_ROOT}:/data
+    - ${LKP_BACKUP_ROOT:?set LKP_BACKUP_ROOT}:/backups
+  networks: [backend]
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg18-trixie@sha256:b7337db8fe39d12fe8ecb0003c72680f24479813a744b43154eee6f2eab5a5f3
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --data-checksums
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [backend]
+
+  ollama:
+    image: ollama/ollama:0.32.1@sha256:6345fbc18bd73a1e16404be681dbc6fd291a027cab43ed541abe78c4c81051b0
+    restart: unless-stopped
+    volumes:
+      - ${LKP_MODEL_ROOT:?set LKP_MODEL_ROOT}:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+    networks: [backend]
+
+  ollama-model:
+    image: ollama/ollama:0.32.1@sha256:6345fbc18bd73a1e16404be681dbc6fd291a027cab43ed541abe78c4c81051b0
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["OLLAMA_HOST=http://ollama:11434 ollama pull qwen3-embedding:0.6b"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks: [backend]
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["uvicorn", "lkp.main:app", "--host", "0.0.0.0", "--port", "8010"]
+    ports:
+      - "127.0.0.1:8010:8010"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      ollama-model:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "lkp_indexer.worker_service"]
+    volumes:
+      - ${LKP_CONFIG_ROOT}:/config:ro
+      - ${LKP_DATA_ROOT}:/data
+      - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_SOURCE_ROOT:?set LKP_SOURCE_ROOT}:${LKP_SOURCE_ROOT}:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      ollama-model:
+        condition: service_completed_successfully
+
+  watcher:
+    <<: *app
+    command: ["python", "-m", "lkp_indexer.watcher_service"]
+    volumes:
+      - ${LKP_CONFIG_ROOT}:/config:ro
+      - ${LKP_DATA_ROOT}:/data
+      - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_SOURCE_ROOT}:${LKP_SOURCE_ROOT}:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      ollama-model:
+        condition: service_completed_successfully
+
+  hook-collector:
+    <<: *app
+    command: ["python", "-m", "lkp_indexer.hook_collector", "--watch"]
+    volumes:
+      - ${LKP_CONFIG_ROOT}:/config:ro
+      - ${LKP_DATA_ROOT}:/data
+      - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_HOOK_FALLBACK_ROOT:?set LKP_HOOK_FALLBACK_ROOT}:/fallback
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    image: local-knowledge-portal-web:${LKP_IMAGE_TAG:-wsl}
+    build:
+      context: ${LKP_REPO_PATH}
+      dockerfile: infra/docker/Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_URL: http://127.0.0.1:8010
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3010:3010"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [backend]
+
+volumes:
+  postgres-data:
+
+networks:
+  backend: {}

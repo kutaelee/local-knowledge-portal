@@ -4,7 +4,11 @@ $ErrorActionPreference = 'Stop'
 $Repo = Split-Path -Parent $PSScriptRoot
 $CodexHome = Join-Path $env:USERPROFILE '.codex'
 $HooksPath = Join-Path $CodexHome 'hooks.json'
-$HookScript = Join-Path $PSScriptRoot 'codex-hook.ps1'
+$HookScript = if ($env:LKP_HOOK_SCRIPT) {
+  $env:LKP_HOOK_SCRIPT
+} else {
+  Join-Path $PSScriptRoot 'codex-hook.ps1'
+}
 $Command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$HookScript`""
 $Description = 'Local Knowledge Portal raw-spool hooks (managed entry, merge-safe).'
 $Events = [ordered]@{
@@ -52,12 +56,14 @@ foreach ($EventName in $Events.Keys) {
     $Config.hooks | Add-Member -NotePropertyName $EventName -NotePropertyValue @($Group)
     continue
   }
-  $AlreadyInstalled = @($Property.Value) | Where-Object {
-    @($_.hooks) | Where-Object { $_.commandWindows -eq $Command }
+  $Unmanaged = @($Property.Value) | Where-Object {
+    $Managed = @($_.hooks) | Where-Object {
+      $_.statusMessage -eq 'Spooling Codex activity locally' -or
+      $_.commandWindows -match 'local-knowledge-portal.+codex-hook(?:-standalone)?\.ps1'
+    }
+    -not $Managed
   }
-  if (-not $AlreadyInstalled) {
-    $Property.Value = @($Property.Value) + @($Group)
-  }
+  $Property.Value = @($Unmanaged) + @($Group)
 }
 
 $NewJson = $Config | ConvertTo-Json -Depth 20
@@ -65,7 +71,7 @@ if ($OldJson -ne $NewJson) {
   $BackupRoot = if ($env:LKP_BACKUP_DIR) {
     Join-Path $env:LKP_BACKUP_DIR 'config\codex'
   } else {
-    'D:\Backups\LocalKnowledgePortal\config\codex'
+    'D:\LocalBackup\LocalKnowledgePortal\config\codex'
   }
   $Stamp = Get-Date -Format 'yyyy-MM-ddTHHmmssfff'
   $Backup = Join-Path $BackupRoot $Stamp
@@ -84,7 +90,7 @@ if ($OldJson -ne $NewJson) {
 $RuntimeDir = if ($env:LKP_RUNTIME_DIR) {
   $env:LKP_RUNTIME_DIR
 } else {
-  'E:\LocalKnowledgePortal\runtime'
+  'E:\Data\LocalKnowledgePortal\runtime'
 }
 $StatusPath = Join-Path $RuntimeDir 'hook-trust-status.json'
 $Status = [ordered]@{

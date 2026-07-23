@@ -65,8 +65,11 @@ class Settings(BaseSettings):
     @field_validator("ollama_base_url", "generation_base_url")
     @classmethod
     def local_model_guard(cls, value: str) -> str:
-        if urlparse(value).hostname not in {"127.0.0.1", "localhost", "::1"}:
-            raise ValueError("model providers must be bound to localhost")
+        if urlparse(value).hostname not in {"127.0.0.1", "localhost", "::1", "ollama"}:
+            raise ValueError(
+                "model providers must use localhost/loopback or the private Docker service "
+                "'ollama'"
+            )
         return value
 
     @property

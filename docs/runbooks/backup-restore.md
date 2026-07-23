@@ -11,7 +11,7 @@ Validate a dump with:
 
 ```powershell
 .\scripts\restore-test.ps1 -BackupDirectory `
-  D:\Backups\LocalKnowledgePortal\database\YYYY-MM-DDTHHMMSS
+  D:\LocalBackup\LocalKnowledgePortal\database\YYYY-MM-DDTHHMMSSZ
 ```
 
 The script verifies SHA-256, restores into a uniquely named temporary database, checks revision/counts, verifies that no foreign keys are unvalidated, performs a content query, and only then reports success. The dedicated temporary database is removed in `finally`; the immutable backup remains.

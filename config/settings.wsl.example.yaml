@@ -1,0 +1,36 @@
+scanner:
+  max_file_bytes: 10485760
+  hash_chunk_bytes: 1048576
+watcher:
+  debounce_ms: 750
+  stability_wait_ms: 1000
+reconciler:
+  interval_seconds: 900
+worker:
+  heartbeat_seconds: 10
+  stale_after_seconds: 45
+  lease_seconds: 120
+  max_attempts: 5
+  retry_base_seconds: 2
+chunking:
+  max_chars: 6000
+  overlap_lines: 8
+  parser_version: "markdown-it-py-4"
+  chunker_version: "lkp-heading-symbol-v1"
+pipeline:
+  version: "1.0.0"
+codex_capture:
+  enabled: false
+generation:
+  provider: "disabled"
+  base_url: "http://ollama:11434"
+  model: ""
+  model_digest: "unresolved"
+  timeout_seconds: 120
+  max_input_chars: 40000
+  output: "/data/vault/_generated/summaries"
+  required_for_ingestion: false
+search:
+  default_top_k: 10
+  minimum_similarity: 0.2
+  rrf_k: 60
