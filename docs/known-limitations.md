@@ -1,6 +1,8 @@
 # Known limitations
 
 - Ollama was not running and `qwen3-embedding:0.6b` was not downloaded, so production semantic/hybrid retrieval is implemented but not end-to-end validated.
+- The optional Ollama local-generation adapter is implemented with mocked contract tests but has
+  not been exercised against a locally installed chat model.
 - The validation fixture uses a clearly labeled deterministic test embedding revision.
 - Code chunking uses deterministic symbol patterns and line fallback; the installed tree-sitter adapter is not yet wired for every requested grammar.
 - The watcher module handles recursive debounced events, but its long-running supervisor, lease renewal thread, suspend/resume hook, and portal health record are not complete.

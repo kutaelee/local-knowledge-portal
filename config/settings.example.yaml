@@ -22,6 +22,7 @@ pipeline:
 codex_capture:
   enabled: true
   source: "%USERPROFILE%\\.codex\\sessions"
+  additional_homes: []
   managed_output: "E:\\LocalKnowledgePortal\\vault\\_generated\\codex-sessions"
   poll_seconds: 5
   include_roles:
@@ -31,6 +32,15 @@ codex_capture:
   exclude_reasoning: true
   exclude_tool_io: true
   redact_likely_secrets: true
+generation:
+  provider: "disabled"
+  base_url: "http://127.0.0.1:11434"
+  model: ""
+  model_digest: "unresolved"
+  timeout_seconds: 120
+  max_input_chars: 40000
+  output: "E:\\LocalKnowledgePortal\\vault\\_generated\\codex-summaries"
+  required_for_ingestion: false
 search:
   default_top_k: 10
   minimum_similarity: 0.2

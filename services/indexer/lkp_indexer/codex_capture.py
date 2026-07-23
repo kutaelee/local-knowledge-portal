@@ -20,6 +20,7 @@ from lkp.models import GeneratedPage, JobStatus
 from lkp.settings import Settings, get_settings
 from sqlalchemy import select
 
+from .generation import GenerationProvider, GenerationResult, build_generation_provider
 from .paths import idempotency_key
 from .queue import enqueue
 from .scanner import register_roots
@@ -28,6 +29,7 @@ from .worker import process_job
 GENERATOR = "local-knowledge-portal"
 CAPTURE_PIPELINE_VERSION = "codex-transcript-v1"
 MANAGED_PREFIX = "_generated/codex-sessions"
+ENRICHMENT_PREFIX = "_generated/codex-summaries"
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|secret|password)\b"
     r"(\s*[:=]\s*)([\"']?)([^\s\"']{8,})([\"']?)"
@@ -199,6 +201,17 @@ def output_path_for(vault_dir: Path, transcript: Transcript) -> Path:
     return target_resolved
 
 
+def enrichment_path_for(vault_dir: Path, transcript: Transcript) -> Path:
+    year, month, day = _date_parts(transcript.started_at)
+    safe_id = re.sub(r"[^0-9A-Za-z-]", "-", transcript.session_id)
+    target = vault_dir / ENRICHMENT_PREFIX / year / month / f"{day}-{safe_id}.md"
+    vault_resolved = vault_dir.resolve()
+    target_resolved = target.resolve(strict=False)
+    if not target_resolved.is_relative_to(vault_resolved):
+        raise ValueError("managed enrichment output escaped the configured vault")
+    return target_resolved
+
+
 def _render(transcript: Transcript, source_hash: str, generated_at: str) -> str:
     metadata = {
         "managed": True,
@@ -278,6 +291,112 @@ def write_managed_page(transcript_path: Path, vault_dir: Path) -> SyncResult:
     )
 
 
+def _generation_source_text(transcript: Transcript, max_chars: int) -> str:
+    selected: list[str] = []
+    used = 0
+    for message in reversed(transcript.messages):
+        label = "USER" if message.role == "user" else "ASSISTANT"
+        rendered = f"[{label}]\n{message.text}"
+        if selected and used + len(rendered) > max_chars:
+            break
+        if len(rendered) > max_chars:
+            rendered = rendered[-max_chars:]
+        selected.append(rendered)
+        used += len(rendered)
+    selected.reverse()
+    prefix = "[Earlier messages omitted deterministically]\n\n" if len(selected) < len(
+        transcript.messages
+    ) else ""
+    return prefix + "\n\n".join(selected)
+
+
+def _write_enrichment_page(
+    transcript: Transcript,
+    source_hash: str,
+    generated: GenerationResult,
+    vault_dir: Path,
+) -> SyncResult:
+    output_path = enrichment_path_for(vault_dir, transcript)
+    if output_path.exists():
+        post = frontmatter.load(output_path)
+        if post.get("managed") is not True or post.get("generator") != GENERATOR:
+            raise PermissionError(f"refusing to overwrite non-managed page: {output_path}")
+        if (
+            (post.get("source_hashes") or [None])[0] == source_hash
+            and post.get("generation_provider") == generated.provider
+            and post.get("generation_model") == generated.model
+            and post.get("generation_model_digest") == generated.model_digest
+        ):
+            return SyncResult(
+                transcript.session_id,
+                output_path,
+                len(transcript.messages),
+                source_hash,
+                False,
+            )
+    metadata = {
+        "managed": True,
+        "generator": GENERATOR,
+        "source_ids": [f"codex:{transcript.session_id}"],
+        "source_hashes": [source_hash],
+        "pipeline_version": "codex-enrichment-v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "page_type": "codex-work-session-enrichment",
+        "generation_provider": generated.provider,
+        "generation_model": generated.model,
+        "generation_model_digest": generated.model_digest,
+        "tags": ["codex", "generated", "llm-enrichment"],
+    }
+    content = generated.content
+    lines = [
+        "---",
+        yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False).strip(),
+        "---",
+        "",
+        f"# Codex 세션 요약 {transcript.session_id[:8]}",
+        "",
+        "> [!warning] LLM 생성 정보",
+        "> 이 문서는 로컬 모델이 생성했습니다. 원본 대화 문서와 구분되며 확인이 필요합니다.",
+        "",
+        "## LLM 생성 요약",
+        "",
+        content.summary,
+        "",
+        "## 관측된 사실",
+        "",
+        *([f"- {item}" for item in content.observed_facts] or ["- 없음"]),
+        "",
+        "## 파일에서 추출한 정보",
+        "",
+        *([f"- {item}" for item in content.extracted_information] or ["- 없음"]),
+        "",
+        "## 확인이 필요한 추론",
+        "",
+        *([f"- {item}" for item in content.inferences_needing_confirmation] or ["- 없음"]),
+        "",
+    ]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    os.replace(temporary, output_path)
+    return SyncResult(
+        transcript.session_id, output_path, len(transcript.messages), source_hash, True
+    )
+
+
+def enrich_transcript(
+    transcript_path: Path,
+    settings: Settings,
+    provider: GenerationProvider,
+) -> SyncResult:
+    transcript = parse_transcript(transcript_path.resolve(strict=True))
+    source_hash = _source_hash(transcript)
+    generated = provider.generate(
+        _generation_source_text(transcript, settings.generation_max_input_chars)
+    )
+    return _write_enrichment_page(transcript, source_hash, generated, settings.vault_dir)
+
+
 def index_managed_page(result: SyncResult, settings: Settings) -> bool:
     with SessionLocal() as session:
         roots = register_roots(session, settings.source_roots_config)
@@ -348,41 +467,88 @@ def _log(settings: Settings, event: str, **fields: Any) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-def sync_one(path: Path, settings: Settings, *, index: bool) -> SyncResult:
+def sync_one(
+    path: Path,
+    settings: Settings,
+    *,
+    index: bool,
+    generation_provider: GenerationProvider | None = None,
+) -> SyncResult:
     result = write_managed_page(path, settings.vault_dir)
     if index and result.changed:
         try:
             index_managed_page(result, settings)
         except Exception as exc:
             _log(settings, "index_failed", path=path, error=type(exc).__name__, detail=str(exc))
+    if generation_provider:
+        transcript = parse_transcript(path.resolve(strict=True))
+        enrichment_path = enrichment_path_for(settings.vault_dir, transcript)
+        if result.changed or not enrichment_path.exists():
+            try:
+                enrichment = enrich_transcript(path, settings, generation_provider)
+                if index and enrichment.changed:
+                    index_managed_page(enrichment, settings)
+            except Exception as exc:
+                _log(
+                    settings,
+                    "generation_failed",
+                    path=path,
+                    error=type(exc).__name__,
+                    detail=str(exc),
+                )
     return result
 
 
-def _transcripts(codex_home: Path) -> list[Path]:
-    return sorted(
-        (codex_home / "sessions").glob("**/*.jsonl"),
-        key=lambda item: item.stat().st_mtime_ns,
-    )
+def _transcripts(codex_homes: list[Path]) -> list[Path]:
+    files = [
+        transcript
+        for home in codex_homes
+        for transcript in (home / "sessions").glob("**/*.jsonl")
+    ]
+    return sorted(files, key=lambda item: item.stat().st_mtime_ns)
 
 
-def watch(settings: Settings, codex_home: Path, poll_seconds: float, *, index: bool) -> None:
-    files = _transcripts(codex_home)
+def watch(
+    settings: Settings,
+    codex_homes: list[Path],
+    poll_seconds: float,
+    *,
+    index: bool,
+    generation_provider: GenerationProvider | None,
+) -> None:
+    files = _transcripts(codex_homes)
     known = {
         path: (path.stat().st_mtime_ns, path.stat().st_size)
         for path in files
     }
     if files:
         latest = files[-1]
-        sync_one(latest, settings, index=index)
-    _log(settings, "watch_started", codex_home=codex_home, initial_files=len(files))
+        sync_one(
+            latest,
+            settings,
+            index=index,
+            generation_provider=generation_provider,
+        )
+    _log(
+        settings,
+        "watch_started",
+        codex_homes=";".join(str(path) for path in codex_homes),
+        initial_files=len(files),
+        generation_provider=settings.generation_provider,
+    )
     while True:
-        for path in _transcripts(codex_home):
+        for path in _transcripts(codex_homes):
             stat = path.stat()
             signature = (stat.st_mtime_ns, stat.st_size)
             if known.get(path) == signature:
                 continue
             try:
-                result = sync_one(path, settings, index=index)
+                result = sync_one(
+                    path,
+                    settings,
+                    index=index,
+                    generation_provider=generation_provider,
+                )
                 known[path] = signature
                 if result.changed:
                     _log(
@@ -418,24 +584,34 @@ def main() -> int:
     parser.add_argument("--transcript", type=Path)
     parser.add_argument("--hook-stdin", action="store_true")
     parser.add_argument("--watch", action="store_true")
-    parser.add_argument("--codex-home", type=Path, default=Path.home() / ".codex")
-    parser.add_argument("--poll-seconds", type=float, default=5.0)
+    parser.add_argument("--codex-home", type=Path, action="append")
+    parser.add_argument("--poll-seconds", type=float)
     parser.add_argument("--index", action="store_true")
+    parser.add_argument("--enrich", action="store_true")
     args = parser.parse_args()
     settings = get_settings()
+    generation_provider = build_generation_provider(settings) if args.enrich else None
     try:
         if args.watch:
+            configured_homes = args.codex_home or settings.codex_home_list
+            codex_homes = [path.resolve(strict=True) for path in configured_homes]
             watch(
                 settings,
-                args.codex_home.resolve(strict=True),
-                args.poll_seconds,
+                codex_homes,
+                args.poll_seconds or settings.codex_capture_poll_seconds,
                 index=args.index,
+                generation_provider=generation_provider,
             )
             return 0
         path = _hook_path() if args.hook_stdin else args.transcript
         if path is None:
             parser.error("--transcript, --hook-stdin, or --watch is required")
-        result = sync_one(path, settings, index=args.index)
+        result = sync_one(
+            path,
+            settings,
+            index=args.index,
+            generation_provider=generation_provider,
+        )
         if args.hook_stdin:
             return 0
         print(

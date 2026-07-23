@@ -109,6 +109,11 @@ def ready(db: Session = Depends(get_db)) -> dict:
         "schema_revision": revision,
         "ollama": ollama,
         "embedding_revision": settings.embedding_revision,
+        "generation": {
+            "enabled": settings.generation_provider != "disabled",
+            "provider": settings.generation_provider,
+            "model": settings.generation_model or None,
+        },
     }
 
 

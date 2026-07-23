@@ -12,8 +12,9 @@ Date: 2026-07-23, Asia/Seoul
 - Started PostgreSQL 18.4 with data checksums on E: and loopback-only port 55432.
 - `uv run alembic upgrade head`; current schema `0001_initial`.
 - `uv run ruff check services scripts tests`: passed.
-- `uv run pytest -m "not integration"`: 10 passed, 1 deselected after adding Codex capture
-  filtering, redaction, idempotency, and managed-page protection tests.
+- `uv run pytest -m "not integration"`: 15 passed, 1 deselected after adding Codex capture
+  filtering, redaction, idempotency, managed-page protection, and optional local-generation
+  contract tests.
 - Dedicated PostgreSQL integration database: 1 passed, 7 deselected. The fixture flowed through scanner, durable lease, worker, append-only version, four chunks, four 1024-dimensional deterministic test vectors, and the FastAPI keyword endpoint with provenance.
 - `pnpm --filter @lkp/web build`: passed under Next.js 16.2.11.
 - `docker compose --profile app build api`: passed.
@@ -35,12 +36,18 @@ Date: 2026-07-23, Asia/Seoul
   claiming an Ollama embedding was produced.
 - `왜 구현안하고 멈춤` keyword search returned the active Codex session with provenance and
   high confidence.
-- Started continuous capture as PID 8336 and observed a subsequent transcript update become a
+- Started continuous capture as PID 29428 and observed a subsequent transcript update become a
   new managed page version.
 - Installed a user-level Codex `Stop` hook at `%USERPROFILE%\.codex\hooks.json`; a new Codex
   session still requires the official `/hooks` trust review before that hook can run.
 - A fresh dedicated database `lkp_codex_capture_validation_20260723` passed the PostgreSQL
-  integration test: 1 passed, 10 deselected.
+  integration test: 1 passed, 15 deselected.
+- Verified user-global polling by observing updates from two distinct Codex session IDs under the
+  same Windows Codex home.
+- Verified configuration accepts additional Codex homes for separately stored WSL sessions.
+- Mocked the official Ollama `/api/tags` and `/api/chat` contracts: JSON-schema output,
+  non-streaming mode, disabled thinking, temperature zero, structured response validation, model
+  digest recording, and fail-closed digest mismatch all passed.
 
 ## Failed and corrected during validation
 
@@ -59,6 +66,8 @@ Date: 2026-07-23, Asia/Seoul
 ## Skipped or not proven
 
 - Ollama connectivity/model download/model digest and production semantic quality.
+- Actual local chat-model generation; the adapter was contract-tested without representing a
+  mocked response as a real model run.
 - Full source-root scan, watcher endurance/suspend test, worker crash/lease-expiry timing test, database restart test, and all data-dependent E2E scenarios.
 - Scheduled tasks and optional MCP.
 - Codex hook trust cannot be asserted programmatically; `/hooks` review is intentionally left to

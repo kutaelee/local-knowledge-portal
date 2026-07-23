@@ -26,6 +26,21 @@ unavailable it creates lexical chunks with `embedding_status: pending`.
 user `hooks.json` exists. Start a new Codex session, run `/hooks`, inspect the command, and trust it.
 The polling process remains the fallback until that review is complete.
 
+The Windows Codex home is user-global and covers Codex Desktop/Windows CLI sessions across
+repositories. A WSL CLI has a separate home unless configured to share the Windows home. Add
+extra exposed homes through semicolon-separated `LKP_CODEX_ADDITIONAL_HOMES`; each root must
+contain a `sessions` directory.
+
+### Enable a local generation model
+
+Set `LKP_GENERATION_PROVIDER=ollama`, `LKP_GENERATION_MODEL`, and optionally a known
+`LKP_GENERATION_MODEL_DIGEST`, then restart capture. Raw capture remains available if generation
+fails. Review `runtime\logs\codex-capture.jsonl` for `generation_failed`.
+
+The first successful call resolves the installed digest from `/api/tags` and records it in the
+summary page. Copy that digest into configuration before treating generated pages as revision
+stable. Never enable generated summaries as evidence without checking their linked raw session.
+
 ## Queue recovery
 
 An interrupted processing job becomes claimable after `lease_expires_at`. Failed jobs back off exponentially and become `dead_letter` after `max_attempts`. The UI retry action creates a new job whose `error_details.retry_of` points to the original.

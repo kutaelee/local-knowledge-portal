@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +16,9 @@ class Settings(BaseSettings):
     ingest_dir: Path = Path("runtime/ingest")
     vault_dir: Path = Path("runtime/vault")
     backup_dir: Path = Path("runtime/backups")
+    codex_home: Path = Field(default_factory=lambda: Path.home() / ".codex")
+    codex_additional_homes: str = ""
+    codex_capture_poll_seconds: float = 5.0
     api_host: str = "127.0.0.1"
     api_port: int = 8010
     cors_origins: str = "http://127.0.0.1:3010,http://localhost:3010"
@@ -24,6 +28,12 @@ class Settings(BaseSettings):
     embedding_dimension: int = 1024
     embedding_revision: str = "ollama-qwen3-embedding-0.6b-d1024-v1"
     embedding_model_digest: str = "unresolved"
+    generation_provider: str = "disabled"
+    generation_base_url: str = "http://127.0.0.1:11434"
+    generation_model: str = ""
+    generation_model_digest: str = "unresolved"
+    generation_timeout_seconds: int = 120
+    generation_max_input_chars: int = 40000
     pipeline_version: str = "1.0.0"
     parser_version: str = "markdown-it-py-4"
     chunker_version: str = "lkp-heading-symbol-v1"
@@ -41,9 +51,25 @@ class Settings(BaseSettings):
             raise ValueError("non-local API bind requires an authentication implementation")
         return value
 
+    @field_validator("ollama_base_url", "generation_base_url")
+    @classmethod
+    def local_model_guard(cls, value: str) -> str:
+        if urlparse(value).hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("model providers must be bound to localhost")
+        return value
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+    @property
+    def codex_home_list(self) -> list[Path]:
+        additional = [
+            Path(item.strip())
+            for item in self.codex_additional_homes.split(";")
+            if item.strip()
+        ]
+        return [self.codex_home, *additional]
 
 
 @lru_cache

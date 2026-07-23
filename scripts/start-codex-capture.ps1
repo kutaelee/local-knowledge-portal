@@ -18,8 +18,11 @@ if (Test-Path -LiteralPath $PidFile) {
 
 $Arguments = @(
   'run', '--project', $Repo, 'python', '-m', 'lkp_indexer.codex_capture',
-  '--watch', '--codex-home', (Join-Path $env:USERPROFILE '.codex')
+  '--watch', '--enrich'
 )
+if ($env:LKP_CODEX_HOME) {
+  $Arguments += @('--codex-home', $env:LKP_CODEX_HOME)
+}
 if ($Index) { $Arguments += '--index' }
 $Process = Start-Process -FilePath 'uv' -ArgumentList $Arguments -WorkingDirectory $Repo `
   -WindowStyle Hidden -PassThru `

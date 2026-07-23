@@ -12,7 +12,7 @@ $Arguments = @('run', '--project', $Repo, 'python', '-m', 'lkp_indexer.codex_cap
 if ($PSCmdlet.ParameterSetName -eq 'Once') {
   $Arguments += @('--transcript', $Transcript)
 } else {
-  $Arguments += @('--watch', '--codex-home', (Join-Path $env:USERPROFILE '.codex'))
+  $Arguments += @('--watch', '--enrich')
 }
 if ($Index) { $Arguments += '--index' }
 & uv @Arguments

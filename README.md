@@ -63,6 +63,12 @@ extracts only displayed user and assistant messages, redacts common secret shape
 managed Markdown below `E:\LocalKnowledgePortal\vault\_generated\codex-sessions`. It excludes
 system/developer instructions, internal reasoning, and tool inputs/outputs.
 
+This is a user-global Codex integration, not a hook for only this repository. The user-level
+`%USERPROFILE%\.codex\hooks.json` applies across trusted Codex projects, and the polling process
+observes all new or changed transcripts under the configured Codex home. If a WSL Codex CLI uses
+its own Linux `~/.codex`, expose that path to Windows and add it to
+`LKP_CODEX_ADDITIONAL_HOMES` as a semicolon-separated root.
+
 Start live capture with lexical indexing. Semantic embeddings stay explicitly pending when Ollama
 is unavailable:
 
@@ -77,6 +83,25 @@ non-managed hooks using `/hooks`, as required by Codex:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-codex-hook.ps1
 ```
+
+### Optional local LLM enrichment
+
+Raw capture and search never require an LLM. A separate provider adapter can create managed
+sidecar summaries under `_generated\codex-summaries`; it never rewrites the captured transcript
+page. Ollama is implemented and disabled by default:
+
+```dotenv
+LKP_GENERATION_PROVIDER=ollama
+LKP_GENERATION_BASE_URL=http://127.0.0.1:11434
+LKP_GENERATION_MODEL=your-local-chat-model:tag
+LKP_GENERATION_MODEL_DIGEST=unresolved
+```
+
+Restart capture after changing the provider. The adapter uses Ollama `/api/chat` structured
+outputs with temperature zero, stores the actual model digest, and separates observed facts,
+extracted information, and inferences requiring confirmation. After the first successful run,
+pin the returned digest; a later digest change then fails closed. Other local runtimes can be
+added behind the `GenerationProvider` interface without changing scanner, queue, or search models.
 
 Production embedding defaults to Ollama model `qwen3-embedding:0.6b`, dimension 1024. A provider response with a different dimension fails closed. Model changes require a new `LKP_EMBEDDING_REVISION`; vectors are never silently mixed.
 

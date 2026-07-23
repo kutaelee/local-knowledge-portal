@@ -2,7 +2,14 @@ import json
 from pathlib import Path
 
 import pytest
-from lkp_indexer.codex_capture import parse_transcript, redact_text, write_managed_page
+from lkp_indexer.codex_capture import (
+    _write_enrichment_page,
+    enrichment_path_for,
+    parse_transcript,
+    redact_text,
+    write_managed_page,
+)
+from lkp_indexer.generation import GenerationResult, KnowledgeEnrichment
 
 
 def _write_transcript(path: Path) -> None:
@@ -107,3 +114,26 @@ def test_redact_common_secret_shapes():
     value = redact_text("Authorization: Bearer abcdefghijklmnopqrstuvwxyz sk-abcdefghijklmnop")
     assert "abcdefghijklmnopqrstuvwxyz" not in value
     assert "sk-abcdefghijklmnop" not in value
+
+
+def test_enrichment_is_separate_and_identifies_local_model(tmp_path: Path):
+    source = tmp_path / "rollout.jsonl"
+    vault = tmp_path / "vault"
+    _write_transcript(source)
+    transcript = parse_transcript(source)
+    generated = GenerationResult(
+        content=KnowledgeEnrichment(
+            summary="요약",
+            observed_facts=["관측"],
+            inferences_needing_confirmation=["확인 필요"],
+        ),
+        provider="ollama",
+        model="local-summary:latest",
+        model_digest="sha256:model-v1",
+    )
+    result = _write_enrichment_page(transcript, "source-hash", generated, vault)
+    assert result.output_path == enrichment_path_for(vault, transcript)
+    content = result.output_path.read_text(encoding="utf-8")
+    assert "generation_provider: ollama" in content
+    assert "generation_model_digest: sha256:model-v1" in content
+    assert "확인이 필요합니다" in content
