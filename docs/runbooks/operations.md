@@ -27,8 +27,9 @@ oversized envelopes are quarantined; a fallback spool is replayed after recovery
 
 Only meaningful instructions, changed files, failures, verification/operation commands, and
 reported outcomes become activity history. Session lifecycle, acknowledgements, and read-only
-inspection events remain compact `filtered_low_signal` spool records and do not appear as portal
-activities. Ordinary retained activity is still not promoted to a wiki page. Create a knowledge
+inspection events do not become durable rows. A successfully handled raw envelope is deleted; only
+failed or unclaimed envelopes remain in the spool for retry. Ordinary retained activity is still
+not promoted to a wiki page. Create a knowledge
 candidate explicitly and publish only after its category-specific evidence gate passes. Exact
 problem/root-cause/resolution duplicates add occurrences and revisions to the existing canonical
 case; uncertain similarity remains `NEEDS_REVIEW`.
@@ -126,6 +127,30 @@ effective mount with `docker inspect`; do not infer model placement from the Doc
 
 Detailed evidence:
 `docs/evidence/ollama-embedding-cpu-remediation-2026-07-23.md`.
+
+## Low-value derived-data cleanup
+
+Stop the watcher and worker, create and restore-test an immutable logical backup, then inspect the
+cleanup dry run:
+
+```bash
+docker compose --env-file /mnt/c/Docker/local-knowledge-portal/.env \
+  -f infra/docker/compose.wsl.yaml exec -T api python -m lkp.cleanup_derived
+```
+
+Apply only after the dry-run paths are confirmed:
+
+```bash
+docker compose --env-file /mnt/c/Docker/local-knowledge-portal/.env \
+  -f infra/docker/compose.wsl.yaml exec -T api python -m lkp.cleanup_derived \
+  --apply --manifest /data/exports/cleanup-ignored-YYYY-MM-DDTHHMMSSZ.json
+```
+
+The command targets only rows already classified `ignored`, refuses to run while target jobs are
+active, deletes embeddings/chunks/versions/documents in dependency order, preserves source files,
+and detaches rather than deletes ingest-job history. Validation activity cleanup requires the
+additional explicit `--include-validation-fixtures` flag and recognizes only allowlisted fixture
+session IDs.
 
 ## Shutdown
 

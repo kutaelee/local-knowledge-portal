@@ -398,3 +398,37 @@ recursive copy.
 Verdict for this correction: **VERIFIED** for full localization, deterministic knowledge-value
 selection, migration, live queue behavior, filesystem placement, Playwright E2E, and
 backup/restore.
+
+## 2026-07-24 low-value derived-data removal
+
+- Before deletion, watcher and worker were stopped and immutable backup
+  `D:\LocalBackup\LocalKnowledgePortal\database\2026-07-23T151748Z` was created. Restore into a
+  separate PostgreSQL 18.4 + pgvector database passed at schema `0003_queue_scale_indexes` with
+  2,317 documents, 20,597 chunks, 20,597 vectors, and one activity.
+- Dry-run selected exactly 20 `ignored` documents below `tokenizer_configs`, 12 versions, 42
+  chunks, and 42 embeddings. The cleanup removed only those rebuildable database rows; source
+  files remained readable. Forty-six ingest jobs were retained as audit history with
+  `document_id=NULL`.
+- Post-cleanup checks returned zero ignored/tokenizer documents and zero orphan versions, chunks,
+  or embeddings. Reconciliation completed after watcher restart and did not recreate the ignored
+  rows.
+- The remaining `wsl-transition-validation` fixture had no evidence references. Its one activity,
+  one hook-spool database row, and one raw spool file were deleted. Production now has zero
+  activity fixtures and zero raw spool files, while two verified canonical cases and two managed
+  incident Runbooks remain.
+- Cleanup manifests:
+  `E:\Data\LocalKnowledgePortal\exports\cleanup-ignored-2026-07-23T151927Z.json` and
+  `cleanup-validation-2026-07-23T152142Z.json`.
+- Hook selection was tightened again: general conversation is discarded without a durable row,
+  Stop events require a selected work signal in the same turn, and successfully handled raw
+  envelopes are deleted rather than retained indefinitely.
+- Validation: ruff passed, 26 unit tests passed, and nine dedicated-database integration tests
+  passed. Initial runs exposed that the cleanup helper used the global database session and that
+  an older Stop-only fixture contradicted the new selection boundary. Dependency injection was
+  added, the fixture now includes a selected work instruction, and the complete suite passed 9/9.
+  The temporary test containers were removed.
+- Live readiness remained healthy. After restart and reconciliation, watcher CPU was 1.01%, worker
+  0.09%, and Ollama 157.76% under its two-CPU limit.
+
+Verdict: **VERIFIED**. No source repository file, verified case, managed Runbook, or backup was
+deleted. Codex hook trust remains **MANUAL_APPROVAL_REQUIRED**.

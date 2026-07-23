@@ -34,6 +34,12 @@ _EVIDENCE_COMMAND = re.compile(
     r"(?i)\b(pytest|ruff|playwright|test|build|lint|typecheck|migrate|alembic|"
     r"backup|restore|benchmark|profile|docker\s+(build|restart|stop|compose)|git\s+commit)\b"
 )
+_REUSABLE_INSTRUCTION = re.compile(
+    r"(?i)(fix|bug|error|fail|implement|build|change|refactor|optim|performance|"
+    r"load|incident|outage|recover|verify|test|benchmark|experiment|migrat|backup|"
+    r"restore|root cause|decision|runbook|오류|실패|수정|구현|추가|변경|개선|최적화|"
+    r"성능|부하|장애|복구|검증|테스트|실험|마이그레이션|백업|복원|원인|재발|결정)"
+)
 _MUTATING_TOOLS = {"apply_patch", "write_file", "edit_file"}
 
 
@@ -122,9 +128,11 @@ def activity_signal(envelope: dict[str, Any]) -> tuple[bool, list[str]]:
     if event_name == "UserPromptSubmit":
         instruction = (_instruction(payload, event_name) or "").strip()
         normalized = instruction.casefold().rstrip(".!")
-        if len(instruction) >= 12 and normalized not in _LOW_SIGNAL_PROMPTS:
-            return True, ["meaningful_instruction"]
-        return False, ["acknowledgement_or_short_prompt"]
+        if len(instruction) < 12 or normalized in _LOW_SIGNAL_PROMPTS:
+            return False, ["acknowledgement_or_short_prompt"]
+        if _REUSABLE_INSTRUCTION.search(instruction):
+            return True, ["reusable_work_instruction"]
+        return False, ["general_prompt_without_knowledge_signal"]
     if event_name == "PostToolUse":
         exit_code = _exit_code(payload)
         changed_files = _changed_files(payload)
@@ -242,6 +250,18 @@ def collect_file(session: Session, path: Path) -> bool:
     if existing:
         return False
     promote, signal_reasons = activity_signal(envelope)
+    if promote and str(envelope.get("event_name") or "") in {"Stop", "SubagentStop"}:
+        prior = session.scalar(
+            select(ActivityEvent.id).where(
+                ActivityEvent.session_id == str(envelope.get("session_id") or ""),
+                ActivityEvent.turn_id == envelope.get("turn_id"),
+            )
+        )
+        if prior is None:
+            promote = False
+            signal_reasons = ["outcome_without_selected_work_signal"]
+    if not promote:
+        return True
     session.add(
         HookSpoolEvent(
             event_id=event_id,
@@ -257,12 +277,11 @@ def collect_file(session: Session, path: Path) -> bool:
                 "payload_bytes": envelope.get("payload_bytes"),
             },
             spool_path=str(path),
-            status="promoted_activity" if promote else "filtered_low_signal",
+            status="promoted_activity",
             processed_at=datetime.now(timezone.utc),
         )
     )
-    if promote:
-        envelope_to_activity(session, envelope)
+    envelope_to_activity(session, envelope)
     return True
 
 
@@ -311,9 +330,7 @@ def collect_once(settings: Settings) -> dict[str, int]:
                 with SessionLocal() as session:
                     changed = collect_file(session, claimed)
                     session.commit()
-                destination = root / "processed" / claimed.name
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(claimed, destination)
+                claimed.unlink(missing_ok=True)
                 counts["processed" if changed else "duplicates"] += 1
             except Exception:
                 counts["failed"] += 1

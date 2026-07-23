@@ -17,11 +17,14 @@ retain an activity or create a semantic vector.
 The pipeline has four distinct promotion boundaries:
 
 1. **Raw transport envelope**: bounded, redacted, atomic spool used only for outage recovery and
-   collector idempotency.
+   collector idempotency. After a successful database commit the raw file is deleted; failed or
+   unclaimed envelopes remain retryable.
 2. **Activity history**: deterministic signal selection retains meaningful user instructions,
    changed files, command failures, verification/build/test/backup operations, and reported
-   outcomes. Session lifecycle events, acknowledgements, and read-only inspection tools remain
-   `filtered_low_signal` and do not become `activity_event` rows.
+   outcomes. Session lifecycle events, acknowledgements, general conversation, and read-only
+   inspection tools are discarded after successful collection and do not become durable rows.
+   A long prompt is not sufficient by itself: the instruction must carry a reusable work signal,
+   and a Stop event is retained only when the turn already contains selected work.
 3. **Searchable document**: supported source files that are not ignored become versioned lexical
    chunks. Generated tokenizer payloads are ignored. Lockfiles, minified/generated files, and
    documents over the semantic cost budget remain lexical-only.
@@ -52,3 +55,6 @@ not active backlog.
 - The portal must expose selection reasons, active backlog, recent throughput, and estimated drain
   time instead of presenting cumulative completed history as queue pressure.
 - Policy changes require a pipeline revision and retrieval evaluation before broader inclusion.
+- Ignored rows may be quarantined briefly for rollback, then removed with the explicit cleanup
+  command after a verified logical backup. Cleanup deletes only rebuildable document/version/chunk/
+  vector rows, leaves source files untouched, and retains job history with a detached document ID.

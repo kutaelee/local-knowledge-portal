@@ -151,6 +151,12 @@ def test_activity_signal_filters_noise_and_keeps_reusable_evidence():
     )[0] is True
     assert activity_signal(
         envelope(
+            "UserPromptSubmit",
+            prompt="오늘 확인한 문서 내용을 간단하게 다시 설명해 주세요",
+        )
+    ) == (False, ["general_prompt_without_knowledge_signal"])
+    assert activity_signal(
+        envelope(
             "PostToolUse",
             tool_name="shell_command",
             tool_input={"command": "Get-ChildItem"},

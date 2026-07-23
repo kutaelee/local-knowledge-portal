@@ -65,25 +65,40 @@ def candidate(session: Session, **overrides):
 def test_collector_separates_reported_and_verified(database_url: str, tmp_path: Path):
     engine = create_engine(database_url)
     session_id = f"s-collector-{uuid.uuid4()}"
-    raw = (
+    instruction_raw = (
+        '{"session_id":"'
+        + session_id
+        + '","turn_id":"t-collector",'
+        '"hook_event_name":"UserPromptSubmit","cwd":"C:\\\\Dev\\\\Repos\\\\sample",'
+        '"prompt":"테스트 실패 원인을 수정하고 다시 검증해줘"}'
+    ).encode()
+    stop_raw = (
         '{"session_id":"'
         + session_id
         + '","turn_id":"t-collector",'
         '"hook_event_name":"Stop","cwd":"C:\\\\Dev\\\\Repos\\\\sample",'
         '"last_assistant_message":"all tests pass"}'
     ).encode()
-    path = spool(raw, tmp_path / "spool", tmp_path / "fallback")
+    instruction_path = spool(
+        instruction_raw, tmp_path / "spool", tmp_path / "fallback"
+    )
+    stop_path = spool(stop_raw, tmp_path / "spool", tmp_path / "fallback")
     with Session(engine) as session:
-        assert collect_file(session, path)
+        assert collect_file(session, instruction_path)
+        session.commit()
+        assert collect_file(session, stop_path)
         session.commit()
         row = session.scalar(
-            select(ActivityEvent).where(ActivityEvent.session_id == session_id)
+            select(ActivityEvent).where(
+                ActivityEvent.session_id == session_id,
+                ActivityEvent.event_type == "Stop",
+            )
         )
         assert row is not None
         assert row.reported_result == "all tests pass"
         assert row.verified_result is None
         assert row.verification_status == "UNVERIFIED"
-        assert not collect_file(session, path)
+        assert not collect_file(session, stop_path)
 
 
 def test_evidence_gate_dedup_and_relationships(database_url: str):
