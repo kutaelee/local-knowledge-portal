@@ -41,7 +41,8 @@
 `activity_only`로 남기고 검색 가능한 정식 사례로 승격하지 않는다. 같은 원천 사건의
 LLM 재서술은 기존 결정론적 dedup key를 유지하므로 새로운 사례 identity를 만들지
 않는다. 모델명, digest, prompt version, 입력·출력 hash, 판정과 사유를 metadata에
-저장한다.
+저장한다. 편집 호출은 `temperature=0`과 고정 context window를 사용하고 그 값을
+qualification과 후보 metadata에 기록한다.
 
 ## GPU 정책
 

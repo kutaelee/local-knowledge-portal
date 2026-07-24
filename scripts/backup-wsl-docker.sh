@@ -63,7 +63,13 @@ generation_provider=$(sed -n 's/^LKP_GENERATION_PROVIDER=//p' "$env_file" | tr -
 generation_model=$(sed -n 's/^LKP_GENERATION_MODEL=//p' "$env_file" | tr -d '\r')
 generation_model_digest=$(sed -n 's/^LKP_GENERATION_MODEL_DIGEST=//p' "$env_file" | tr -d '\r')
 generation_prompt_version=$(sed -n 's/^LKP_GENERATION_PROMPT_VERSION=//p' "$env_file" | tr -d '\r')
-generation_prompt_version=${generation_prompt_version:-evidence-blog-v1}
+generation_prompt_version=${generation_prompt_version:-evidence-blog-v2}
+generation_temperature=$(sed -n 's/^LKP_GENERATION_TEMPERATURE=//p' "$env_file" | tr -d '\r')
+generation_temperature=${generation_temperature:-0}
+generation_context_window=$(sed -n 's/^LKP_GENERATION_CONTEXT_WINDOW=//p' "$env_file" | tr -d '\r')
+generation_context_window=${generation_context_window:-16384}
+generation_keep_alive=$(sed -n 's/^LKP_GENERATION_KEEP_ALIVE=//p' "$env_file" | tr -d '\r')
+generation_keep_alive=${generation_keep_alive:-2m}
 curator_state=$(docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
   psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc \
   "select coalesce((select value::text from system_setting
@@ -99,6 +105,11 @@ manifest = {
     "generation_model": ${generation_model@Q},
     "generation_model_digest": ${generation_model_digest@Q},
     "generation_prompt_version": ${generation_prompt_version@Q},
+    "generation_parameters": {
+        "temperature": float(${generation_temperature@Q}),
+        "context_window": int(${generation_context_window@Q}),
+        "keep_alive": ${generation_keep_alive@Q},
+    },
     "knowledge_curator_state": json.loads(${curator_state@Q}),
     "compose_path": ${compose_file@Q},
     "data_path": "E:\\\\Data\\\\LocalKnowledgePortal",

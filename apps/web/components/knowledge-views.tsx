@@ -206,6 +206,7 @@ type CurationStatus = {
   enabled: boolean;
   auto_publish: boolean;
   model: string;
+  prompt_version: string;
   scheduler: {
     state?: string;
     next_attempt_at?: string;
@@ -380,7 +381,8 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
     <div className="panel curator-status">
       <Cpu size={18} />
       <div><strong>{text.curator}</strong>
-        <span>{curation.data?.model || "gemma4:e4b"} · {schedulerLabel}</span></div>
+        <span>{curation.data?.model || "gemma4:e4b"} ·
+          {" "}{curation.data?.prompt_version || "evidence-blog-v2"} · {schedulerLabel}</span></div>
       <div><small>{text.gpu}</small><strong>{scheduler?.last_gpu
         ? `${Math.round(scheduler.last_gpu.free_mb / 1024)} GB / ${scheduler.last_gpu.utilization_percent}% / ${scheduler.last_gpu.temperature_c}°C`
         : "—"}</strong></div>

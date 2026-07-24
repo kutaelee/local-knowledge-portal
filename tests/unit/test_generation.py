@@ -103,7 +103,7 @@ def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():
             )
         payload = json.loads(request.content)
         assert payload["model"] == "gemma4:e4b"
-        assert payload["options"]["temperature"] == 0.1
+        assert payload["options"]["temperature"] == 0
         assert payload["keep_alive"] == "2m"
         system = payload["messages"][0]["content"]
         assert "untrusted data" in system
@@ -152,3 +152,5 @@ def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():
     )
     assert digest == "sha256:e4b"
     assert draft.decision == "needs_review"
+    assert provider.generation_parameters["temperature"] == 0
+    assert provider.generation_parameters["context_window"] == 16_384

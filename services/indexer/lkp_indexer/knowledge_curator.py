@@ -186,14 +186,27 @@ def _payload(
     return payload, evidence_map
 
 
-def _payload_hash(payload: dict[str, Any], prompt_version: str) -> str:
+def _payload_hash(
+    payload: dict[str, Any],
+    prompt_version: str,
+    generation_parameters: dict[str, Any],
+) -> str:
     encoded = json.dumps(
-        {"prompt_version": prompt_version, "payload": payload},
+        {
+            "prompt_version": prompt_version,
+            "generation_parameters": generation_parameters,
+            "payload": payload,
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _generation_parameters(provider: GenerationProvider) -> dict[str, Any]:
+    value = getattr(provider, "generation_parameters", {})
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def validate_draft(
@@ -501,9 +514,23 @@ def qualify_provider(
     return {"status": "PASS" if passed else "FAIL", "results": results}
 
 
-def _qualification_key(model: str, digest: str, prompt_version: str) -> str:
+def _qualification_key(
+    model: str,
+    digest: str,
+    prompt_version: str,
+    generation_parameters: dict[str, Any],
+) -> str:
     identity = hashlib.sha256(
-        f"{model}\x1f{digest}\x1f{prompt_version}".encode()
+        json.dumps(
+            {
+                "model": model,
+                "digest": digest,
+                "prompt_version": prompt_version,
+                "generation_parameters": generation_parameters,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()[:24]
     return f"knowledge_curator.qualification.{identity}"
 
@@ -517,7 +544,11 @@ def curate_candidate(
 ) -> tuple[str, str | None]:
     evidence = _evidence_rows(session, candidate)
     payload, evidence_map = _payload(candidate, evidence)
-    input_hash = _payload_hash(payload, settings.generation_prompt_version)
+    input_hash = _payload_hash(
+        payload,
+        settings.generation_prompt_version,
+        _generation_parameters(provider),
+    )
     previous = dict((candidate.metadata_json or {}).get("curation") or {})
     if (
         previous.get("input_hash") == input_hash
@@ -551,6 +582,7 @@ def curate_candidate(
         "model": provider.model,
         "model_digest": model_digest,
         "prompt_version": settings.generation_prompt_version,
+        "generation_parameters": _generation_parameters(provider),
         "input_hash": input_hash,
         "output_hash": output_hash,
         "validation_status": validation,
@@ -718,7 +750,10 @@ def run_once(
         return scheduler.value
 
     qualification_key = _qualification_key(
-        provider.model, model_digest, settings.generation_prompt_version
+        provider.model,
+        model_digest,
+        settings.generation_prompt_version,
+        _generation_parameters(provider),
     )
     qualification = session.get(SystemSetting, qualification_key)
     if qualification is None:
@@ -741,6 +776,7 @@ def run_once(
                 "model": provider.model,
                 "model_digest": model_digest,
                 "prompt_version": settings.generation_prompt_version,
+                "generation_parameters": _generation_parameters(provider),
                 "qualified_at": now.isoformat(),
             },
         )

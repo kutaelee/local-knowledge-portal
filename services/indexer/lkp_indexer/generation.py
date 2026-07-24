@@ -80,6 +80,9 @@ class OllamaGenerationProvider:
         *,
         article_min_chars: int = 1_000,
         article_max_chars: int = 10_000,
+        temperature: float = 0,
+        context_window: int = 16_384,
+        keep_alive: str = "2m",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         if not model:
@@ -89,6 +92,11 @@ class OllamaGenerationProvider:
         self.configured_digest = configured_digest
         self.article_min_chars = article_min_chars
         self.article_max_chars = article_max_chars
+        self.generation_parameters = {
+            "temperature": temperature,
+            "context_window": context_window,
+            "keep_alive": keep_alive,
+        }
         self.client = httpx.Client(timeout=timeout_seconds, transport=transport)
 
     def _model_digest(self) -> str:
@@ -206,11 +214,10 @@ class OllamaGenerationProvider:
                 "think": False,
                 "format": schema,
                 "options": {
-                    "temperature": 0.1,
-                    "top_p": 0.9,
-                    "num_ctx": 16_384,
+                    "temperature": self.generation_parameters["temperature"],
+                    "num_ctx": self.generation_parameters["context_window"],
                 },
-                "keep_alive": "2m",
+                "keep_alive": self.generation_parameters["keep_alive"],
             },
         )
         response.raise_for_status()
@@ -231,5 +238,8 @@ def build_generation_provider(settings: Settings) -> GenerationProvider | None:
             settings.generation_timeout_seconds,
             article_min_chars=settings.knowledge_curation_min_article_chars,
             article_max_chars=settings.knowledge_curation_max_article_chars,
+            temperature=settings.generation_temperature,
+            context_window=settings.generation_context_window,
+            keep_alive=settings.generation_keep_alive,
         )
     raise ValueError(f"unsupported generation provider: {settings.generation_provider}")

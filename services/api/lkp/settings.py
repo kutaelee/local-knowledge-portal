@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     generation_timeout_seconds: int = 120
     generation_max_input_chars: int = 40000
     generation_prompt_version: str = "evidence-blog-v2"
+    generation_temperature: float = Field(default=0, ge=0, le=2)
+    generation_context_window: int = Field(default=16_384, ge=2_048, le=262_144)
+    generation_keep_alive: str = "2m"
     knowledge_curation_enabled: bool = False
     knowledge_curation_auto_publish: bool = True
     knowledge_curation_poll_seconds: int = Field(default=60, ge=10, le=3600)

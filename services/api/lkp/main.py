@@ -571,6 +571,11 @@ def knowledge_curation_status(db: Session = Depends(get_db)) -> dict:
         "model": settings.generation_model,
         "configured_model_digest": settings.generation_model_digest,
         "prompt_version": settings.generation_prompt_version,
+        "generation_parameters": {
+            "temperature": settings.generation_temperature,
+            "context_window": settings.generation_context_window,
+            "keep_alive": settings.generation_keep_alive,
+        },
         "gpu_policy": {
             "minimum_free_mb": settings.knowledge_curation_gpu_min_free_mb,
             "maximum_utilization_percent": (
