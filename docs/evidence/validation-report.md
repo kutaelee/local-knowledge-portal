@@ -1560,3 +1560,22 @@ restore activities: 1,564
 restore result: PASS
 temporary restore container: removed by trap
 ```
+
+### Retrieval baseline 재측정
+
+운영 embedding digest를 명시적으로 주입하고 전용 tmpfs DB와 4문서
+Korean/English/code fixture로 다시 측정했다. 임베딩 Ollama는 CPU 0.5코어 제한으로
+실행됐으며 generation GPU를 사용하지 않았다.
+
+```text
+embedding revision: ollama-qwen3-embedding-0.6b-ac6da0df-d1024-v1
+keyword Hit@5 / Hit@10 / MRR: 0.8889 / 0.8889 / 0.8889
+semantic Hit@5 / Hit@10 / MRR: 1.0000 / 1.0000 / 0.8519
+hybrid Hit@5 / Hit@10 / MRR: 1.0000 / 1.0000 / 0.9259
+filtered search correctness: PASS
+citation correctness: 1.0000
+no-answer correctness: PASS
+stale document exclusion: PASS
+production DB writes: 0
+temporary evaluation container: removed by trap
+```
