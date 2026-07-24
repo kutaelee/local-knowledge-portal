@@ -23,10 +23,12 @@ from sqlalchemy.orm import Session
 from .case_pages import materialize_case
 from .generation import (
     CuratedKnowledgeArticle,
+    EvidenceBoundParagraph,
     GenerationProvider,
     build_generation_provider,
 )
 from .knowledge import (
+    assess_knowledge_value,
     evaluate_gate,
     evaluate_quality,
     invalidate_misclassified_execution_evidence,
@@ -37,7 +39,11 @@ from .service_runtime import assert_mount_guards, service_pid
 logger = structlog.get_logger()
 _SCHEDULER_KEY = "knowledge_curator.scheduler"
 _EVIDENCE_REPAIR_KEY = "knowledge.evidence_repair.non_execution_v1"
-_CITATION = re.compile(r"\[(E\d+)\]")
+_VALUE_BACKFILL_KEY = "knowledge.value_backfill.v2"
+_INLINE_CITATION = re.compile(
+    r"\[[^\]\r\n]{1,50}\]|\((?:\s*E\d+\s*,?)+\s*\)",
+    re.IGNORECASE,
+)
 _NUMBER = re.compile(r"(?<![A-Za-z])\d+(?:[.,]\d+)*(?:%|ms|MB|GB|초|분|시간)?")
 _HYPE = (
     "완벽하게",
@@ -98,26 +104,56 @@ def busy_retry_seconds(check_count: int, settings: Settings) -> int:
     )
 
 
+def _plain_text(value: str) -> str:
+    """Remove model-authored citation-like tokens before deterministic rendering."""
+
+    return re.sub(r"\s{2,}", " ", _INLINE_CITATION.sub("", value)).strip()
+
+
+def _render_references(evidence_ids: list[str]) -> str:
+    unique = list(dict.fromkeys(evidence_ids))
+    return " ".join(f"[{item}]" for item in unique)
+
+
+def _render_paragraph(paragraph: EvidenceBoundParagraph) -> str:
+    text_value = _plain_text(paragraph.text)
+    references = _render_references(paragraph.evidence_ids)
+    return f"{text_value} {references}".strip()
+
+
+def _section_plain(paragraphs: list[EvidenceBoundParagraph]) -> str:
+    return "\n\n".join(_plain_text(item.text) for item in paragraphs).strip()
+
+
+def _section_markdown(paragraphs: list[EvidenceBoundParagraph]) -> str:
+    return "\n\n".join(_render_paragraph(item) for item in paragraphs).strip()
+
+
 def render_article(draft: CuratedKnowledgeArticle, language: str) -> str:
     if language == "ko":
         headings = (
-            ("상황과 맥락", draft.context),
-            ("문제는 어떻게 드러났나", draft.problem),
-            ("원인 또는 구현 판단", draft.cause_or_decision),
-            ("무엇을 어떻게 바꿨나", draft.implementation),
-            ("검증된 결과", draft.verification),
-            ("한계와 다음 확인", draft.limitations),
+            ("상황과 맥락", _section_markdown(draft.context)),
+            ("문제는 어떻게 드러났나", _section_markdown(draft.problem)),
+            ("원인 또는 구현 판단", _section_markdown(draft.cause_or_decision)),
+            ("무엇을 어떻게 바꿨나", _section_markdown(draft.implementation)),
+            ("검증된 결과", _section_markdown(draft.verification)),
+            ("한계와 다음 확인", _section_markdown(draft.limitations)),
         )
     else:
         headings = (
-            ("Context", draft.context),
-            ("How the problem appeared", draft.problem),
-            ("Cause or implementation decision", draft.cause_or_decision),
-            ("What changed", draft.implementation),
-            ("Verified result", draft.verification),
-            ("Limitations and next checks", draft.limitations),
+            ("Context", _section_markdown(draft.context)),
+            ("How the problem appeared", _section_markdown(draft.problem)),
+            (
+                "Cause or implementation decision",
+                _section_markdown(draft.cause_or_decision),
+            ),
+            ("What changed", _section_markdown(draft.implementation)),
+            ("Verified result", _section_markdown(draft.verification)),
+            ("Limitations and next checks", _section_markdown(draft.limitations)),
         )
-    lines = [f"> {draft.standfirst}", ""]
+    standfirst = _plain_text(draft.standfirst)
+    standfirst_refs = _render_references(draft.standfirst_evidence_ids)
+    lines = [f"> {standfirst} {standfirst_refs}".rstrip(), ""]
     for heading, content in headings:
         lines.extend([f"## {heading}", "", content.strip(), ""])
     return "\n".join(lines).strip()
@@ -181,6 +217,9 @@ def _payload(
         },
         "reported_result_not_evidence": candidate.reported_result,
         "verified_evidence": serialized,
+        "deterministic_value_assessment": (candidate.metadata_json or {}).get(
+            "knowledge_value"
+        ),
         "publication_rule": (
             "Choose publish only when verified evidence supports a reusable, non-inflated "
             "article. Reported text may provide context but is not verified evidence."
@@ -212,6 +251,19 @@ def _generation_parameters(provider: GenerationProvider) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _scheduler_revision(settings: Settings) -> str:
+    payload = {
+        "model": settings.generation_model,
+        "model_digest": settings.generation_model_digest,
+        "prompt_version": settings.generation_prompt_version,
+        "temperature": settings.generation_temperature,
+        "context_window": settings.generation_context_window,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def _fallback_models(settings: Settings) -> list[str]:
     return [
         item.strip()
@@ -229,14 +281,10 @@ def validate_draft(
     reasons: list[str] = []
     if draft.decision != "publish":
         reasons.append(f"model_decision_{draft.decision}")
-    if len(draft.title.strip()) < 10:
-        reasons.append("title_too_short")
-    if not (
-        settings.knowledge_curation_min_article_chars
-        <= len(article)
-        <= settings.knowledge_curation_max_article_chars
-    ):
-        reasons.append("article_length_out_of_bounds")
+    if not draft.title.strip():
+        reasons.append("title_missing")
+    if len(article) > settings.knowledge_curation_max_article_chars:
+        reasons.append("article_too_long")
     if draft.unsupported_inferences:
         reasons.append("unsupported_inferences_present")
 
@@ -246,8 +294,6 @@ def validate_draft(
     }
     for name, content in {
         "title": draft.title,
-        "standfirst": draft.standfirst,
-        "limitations": draft.limitations,
     }.items():
         if any(
             token.replace(",", "") not in all_source_numbers
@@ -255,24 +301,39 @@ def validate_draft(
         ):
             reasons.append(f"{name}_unsupported_number")
 
-    sections = {
+    if draft.decision == "publish":
+        if not draft.standfirst_evidence_ids:
+            reasons.append("standfirst_missing_citation")
+        elif any(item not in evidence_map for item in draft.standfirst_evidence_ids):
+            reasons.append("standfirst_invalid_citation")
+        else:
+            cited_text = " ".join(
+                evidence_map[item] for item in draft.standfirst_evidence_ids
+            )
+            source_numbers = {
+                token.replace(",", "") for token in _NUMBER.findall(cited_text)
+            }
+            if any(
+                token.replace(",", "") not in source_numbers
+                for token in _NUMBER.findall(_plain_text(draft.standfirst))
+            ):
+                reasons.append("standfirst_unsupported_number")
+
+    sections: dict[str, list[EvidenceBoundParagraph]] = {
         "context": draft.context,
         "problem": draft.problem,
         "cause_or_decision": draft.cause_or_decision,
         "implementation": draft.implementation,
         "verification": draft.verification,
+        "limitations": draft.limitations,
     }
     cited_ids: set[str] = set()
-    for name, content in sections.items():
-        citations = set(_CITATION.findall(content))
-        cited_ids.update(citations)
-        if len(content.strip()) < 80:
-            reasons.append(f"{name}_too_short")
-        paragraphs = [
-            item.strip() for item in re.split(r"\n\s*\n", content) if item.strip()
-        ]
-        for paragraph in paragraphs or [content]:
-            paragraph_citations = set(_CITATION.findall(paragraph))
+    for name, paragraphs in sections.items():
+        if draft.decision == "publish" and not paragraphs:
+            reasons.append(f"{name}_missing")
+        for paragraph in paragraphs:
+            paragraph_citations = set(paragraph.evidence_ids)
+            cited_ids.update(paragraph_citations)
             if not paragraph_citations:
                 reasons.append(f"{name}_paragraph_missing_citation")
                 continue
@@ -288,28 +349,12 @@ def validate_draft(
             }
             if any(
                 token.replace(",", "") not in source_numbers
-                for token in _NUMBER.findall(paragraph)
+                for token in _NUMBER.findall(_plain_text(paragraph.text))
             ):
                 reasons.append(f"{name}_unsupported_number")
 
     if len(cited_ids) < 2:
         reasons.append("insufficient_evidence_coverage")
-    for claim in draft.evidence_claims:
-        if not claim.evidence_ids or any(
-            item not in evidence_map for item in claim.evidence_ids
-        ):
-            reasons.append("claim_invalid_citation")
-            break
-        cited_text = " ".join(evidence_map[item] for item in claim.evidence_ids)
-        source_numbers = {
-            token.replace(",", "") for token in _NUMBER.findall(cited_text)
-        }
-        if any(
-            token.replace(",", "") not in source_numbers
-            for token in _NUMBER.findall(claim.text)
-        ):
-            reasons.append("claim_unsupported_number")
-            break
     lowered = article.casefold()
     if any(term.casefold() in lowered for term in _HYPE):
         reasons.append("inflated_language")
@@ -333,6 +378,38 @@ def _ensure_evidence_repair(session: Session, now: datetime) -> dict[str, Any]:
     report = invalidate_misclassified_execution_evidence(session)
     value = {**report, "completed_at": now.isoformat()}
     session.add(SystemSetting(key=_EVIDENCE_REPAIR_KEY, value=value))
+    session.flush()
+    return value
+
+
+def _ensure_value_backfill(session: Session, now: datetime) -> dict[str, Any]:
+    existing = session.get(SystemSetting, _VALUE_BACKFILL_KEY)
+    if existing is not None:
+        return dict(existing.value or {})
+    counts = {"assessed": 0, "promote": 0, "needs_review": 0, "activity_only": 0}
+    for candidate in session.scalars(select(KnowledgeCandidate)):
+        evidence = _evidence_rows(session, candidate)
+        metadata = dict(candidate.metadata_json or {})
+        assessment = assess_knowledge_value(
+            category=candidate.category,
+            problem=candidate.problem,
+            root_cause=candidate.root_cause,
+            solution=candidate.solution,
+            evidence=evidence,
+            metadata=metadata,
+        )
+        metadata["knowledge_value"] = assessment
+        candidate.metadata_json = metadata
+        counts["assessed"] += 1
+        counts[assessment["tier"]] += 1
+        if candidate.status == "published":
+            continue
+        if assessment["tier"] == "activity_only":
+            candidate.status = "activity_only"
+        elif assessment["tier"] == "needs_review":
+            candidate.status = "needs_review"
+    value = {**counts, "completed_at": now.isoformat()}
+    session.add(SystemSetting(key=_VALUE_BACKFILL_KEY, value=value))
     session.flush()
     return value
 
@@ -428,21 +505,67 @@ def _qualification_payloads() -> list[tuple[str, dict[str, Any], str]]:
                 "verified_evidence": [
                     {
                         "id": "E1",
-                        "type": "code_change",
-                        "claim": "mount guard implementation changed",
-                        "verified_value": "two sentinel files are checked",
-                        "locator": "service_runtime.py",
+                        "type": "incident_observation",
+                        "claim": "the readiness probe accepted an incomplete mount",
+                        "verified_value": (
+                            "reproduction returned HTTP 200 while a required "
+                            "sentinel file was absent"
+                        ),
+                        "locator": "mount-guard reproduction",
                         "exit_code": None,
                     },
                     {
                         "id": "E2",
+                        "type": "code_change",
+                        "claim": "startup mount validation changed",
+                        "verified_value": (
+                            "settings.yaml and source-roots.yaml must both exist "
+                            "before the service starts"
+                        ),
+                        "locator": "service_runtime.py",
+                        "exit_code": None,
+                    },
+                    {
+                        "id": "E3",
                         "type": "test_pass",
                         "claim": "mount guard unit tests passed",
                         "verified_value": "42 tests passed",
                         "locator": "pytest",
                         "exit_code": 0,
                     },
+                    {
+                        "id": "E4",
+                        "type": "integration_test",
+                        "claim": (
+                            "both the rejected incomplete mount and accepted "
+                            "complete mount paths were exercised"
+                        ),
+                        "verified_value": "2 integration scenarios passed",
+                        "locator": "mount guard integration fixture",
+                        "exit_code": 0,
+                    },
+                    {
+                        "id": "E5",
+                        "type": "scope_limit",
+                        "claim": "long-duration suspend and resume was not tested",
+                        "verified_value": (
+                            "suspend and resume endurance is excluded from the "
+                            "current validation scope"
+                        ),
+                        "locator": "validation-report.md",
+                        "exit_code": None,
+                    },
                 ],
+                "deterministic_value_assessment": {
+                    "revision": "knowledge-value-v1",
+                    "tier": "promote",
+                    "publication_eligible": True,
+                    "signals": [
+                        "verified_change_and_validation",
+                        "reusable_explanation_present",
+                    ],
+                    "blockers": [],
+                },
             },
             "publish",
         ),
@@ -459,8 +582,15 @@ def _qualification_payloads() -> list[tuple[str, dict[str, Any], str]]:
                 },
                 "reported_result_not_evidence": "검색이 10배 빨라졌다.",
                 "verified_evidence": [],
+                "deterministic_value_assessment": {
+                    "revision": "knowledge-value-v1",
+                    "tier": "activity_only",
+                    "publication_eligible": False,
+                    "signals": [],
+                    "blockers": ["no_verified_evidence"],
+                },
             },
-            "needs_review",
+            "held",
         ),
         (
             "unmeasured_performance",
@@ -484,8 +614,15 @@ def _qualification_payloads() -> list[tuple[str, dict[str, Any], str]]:
                         "exit_code": None,
                     }
                 ],
+                "deterministic_value_assessment": {
+                    "revision": "knowledge-value-v1",
+                    "tier": "needs_review",
+                    "publication_eligible": False,
+                    "signals": [],
+                    "blockers": ["before_after_and_load_cause_required"],
+                },
             },
-            "needs_review",
+            "held",
         ),
     ]
 
@@ -534,7 +671,7 @@ def qualify_provider(
         validation, reasons, article = validate_draft(
             draft, evidence_map, settings
         )
-        actual = "publish" if validation == "PASS" else "needs_review"
+        actual = "publish" if validation == "PASS" else "held"
         results.append(
             {
                 "name": name,
@@ -581,6 +718,56 @@ def curate_candidate(
     model_digest: str,
 ) -> tuple[str, str | None]:
     evidence = _evidence_rows(session, candidate)
+    metadata = dict(candidate.metadata_json or {})
+    value_assessment = assess_knowledge_value(
+        category=candidate.category,
+        problem=candidate.problem,
+        root_cause=candidate.root_cause,
+        solution=candidate.solution,
+        evidence=evidence,
+        metadata=metadata,
+    )
+    metadata["knowledge_value"] = value_assessment
+    candidate.metadata_json = metadata
+    if value_assessment["tier"] != "promote":
+        value_hash = hashlib.sha256(
+            json.dumps(
+                value_assessment,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        previous_curation = dict(metadata.get("curation") or {})
+        if (
+            previous_curation.get("validation_status")
+            == "VALUE_HARNESS_REJECTED"
+            and previous_curation.get("value_hash") == value_hash
+            and previous_curation.get("prompt_version")
+            == settings.generation_prompt_version
+        ):
+            return "UNCHANGED", None
+        candidate.status = (
+            "activity_only"
+            if value_assessment["tier"] == "activity_only"
+            else "needs_review"
+        )
+        metadata["curation"] = {
+            "state": candidate.status,
+            "validation_status": "VALUE_HARNESS_REJECTED",
+            "validation_reasons": value_assessment["blockers"],
+            "prompt_version": settings.generation_prompt_version,
+            "value_hash": value_hash,
+        }
+        candidate.metadata_json = metadata
+        candidate.updated_at = datetime.now(timezone.utc)
+        return (
+            "ACTIVITY_ONLY"
+            if candidate.status == "activity_only"
+            else "VALUE_HARNESS_NEEDS_REVIEW",
+            None,
+        )
+
     payload, evidence_map = _payload(candidate, evidence)
     input_hash = _payload_hash(
         payload,
@@ -651,11 +838,11 @@ def curate_candidate(
 
     candidate.category = draft.category
     candidate.title = draft.title.strip()
-    candidate.problem = draft.problem.strip()
-    candidate.symptom = draft.context.strip()
-    candidate.root_cause = draft.cause_or_decision.strip()
-    candidate.solution = draft.implementation.strip()
-    candidate.verified_result = draft.verification.strip()
+    candidate.problem = _section_plain(draft.problem)
+    candidate.symptom = _section_plain(draft.context)
+    candidate.root_cause = _section_plain(draft.cause_or_decision)
+    candidate.solution = _section_plain(draft.implementation)
+    candidate.verified_result = _section_plain(draft.verification)
     # Keep the deterministic pre-curation identity. Rephrasing by a local model
     # must not manufacture a new canonical case for the same source event.
     metadata.update(
@@ -664,10 +851,19 @@ def curate_candidate(
             "content_language": settings.knowledge_content_language,
             "approval_policy": "local_llm_evidence_bound",
             "article_markdown": article,
-            "standfirst": draft.standfirst,
-            "limitations": draft.limitations,
+            "standfirst": _plain_text(draft.standfirst),
+            "limitations": _section_plain(draft.limitations),
             "evidence_bound_claims": [
-                item.model_dump() for item in draft.evidence_claims
+                {"section": section, **item.model_dump()}
+                for section, paragraphs in {
+                    "context": draft.context,
+                    "problem": draft.problem,
+                    "cause_or_decision": draft.cause_or_decision,
+                    "implementation": draft.implementation,
+                    "verification": draft.verification,
+                    "limitations": draft.limitations,
+                }.items()
+                for item in paragraphs
             ],
             "curation_validation_status": "PASS",
         }
@@ -699,8 +895,8 @@ def curate_candidate(
     case.metadata_json = {
         **(case.metadata_json or {}),
         "article_markdown": article,
-        "standfirst": draft.standfirst,
-        "limitations": draft.limitations,
+        "standfirst": _plain_text(draft.standfirst),
+        "limitations": _section_plain(draft.limitations),
         "curation": dict(curation),
     }
     materialize_case(
@@ -730,13 +926,26 @@ def run_once(
         return {"state": "standby_lock_held"}
     scheduler = _setting(session)
     evidence_repair = _ensure_evidence_repair(session, now)
+    value_backfill = _ensure_value_backfill(session, now)
     state = dict(scheduler.value or {})
+    scheduler_revision = _scheduler_revision(settings)
+    if state.get("generation_revision") != scheduler_revision:
+        state = {
+            "generation_revision": scheduler_revision,
+            "state": "configuration_changed",
+            "busy_check_count": 0,
+            "failure_count": 0,
+        }
+        scheduler.value = state
+        scheduler.updated_at = now
+        session.flush()
     due = _parse_time(state.get("next_attempt_at"))
     if due and due > now:
         return {
             "state": state.get("state", "scheduled"),
             "next_attempt_at": due.isoformat(),
             "evidence_repair": evidence_repair,
+            "value_backfill": value_backfill,
         }
 
     try:
@@ -832,6 +1041,10 @@ def run_once(
             "fallback_recommended": _fallback_models(settings),
             "last_checked_at": now.isoformat(),
             "last_gpu": asdict(snapshot),
+            "last_error": None,
+            "failure_count": 0,
+            "retry_seconds": None,
+            "next_attempt_at": None,
         }
         scheduler.updated_at = now
         return scheduler.value
@@ -877,6 +1090,8 @@ def run_once(
         "state": "idle" if not outcomes else "completed_batch",
         "busy_check_count": 0,
         "failure_count": 0,
+        "last_error": None,
+        "retry_seconds": None,
         "last_checked_at": now.isoformat(),
         "last_completed_at": now.isoformat(),
         "next_attempt_at": (

@@ -116,6 +116,17 @@ def render_case_markdown(
     verified_heading = "검증된 결과" if korean else "Verified result"
     evidence_heading = "검증 근거" if korean else "Evidence"
     provenance_heading = "출처" if korean else "Provenance"
+    knowledge_value = revision_content.get("knowledge_value") or {}
+    value_tier = (
+        str(knowledge_value.get("tier"))
+        if isinstance(knowledge_value, dict) and knowledge_value.get("tier")
+        else "promote"
+    )
+    embedding_labels = (
+        knowledge_value.get("embedding_labels", [])
+        if isinstance(knowledge_value, dict)
+        else []
+    )
     lines = [
         "---",
         "managed: true",
@@ -128,6 +139,8 @@ def render_case_markdown(
         f"category: {json.dumps(case.category)}",
         f"case_id: {json.dumps(str(case.id))}",
         f"case_revision: {revision_number}",
+        f"knowledge_value_tier: {json.dumps(value_tier)}",
+        f"knowledge_value_labels: {json.dumps(embedding_labels, ensure_ascii=False)}",
         "---",
         "",
         f"# {case.title}",

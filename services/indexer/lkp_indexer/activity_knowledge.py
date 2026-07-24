@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from .case_pages import materialize_case
 from .knowledge import (
+    assess_knowledge_value,
     create_candidate,
     evaluate_gate,
     evaluate_quality,
@@ -425,6 +426,38 @@ def finalize_stop(
         and not _PROGRESS_LEAD.search(summary.report)
         and structured_knowledge
     )
+    candidate_evidence = _candidate_evidence(summary, content_language)
+    candidate_metadata = {
+        "auto_generated": True,
+        "auto_publish_eligible": auto_publish,
+        "structured_knowledge": structured_knowledge,
+        "content_language": content_language,
+        "approval_policy": "human_review",
+        "extractor": "deterministic-activity-v1",
+        "project": summary.project,
+        "source_session_id": stop.session_id,
+        "source_turn_id": stop.turn_id,
+        "source_stop_activity_id": str(stop.id),
+        "reported_result_is_evidence": False,
+    }
+    value_assessment = assess_knowledge_value(
+        category=category,
+        problem=fields["problem"],
+        root_cause=fields["root_cause"],
+        solution=fields["solution"],
+        evidence=candidate_evidence,
+        metadata=candidate_metadata,
+    )
+    candidate_metadata["knowledge_value"] = value_assessment
+    if value_assessment["tier"] == "activity_only":
+        metadata["knowledge_pipeline"] = {
+            "state": "activity_only",
+            "reason": "knowledge_value_harness_rejected",
+            "knowledge_value": value_assessment,
+        }
+        stop.metadata_json = metadata
+        return None, "ACTIVITY_ONLY"
+
     candidate = create_candidate(
         session,
         category=category,
@@ -435,20 +468,8 @@ def finalize_stop(
         solution=fields["solution"],
         reported_result=summary.report[:16000],
         verified_result=fields["verified_result"],
-        evidence=_candidate_evidence(summary, content_language),
-        metadata={
-            "auto_generated": True,
-            "auto_publish_eligible": auto_publish,
-            "structured_knowledge": structured_knowledge,
-            "content_language": content_language,
-            "approval_policy": "human_review",
-            "extractor": "deterministic-activity-v1",
-            "project": summary.project,
-            "source_session_id": stop.session_id,
-            "source_turn_id": stop.turn_id,
-            "source_stop_activity_id": str(stop.id),
-            "reported_result_is_evidence": False,
-        },
+        evidence=candidate_evidence,
+        metadata=candidate_metadata,
     )
     gate = evaluate_gate(session, candidate)
     outcome = gate
@@ -480,6 +501,7 @@ def finalize_stop(
         "quality_gate_status": quality_status,
         "quality_gate_reasons": quality_reasons,
         "approval_policy": "human_review",
+        "knowledge_value": value_assessment,
     }
     stop.metadata_json = metadata
     return candidate, outcome

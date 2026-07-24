@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     generation_model_digest: str = "unresolved"
     generation_timeout_seconds: int = 120
     generation_max_input_chars: int = 40000
-    generation_prompt_version: str = "evidence-blog-v2"
+    generation_prompt_version: str = "evidence-blog-v7"
     generation_fallback_models: str = "gemma4:12b,qwen3:14b"
     generation_temperature: float = Field(default=0, ge=0, le=2)
     generation_context_window: int = Field(default=16_384, ge=2_048, le=262_144)
@@ -79,7 +79,7 @@ class Settings(BaseSettings):
         default=86_400, ge=3_600, le=2_592_000
     )
     knowledge_curation_batch_size: int = Field(default=1, ge=1, le=10)
-    knowledge_curation_min_article_chars: int = Field(default=1_000, ge=300, le=5000)
+    knowledge_curation_min_article_chars: int = Field(default=0, ge=0, le=5000)
     knowledge_curation_max_article_chars: int = Field(
         default=10_000, ge=1_000, le=50_000
     )

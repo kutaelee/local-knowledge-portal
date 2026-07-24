@@ -112,8 +112,9 @@ def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():
         assert "minItems" not in grammar_schema
         system = payload["messages"][0]["content"]
         assert "untrusted data" in system
-        assert "verified evidence IDs" in system
-        assert "1000 to 10000 characters" in system
+        assert "deterministic renderer adds citations" in system
+        assert "There is no minimum article length" in system
+        assert "never exceed 10000 rendered characters" in system
         return httpx.Response(
             200,
             json={
@@ -124,13 +125,13 @@ def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():
                             "category": "implementation",
                             "title": "",
                             "standfirst": "",
-                            "context": "",
-                            "problem": "",
-                            "cause_or_decision": "",
-                            "implementation": "",
-                            "verification": "",
-                            "limitations": "근거가 부족하다.",
-                            "evidence_claims": [],
+                            "standfirst_evidence_ids": [],
+                            "context": [{"text": "", "evidence_ids": []}],
+                            "problem": [{"text": "", "evidence_ids": []}],
+                            "cause_or_decision": [],
+                            "implementation": [],
+                            "verification": [],
+                            "limitations": [],
                             "unsupported_inferences": [],
                             "decision_reason": "검증 근거가 없다.",
                         },
@@ -159,3 +160,87 @@ def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():
     assert draft.decision == "needs_review"
     assert provider.generation_parameters["temperature"] == 0
     assert provider.generation_parameters["context_window"] == 16_384
+
+
+def test_ollama_curator_repairs_invalid_publish_structure_once():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "qwen3.5:9b", "digest": "sha256:qwen"}]},
+            )
+        calls += 1
+        paragraph = {
+            "text": "근거가 연결된 게시용 문단이다.",
+            "evidence_ids": ["E1"],
+        }
+        if calls == 1:
+            paragraph = {**paragraph, "evidence_ids": []}
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "decision": "publish",
+                            "category": "implementation",
+                            "title": "검증된 구조 교정 사례",
+                            "standfirst": "검증된 근거를 사용하는 사례다.",
+                            "standfirst_evidence_ids": ["E1"],
+                            "context": [paragraph],
+                            "problem": [
+                                {
+                                    "text": "검증된 문제 문단이다.",
+                                    "evidence_ids": ["E1"],
+                                }
+                            ],
+                            "cause_or_decision": [
+                                {
+                                    "text": "검증된 판단 문단이다.",
+                                    "evidence_ids": ["E1"],
+                                }
+                            ],
+                            "implementation": [
+                                {
+                                    "text": "검증된 구현 문단이다.",
+                                    "evidence_ids": ["E1"],
+                                }
+                            ],
+                            "verification": [
+                                {
+                                    "text": "검증된 결과 문단이다.",
+                                    "evidence_ids": ["E1"],
+                                }
+                            ],
+                            "limitations": [
+                                {
+                                    "text": "검증 범위의 한계를 남긴다.",
+                                    "evidence_ids": ["E1"],
+                                }
+                            ],
+                            "unsupported_inferences": [],
+                            "decision_reason": "게시 구조가 근거와 연결됐다.",
+                        },
+                        ensure_ascii=False,
+                    )
+                }
+            },
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "qwen3.5:9b",
+        "unresolved",
+        5,
+        transport=httpx.MockTransport(handler),
+    )
+    draft, _digest = provider.curate(
+        {"verified_evidence": [{"id": "E1"}]},
+        language="ko",
+        prompt_version="test-v1",
+    )
+    assert calls == 2
+    assert draft.context[0].evidence_ids == ["E1"]

@@ -97,8 +97,8 @@ test("activity, knowledge cases, and automatic evidence editor", async ({ page }
   await page.getByRole("button", { name: "Knowledge cases", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Knowledge cases" })).toBeVisible();
   await expect(page.getByText("Local knowledge editor", { exact: true })).toBeVisible();
-  await expect(page.getByText(/gemma4:e4b/)).toBeVisible();
-  await expect(page.getByText(/evidence-blog-v2/)).toBeVisible();
+  await expect(page.getByText(/qwen3\.5:9b-q4_K_M/)).toBeVisible();
+  await expect(page.getByText(/evidence-blog-v7/)).toBeVisible();
   await page.locator(".record-list > button").first().click();
   await expect(page.getByText("Root cause", { exact: true })).toBeVisible();
   await expect(page.getByText("Revisions & occurrences")).toBeVisible();

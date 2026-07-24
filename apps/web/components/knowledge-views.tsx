@@ -34,6 +34,7 @@ const textByLocale = {
       problem: "문제", symptom: "증상", cause: "근본 원인", solution: "해결 방법",
       reportedVerified: "보고 결과 / 검증 결과",
       evidenceGate: "실행 근거", qualityGate: "지식 품질",
+      valueGate: "재사용 가치", valueSignals: "가치 판단 근거",
       approvalPolicy: "게시 방식", humanReview: "로컬 LLM 근거 검증 후 자동 게시",
       qualityReasons: "보완이 필요한 이유",
       publish: "자동 편집기가 근거를 확인하고 있습니다.", revisions: "리비전과 발생 이력",
@@ -63,6 +64,17 @@ const textByLocale = {
         human_restructuring_required: "로컬 편집 모델이 재사용 가능한 구조로 정리해야 합니다.",
         local_llm_evidence_validation_required: "로컬 편집 모델의 근거 인용 검증이 필요합니다.",
         not_reusable_knowledge: "반복 활용할 지식이 아닌 일반 활동으로 분류됐습니다.",
+        generic_artifact_inventory: "변경 파일 목록만 있고 재사용 가능한 판단이 없습니다.",
+        presentation_only_change_without_reusable_decision: "일반 화면 변경으로, 별도 지식 사례 가치가 확인되지 않았습니다.",
+        verified_failure_fix_explanation_required: "실패·수정·성공과 재사용 가능한 원인 설명이 함께 필요합니다.",
+        reusable_implementation_decision_required: "검증된 변경과 재사용 가능한 구현 판단이 함께 필요합니다.",
+        before_after_and_load_cause_required: "성능 사례에는 before/after 측정과 부하 원인이 필요합니다.",
+        incident_and_recovery_evidence_required: "운영 사례에는 장애 관측과 복구 성공 근거가 필요합니다.",
+        knowledge_value_harness_not_promotable: "결정론적 가치 하니스에서 사례 승격 대상으로 판정되지 않았습니다.",
+        previously_quarantined_activity: "이전 근거 감사에서 일반 활동으로 격리되어 자동 상향하지 않습니다.",
+      },
+      valueTierLabels: {
+        promote: "사례 승격 대상", needs_review: "가치 근거 보완", activity_only: "활동 이력만",
       },
     },
     document: {
@@ -95,6 +107,7 @@ const textByLocale = {
       problem: "Problem", symptom: "Symptom", cause: "Root cause", solution: "Solution",
       reportedVerified: "Reported / verified",
       evidenceGate: "Execution evidence", qualityGate: "Knowledge quality",
+      valueGate: "Reuse value", valueSignals: "Value decision",
       approvalPolicy: "Publication policy", humanReview: "Auto-publish after local LLM evidence validation",
       qualityReasons: "Reasons for review",
       publish: "The local editor is checking the evidence.", revisions: "Revisions & occurrences",
@@ -124,6 +137,17 @@ const textByLocale = {
         human_restructuring_required: "The local editor must restructure this candidate.",
         local_llm_evidence_validation_required: "Local model evidence validation is required.",
         not_reusable_knowledge: "Classified as ordinary activity rather than reusable knowledge.",
+        generic_artifact_inventory: "Only an artifact inventory is present.",
+        presentation_only_change_without_reusable_decision: "Presentation-only change without a reusable decision.",
+        verified_failure_fix_explanation_required: "Failure, fix, success, and a reusable explanation are required.",
+        reusable_implementation_decision_required: "A verified change and reusable implementation decision are required.",
+        before_after_and_load_cause_required: "Performance cases require before/after metrics and a load cause.",
+        incident_and_recovery_evidence_required: "Operations cases require incident and recovery evidence.",
+        knowledge_value_harness_not_promotable: "The deterministic value harness did not mark this candidate promotable.",
+        previously_quarantined_activity: "A prior evidence audit quarantined this activity; it cannot be auto-promoted.",
+      },
+      valueTierLabels: {
+        promote: "promotion eligible", needs_review: "value evidence needed", activity_only: "activity only",
       },
     },
     document: {
@@ -171,6 +195,12 @@ type Candidate = {
     quality_gate_status?: string;
     quality_gate_reasons?: string[];
     approval_policy?: string;
+    knowledge_value?: {
+      revision?: string;
+      tier?: "promote" | "needs_review" | "activity_only";
+      signals?: string[];
+      blockers?: string[];
+    };
     curation?: {
       state?: string;
       model?: string;
@@ -382,7 +412,7 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
       <Cpu size={18} />
       <div><strong>{text.curator}</strong>
         <span>{curation.data?.model || "gemma4:e4b"} ·
-          {" "}{curation.data?.prompt_version || "evidence-blog-v2"} · {schedulerLabel}</span></div>
+          {" "}{curation.data?.prompt_version || "evidence-blog-v7"} · {schedulerLabel}</span></div>
       <div><small>{text.gpu}</small><strong>{scheduler?.last_gpu
         ? `${Math.round(scheduler.last_gpu.free_mb / 1024)} GB / ${scheduler.last_gpu.utilization_percent}% / ${scheduler.last_gpu.temperature_c}°C`
         : "—"}</strong></div>
@@ -435,6 +465,17 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
                 <Badge value={selectedDetail.metadata.quality_gate_status ?? "NEEDS_REVIEW"}
                   locale={locale} />
               </dd></div>
+              {selectedDetail.metadata.knowledge_value?.tier &&
+                <div><dt>{text.valueGate}</dt><dd>
+                  {text.valueTierLabels[selectedDetail.metadata.knowledge_value.tier]}
+                </dd></div>}
+              {!!selectedDetail.metadata.knowledge_value?.blockers?.length &&
+                <div><dt>{text.valueSignals}</dt><dd>
+                  {selectedDetail.metadata.knowledge_value.blockers.map((reason) =>
+                    text.qualityReasonLabels[
+                      reason as keyof typeof text.qualityReasonLabels
+                    ] ?? reason
+                  ).join(" ")}</dd></div>}
               <div><dt>{text.approvalPolicy}</dt><dd>{text.humanReview}</dd></div>
               {!!selectedDetail.metadata.quality_gate_reasons?.length &&
                 <div><dt>{text.qualityReasons}</dt>

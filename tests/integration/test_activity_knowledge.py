@@ -22,7 +22,7 @@ from lkp.settings import Settings
 from lkp_indexer.activity_knowledge import finalize_pending_stops, finalize_stop
 from lkp_indexer.activity_retention import roll_up_activity_details
 from lkp_indexer.case_pages import materialize_case
-from lkp_indexer.generation import CuratedKnowledgeArticle, EvidenceBoundClaim
+from lkp_indexer.generation import CuratedKnowledgeArticle, EvidenceBoundParagraph
 from lkp_indexer.hook_collector import collect_file, envelope_to_activity
 from lkp_indexer.hook_spool import spool
 from lkp_indexer.knowledge import (
@@ -72,26 +72,31 @@ class FakeEvidenceEditor:
 
     def curate(self, _payload, *, language, prompt_version):
         assert language == "ko"
-        assert prompt_version == "evidence-blog-v2"
-        section = (
-            "검증된 코드 변경과 독립 실행 테스트를 함께 확인했다. 작업 보고의 표현은 "
-            "근거로 사용하지 않았으며 관측 가능한 구현과 결과만 정리했다. [E1] [E2]"
-        )
+        assert prompt_version == "evidence-blog-v7"
+        section = [
+            EvidenceBoundParagraph(
+                text=(
+                    "검증된 코드 변경과 독립 실행 테스트를 함께 확인했다. 작업 보고의 "
+                    "표현은 근거로 사용하지 않았으며 관측 가능한 구현과 결과만 정리했다."
+                ),
+                evidence_ids=["E1", "E2"],
+            )
+        ]
         return (
             CuratedKnowledgeArticle(
                 decision="publish",
                 category="implementation",
                 title="근거를 인용하는 자동 지식 편집 절차",
                 standfirst="실행 근거가 있는 구현만 장문 사례로 승격하는 방식이다.",
+                standfirst_evidence_ids=["E1", "E2"],
                 context=section,
                 problem=section,
                 cause_or_decision=section,
                 implementation=section,
                 verification=section,
-                limitations="장시간 운영 부하는 이 사례의 검증 범위에 포함되지 않았다.",
-                evidence_claims=[
-                    EvidenceBoundClaim(
-                        text="코드 변경과 테스트가 확인됐다.",
+                limitations=[
+                    EvidenceBoundParagraph(
+                        text="장시간 운영 부하는 이 사례의 검증 범위에 포함되지 않았다.",
                         evidence_ids=["E1", "E2"],
                     )
                 ],
@@ -143,7 +148,7 @@ def test_local_editor_publishes_only_after_deterministic_validation(
             reported_result="완벽하게 구현됐다.",
             verified_result="테스트 성공",
             evidence=evidence(("code_change", None), ("test_pass", 0)),
-            metadata={"auto_generated": True},
+            metadata={"auto_generated": True, "structured_knowledge": True},
         )
         outcome, case_id = curate_candidate(
             session,

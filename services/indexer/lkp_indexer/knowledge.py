@@ -4,6 +4,7 @@ import hashlib
 import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any
 
 from lkp.models import (
@@ -32,6 +33,8 @@ _EXECUTION_EVIDENCE_TYPES = {
     "command_success",
     "test_pass",
 }
+_PRESENTATION_ONLY_SUFFIXES = {".css", ".less", ".sass", ".scss"}
+_VALUE_HARNESS_REVISION = "knowledge-value-v1"
 
 
 def _normalize(value: str) -> str:
@@ -53,6 +56,152 @@ def dedup_key(category: str, problem: str, root_cause: str, solution: str) -> st
 
 def similarity_key(symptom: str) -> str:
     return _hash(symptom)
+
+
+def _evidence_value(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def assess_knowledge_value(
+    *,
+    category: str,
+    problem: str,
+    root_cause: str,
+    solution: str,
+    evidence: list[Any],
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Classify reuse value from provenance, not article length or model prose."""
+
+    metadata = dict(metadata or {})
+    verified = [item for item in evidence if _evidence_value(item, "verified", False)]
+    evidence_types = {
+        str(_evidence_value(item, "evidence_type", "")) for item in verified
+    }
+    failed = any(
+        _evidence_value(item, "exit_code") not in {None, 0}
+        or _evidence_value(item, "evidence_type") in {
+            "command_failure",
+            "incident_failure",
+        }
+        for item in verified
+    )
+    succeeded = any(
+        _evidence_value(item, "exit_code") == 0
+        or _evidence_value(item, "evidence_type")
+        in {
+            "build_pass",
+            "command_success",
+            "recovery_success",
+            "test_pass",
+        }
+        for item in verified
+    )
+    changed = bool(evidence_types & {"code_change", "document_version"})
+    validation = bool(
+        evidence_types & {"build_pass", "command_success", "test_pass"}
+    )
+    performance = {
+        "performance_before",
+        "performance_after",
+        "load_cause",
+    }.issubset(evidence_types)
+    recovery = {"incident_failure", "recovery_success"}.issubset(evidence_types)
+    lifecycle = failed and changed and succeeded
+    generic_structure = (
+        root_cause.startswith("Observed implementation in ")
+        or solution.startswith("Changed artifacts:")
+        or "재사용 가능한 원인이나 구현 결정은 아직 구조화되지 않았습니다"
+        in root_cause
+    )
+    structured = bool(metadata.get("structured_knowledge"))
+    if not metadata.get("auto_generated"):
+        structured = structured or (
+            min(len(problem.strip()), len(root_cause.strip()), len(solution.strip()))
+            >= 12
+            and not generic_structure
+        )
+
+    changed_paths: list[str] = []
+    for item in verified:
+        if _evidence_value(item, "evidence_type") != "code_change":
+            continue
+        locator = str(_evidence_value(item, "locator", "") or "")
+        changed_paths.extend(part.strip() for part in locator.split(",") if part.strip())
+    path_suffixes = {
+        PurePosixPath(path.replace("\\", "/")).suffix.casefold()
+        for path in changed_paths
+        if PurePosixPath(path.replace("\\", "/")).suffix
+    }
+    presentation_only = bool(path_suffixes) and path_suffixes.issubset(
+        _PRESENTATION_ONLY_SUFFIXES
+    )
+
+    signals: list[str] = []
+    blockers: list[str] = []
+    if lifecycle:
+        signals.append("verified_failure_change_success")
+    if changed and validation:
+        signals.append("verified_change_and_validation")
+    if performance:
+        signals.append("measured_before_after_with_cause")
+    if recovery:
+        signals.append("verified_incident_recovery")
+    if structured:
+        signals.append("reusable_explanation_present")
+    if len(evidence_types) >= 2:
+        signals.append("multiple_verified_evidence_types")
+    if not verified:
+        blockers.append("no_verified_evidence")
+    if generic_structure:
+        blockers.append("generic_artifact_inventory")
+    if presentation_only and not failed and not structured:
+        blockers.append("presentation_only_change_without_reusable_decision")
+
+    previously_quarantined = (
+        metadata.get("quality_gate_status") == "ACTIVITY_ONLY"
+        or (metadata.get("curation") or {}).get("state") == "activity_only"
+    )
+    if previously_quarantined:
+        blockers.append("previously_quarantined_activity")
+        tier = "activity_only"
+    elif "no_verified_evidence" in blockers or (
+        "presentation_only_change_without_reusable_decision" in blockers
+    ):
+        tier = "activity_only"
+    elif category == "error_resolution":
+        tier = "promote" if lifecycle and structured else "needs_review"
+        if tier != "promote":
+            blockers.append("verified_failure_fix_explanation_required")
+    elif category in {"implementation", "custom_success"}:
+        tier = "promote" if changed and validation and structured else "needs_review"
+        if tier != "promote":
+            blockers.append("reusable_implementation_decision_required")
+    elif category == "performance":
+        tier = "promote" if performance else "needs_review"
+        if tier != "promote":
+            blockers.append("before_after_and_load_cause_required")
+    elif category == "operations":
+        tier = "promote" if recovery else "needs_review"
+        if tier != "promote":
+            blockers.append("incident_and_recovery_evidence_required")
+    else:
+        tier = "needs_review"
+        blockers.append("unsupported_knowledge_category")
+
+    return {
+        "revision": _VALUE_HARNESS_REVISION,
+        "tier": tier,
+        "publication_eligible": tier == "promote",
+        "signals": sorted(set(signals)),
+        "blockers": sorted(set(blockers)),
+        "embedding_labels": [
+            f"knowledge-value:{tier}",
+            *[f"knowledge-signal:{item}" for item in sorted(set(signals))],
+        ],
+    }
 
 
 def _jaccard(left: str, right: str) -> float:
@@ -77,6 +226,15 @@ def create_candidate(
     evidence: list[dict[str, Any]],
     metadata: dict[str, Any] | None = None,
 ) -> KnowledgeCandidate:
+    candidate_metadata = dict(metadata or {})
+    candidate_metadata["knowledge_value"] = assess_knowledge_value(
+        category=category,
+        problem=problem,
+        root_cause=root_cause,
+        solution=solution,
+        evidence=evidence,
+        metadata=candidate_metadata,
+    )
     candidate = KnowledgeCandidate(
         category=category,
         title=title,
@@ -88,7 +246,7 @@ def create_candidate(
         verified_result=verified_result,
         dedup_key=dedup_key(category, problem, root_cause, solution),
         similarity_key=similarity_key(symptom),
-        metadata_json=metadata or {},
+        metadata_json=candidate_metadata,
     )
     session.add(candidate)
     session.flush()
@@ -238,6 +396,9 @@ def evaluate_quality(candidate: KnowledgeCandidate) -> tuple[str, list[str]]:
         reasons.append("artifact_list_is_not_a_reusable_solution")
     if metadata.get("auto_generated") and not metadata.get("structured_knowledge"):
         reasons.append("auto_report_missing_reusable_structure")
+    value_assessment = metadata.get("knowledge_value") or {}
+    if value_assessment and value_assessment.get("tier") != "promote":
+        reasons.append("knowledge_value_harness_not_promotable")
 
     curation_validated = (
         metadata.get("approval_policy") == "local_llm_evidence_bound"
@@ -304,6 +465,7 @@ def _new_revision(
             "limitations": candidate_metadata.get("limitations"),
             "content_language": candidate_metadata.get("content_language"),
             "curation": candidate_metadata.get("curation"),
+            "knowledge_value": candidate_metadata.get("knowledge_value"),
             "evidence_bound_claims": candidate_metadata.get(
                 "evidence_bound_claims"
             ),
@@ -328,6 +490,7 @@ def _case_metadata_from_candidate(candidate: KnowledgeCandidate) -> dict[str, An
             "curation",
             "evidence_bound_claims",
             "approval_policy",
+            "knowledge_value",
         )
         if metadata.get(key) is not None
     }
