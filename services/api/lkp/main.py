@@ -1,7 +1,7 @@
 import asyncio
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from difflib import unified_diff
 from functools import lru_cache
@@ -17,7 +17,7 @@ from lkp_indexer.knowledge import create_candidate, evaluate_gate, publish_candi
 from lkp_indexer.queue import retry_as_new
 from lkp_indexer.selection import CODE_EXTENSIONS
 from lkp_indexer.service_runtime import assert_mount_guards
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import and_, func, not_, or_, select, text
 from sqlalchemy.orm import Session
 
 from .db import get_db
@@ -61,29 +61,70 @@ settings = get_settings()
 configure_logging("api")
 logger = structlog.get_logger()
 
+_KNOWLEDGE_TAG_ALIASES = {
+    "사례:오류 해결": "case:error_resolution",
+    "사례:구현 방식": "case:implementation",
+    "사례:검증된 성공 사례": "case:custom_success",
+    "사례:성능·부하": "case:performance",
+    "사례:운영·장애": "case:operations",
+    "작업특성:오류 해결": "situation:error_resolution",
+    "작업특성:구현 방식": "situation:implementation",
+    "작업특성:검증된 성공 사례": "situation:custom_success",
+    "작업특성:성능·부하": "situation:performance",
+    "작업특성:운영·장애": "situation:operations",
+    "상태:검증됨": "lifecycle:verified",
+}
+
+
+def _normalize_knowledge_tag(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned.startswith("프로젝트:"):
+        return f"project:{cleaned.removeprefix('프로젝트:').strip().casefold()}"
+    return _KNOWLEDGE_TAG_ALIASES.get(cleaned, cleaned.casefold())
+
+
+def _catalog_predicate(catalog: str):
+    managed = and_(
+        SourceRoot.source_type == "obsidian",
+        Document.relative_path.like("_generated/%"),
+    )
+    if catalog == "source":
+        return not_(managed)
+    if catalog == "managed":
+        return managed
+    return True
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    prewarm_task: asyncio.Task | None = None
     if settings.query_embedding_prewarm:
-        started = time.perf_counter()
-        try:
-            await asyncio.to_thread(
-                _embedder().embed,
-                ["local knowledge portal query cache warmup"],
-            )
-            logger.info(
-                "query_embedding_prewarmed",
-                duration_ms=int((time.perf_counter() - started) * 1000),
-                model=settings.embedding_model,
-                revision=settings.embedding_revision,
-            )
-        except Exception as exc:
-            logger.warning(
-                "query_embedding_prewarm_failed",
-                duration_ms=int((time.perf_counter() - started) * 1000),
-                error_type=type(exc).__name__,
-            )
+        async def prewarm() -> None:
+            started = time.perf_counter()
+            try:
+                await asyncio.to_thread(
+                    _embedder().embed,
+                    ["local knowledge portal query cache warmup"],
+                )
+                logger.info(
+                    "query_embedding_prewarmed",
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    model=settings.embedding_model,
+                    revision=settings.embedding_revision,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "query_embedding_prewarm_failed",
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    error_type=type(exc).__name__,
+                )
+
+        prewarm_task = asyncio.create_task(prewarm())
     yield
+    if prewarm_task is not None and not prewarm_task.done():
+        prewarm_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await prewarm_task
 
 
 app = FastAPI(
@@ -186,6 +227,139 @@ def ready(db: Session = Depends(get_db)) -> dict:
     }
 
 
+def _http_service_status(url: str) -> tuple[str, str | None]:
+    try:
+        response = httpx.get(url, timeout=1.5, follow_redirects=False)
+        return ("healthy", None) if response.is_success else (
+            "error",
+            f"HTTP {response.status_code}",
+        )
+    except httpx.TimeoutException:
+        return "stale", "timeout"
+    except httpx.HTTPError as exc:
+        return "offline", type(exc).__name__
+
+
+def _heartbeat_service(
+    db: Session,
+    *,
+    key: str,
+    label: str,
+    prefixes: tuple[str, ...],
+    now: datetime,
+) -> dict:
+    rows = list(
+        db.scalars(
+            select(WorkerHeartbeat)
+            .where(or_(*(WorkerHeartbeat.worker_id.startswith(prefix) for prefix in prefixes)))
+            .order_by(WorkerHeartbeat.last_seen_at.desc())
+        )
+    )
+    if not rows:
+        return {"key": key, "label": label, "state": "offline", "detail": "no heartbeat"}
+    latest = rows[0]
+    stale = now - latest.last_seen_at > timedelta(seconds=settings.stale_after_seconds)
+    state = "stale" if stale else latest.state
+    if state in {"idle", "busy", "processing"}:
+        state = "healthy"
+    return {
+        "key": key,
+        "label": label,
+        "state": state,
+        "detail": f"{len(rows)} heartbeat(s)",
+        "last_seen_at": latest.last_seen_at,
+    }
+
+
+@app.get("/api/v1/system/services")
+def system_services(db: Session = Depends(get_db)) -> dict:
+    now = datetime.now(timezone.utc)
+    revision = db.execute(text("select version_num from alembic_version")).scalar_one()
+    web_state, web_error = _http_service_status("http://web:3010")
+    embedding_state, embedding_error = _http_service_status(
+        f"{settings.ollama_base_url}/api/version"
+    )
+    if settings.generation_provider == "disabled":
+        generation_state, generation_error = "disabled", None
+    else:
+        generation_state, generation_error = _http_service_status(
+            f"{settings.generation_base_url}/api/version"
+        )
+    gpu_state, gpu_error = _http_service_status(
+        f"{settings.gpu_scheduler_base_url}/api/health"
+    )
+    services = [
+        {
+            "key": "web",
+            "label": "Web portal",
+            "state": web_state,
+            "detail": web_error or "HTTP 200",
+        },
+        {
+            "key": "api",
+            "label": "FastAPI",
+            "state": "healthy",
+            "detail": app.version,
+        },
+        {
+            "key": "postgres",
+            "label": "PostgreSQL",
+            "state": "healthy",
+            "detail": f"schema {revision}",
+        },
+        {
+            "key": "embedding",
+            "label": "Ollama embedding",
+            "state": embedding_state,
+            "detail": embedding_error or settings.embedding_model,
+        },
+        {
+            "key": "generation",
+            "label": "Ollama knowledge editor",
+            "state": generation_state,
+            "detail": generation_error or settings.generation_model or "disabled",
+        },
+        _heartbeat_service(
+            db,
+            key="worker",
+            label="Indexer worker",
+            prefixes=("worker-service",),
+            now=now,
+        ),
+        _heartbeat_service(
+            db,
+            key="watcher",
+            label="File watcher",
+            prefixes=("watcher-service", "watcher:"),
+            now=now,
+        ),
+        _heartbeat_service(
+            db,
+            key="reconciler",
+            label="Reconciler",
+            prefixes=("reconciler:",),
+            now=now,
+        ),
+        _heartbeat_service(
+            db,
+            key="hook-collector",
+            label="Codex hook collector",
+            prefixes=("hook-collector",),
+            now=now,
+        ),
+        {
+            "key": "gpu-scheduler",
+            "label": "Host GPU scheduler",
+            "state": gpu_state,
+            "detail": gpu_error or "read-only health",
+        },
+    ]
+    overall = "healthy" if all(
+        item["state"] in {"healthy", "disabled"} for item in services
+    ) else "attention"
+    return {"overall": overall, "checked_at": now, "services": services}
+
+
 def _gpu_scheduler_get(path: str) -> dict:
     try:
         response = httpx.get(
@@ -254,12 +428,8 @@ def hybrid_search(request: SearchRequest, db: Session = Depends(get_db)) -> Sear
     try:
         response = search(db, request, settings, embedder)
     except httpx.HTTPError:
-        if request.mode == "semantic":
-            return SearchResponse(
-                query=request.query, mode=request.mode, confidence="none", results=[], total=0
-            )
         response = search(db, request.model_copy(update={"mode": "keyword"}), settings)
-        response.mode = "hybrid-degraded-keyword-only"
+        response.mode = f"{request.mode}-degraded-keyword-only"
         response.confidence = "low" if response.results else "none"
     db.commit()
     return response
@@ -522,6 +692,7 @@ def backlinks(document_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dic
 def projects(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    catalog: str = Query("all", pattern="^(all|source|managed)$"),
     db: Session = Depends(get_db),
 ) -> dict:
     grouped = (
@@ -533,6 +704,7 @@ def projects(
         .where(
             Document.state == DocumentState.active,
             SourceRoot.data_scope == "production",
+            _catalog_predicate(catalog),
         )
         .group_by(Document.project_key)
         .subquery()
@@ -558,6 +730,7 @@ def projects(
         "page_size": page_size,
         "total": int(total),
         "document_total": int(document_total),
+        "catalog": catalog,
     }
 
 
@@ -879,6 +1052,7 @@ def publish(
 
 
 def _case_json(row: KnowledgeCase) -> dict:
+    metadata = row.metadata_json or {}
     return {
         "id": str(row.id),
         "category": row.category,
@@ -892,7 +1066,9 @@ def _case_json(row: KnowledgeCase) -> dict:
         "current_revision_id": str(row.current_revision_id) if row.current_revision_id else None,
         "first_seen_at": row.first_seen_at,
         "last_seen_at": row.last_seen_at,
-        "metadata": row.metadata_json,
+        "project": metadata.get("project") or "unassigned",
+        "tags": metadata.get("tags") or [],
+        "metadata": metadata,
     }
 
 
@@ -917,7 +1093,7 @@ def knowledge_cases(
         count_statement = count_statement.where(
             KnowledgeCase.metadata_json["project"].as_string() == project
         )
-    for tag in sorted({item.strip().lower() for item in tags if item.strip()}):
+    for tag in sorted({_normalize_knowledge_tag(item) for item in tags if item.strip()}):
         predicate = KnowledgeCase.metadata_json.contains({"tags": [tag]})
         statement = statement.where(predicate)
         count_statement = count_statement.where(predicate)
@@ -930,6 +1106,71 @@ def knowledge_cases(
         "items": [_case_json(row) for row in rows],
         "page": page,
         "total": db.scalar(count_statement),
+    }
+
+
+@app.get("/api/v1/knowledge/facets")
+def knowledge_facets(db: Session = Depends(get_db)) -> dict:
+    category_rows = db.execute(
+        text(
+            """
+            SELECT
+              COALESCE(metadata->>'project', 'unassigned') AS project,
+              category,
+              count(*)::int AS count,
+              max(last_seen_at) AS latest_at
+            FROM knowledge_case
+            WHERE status = 'verified'
+            GROUP BY COALESCE(metadata->>'project', 'unassigned'), category
+            ORDER BY max(last_seen_at) DESC, project, category
+            """
+        )
+    ).mappings()
+    projects: dict[str, dict] = {}
+    for row in category_rows:
+        project = str(row["project"])
+        group = projects.setdefault(
+            project,
+            {
+                "key": project,
+                "count": 0,
+                "latest_at": row["latest_at"],
+                "categories": [],
+            },
+        )
+        group["count"] += int(row["count"])
+        group["categories"].append(
+            {
+                "key": row["category"],
+                "count": int(row["count"]),
+                "latest_at": row["latest_at"],
+            }
+        )
+    tag_rows = db.execute(
+        text(
+            """
+            SELECT tag, count(*)::int AS count, max(last_seen_at) AS latest_at
+            FROM knowledge_case
+            CROSS JOIN LATERAL jsonb_array_elements_text(
+              COALESCE(metadata->'tags', '[]'::jsonb)
+            ) AS tags(tag)
+            WHERE status = 'verified'
+            GROUP BY tag
+            ORDER BY max(last_seen_at) DESC, tag
+            LIMIT 500
+            """
+        )
+    ).mappings()
+    return {
+        "projects": list(projects.values()),
+        "tags": [
+            {
+                "key": row["tag"],
+                "count": int(row["count"]),
+                "latest_at": row["latest_at"],
+            }
+            for row in tag_rows
+        ],
     }
 
 
@@ -1013,6 +1254,7 @@ def tree(
     project: str | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(250, ge=1, le=1000),
+    catalog: str = Query("all", pattern="^(all|source|managed)$"),
     db: Session = Depends(get_db),
 ) -> dict:
     statement = (
@@ -1021,6 +1263,7 @@ def tree(
         .where(
             Document.state == DocumentState.active,
             SourceRoot.data_scope == "production",
+            _catalog_predicate(catalog),
         )
     )
     if project:
@@ -1050,6 +1293,7 @@ def tree(
         "page": page,
         "page_size": page_size,
         "total": db.scalar(count_statement),
+        "catalog": catalog,
     }
 
 

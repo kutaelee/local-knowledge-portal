@@ -8,10 +8,16 @@ import {
   CircleCheck,
   Cpu,
   FileDiff,
+  FolderTree,
   ShieldAlert,
+  Tag,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import {
+  knowledgeCategoryLabel,
+  knowledgeTagLabel,
+} from "@/lib/knowledge-labels";
 
 type Locale = "ko" | "en";
 
@@ -28,9 +34,12 @@ const textByLocale = {
       versions: "문서 버전", reported: "보고된 결과", verified: "검증된 결과",
     },
     knowledge: {
-      eyebrow: "근거 검증 위키", title: "지식 사례",
-      subtitle: "검증된 근거가 관문을 통과한 사례만 표준 지식으로 게시됩니다.",
-      cases: "검증된 사례", candidates: "승격 보류·근거 보완", occurrences: "회 발생",
+      eyebrow: "프로젝트 지식", title: "프로젝트 지식",
+      subtitle: "개발 일지와 재사용 가능한 검증 사례를 원본 파일과 분리해 관리합니다.",
+      cases: "검증 지식 사례", candidates: "승격 보류·근거 보완", occurrences: "회 발생",
+      hierarchy: "프로젝트 · 작업 특성", allProjects: "전체 프로젝트",
+      allCategories: "전체 작업 특성", tags: "태그", allTags: "전체 태그",
+      latestFirst: "최신 갱신 순", latest: "최근 갱신",
       journal: "프로젝트 개발 일지",
       journalSubtitle: "주요 구현·설정·운영 변경을 사례 승격 여부와 별도로 기록합니다.",
       intent: "작업 의도", changes: "주요 변경", changedFiles: "변경 파일", failures: "실패와 해결",
@@ -112,9 +121,12 @@ const textByLocale = {
       versions: "Document versions", reported: "Reported result", verified: "Verified result",
     },
     knowledge: {
-      eyebrow: "Evidence-gated wiki", title: "Knowledge cases",
-      subtitle: "Canonical cases are published only after verified evidence passes the gate.",
-      cases: "Verified cases", candidates: "Held candidates", occurrences: "occurrence(s)",
+      eyebrow: "Project knowledge", title: "Project knowledge",
+      subtitle: "Project journals and reusable verified cases are kept apart from source files.",
+      cases: "Verified knowledge", candidates: "Held candidates", occurrences: "occurrence(s)",
+      hierarchy: "Project · work type", allProjects: "All projects",
+      allCategories: "All work types", tags: "Tags", allTags: "All tags",
+      latestFirst: "Newest updated first", latest: "Last updated",
       journal: "Project journal",
       journalSubtitle: "Significant implementation, configuration, and operational changes.",
       intent: "Intent", changes: "Changes", changedFiles: "Changed files", failures: "Failures and resolution",
@@ -243,6 +255,10 @@ type Case = {
   solution: string;
   status: string;
   occurrence_count: number;
+  project: string;
+  tags: string[];
+  first_seen_at: string;
+  last_seen_at: string;
   revisions?: Array<{
     id: string;
     number: number;
@@ -252,6 +268,16 @@ type Case = {
   }>;
   occurrences?: Array<{ id: string; occurred_at: string; evidence: object }>;
   relations?: Array<{ source_case_id: string; target_case_id: string; type: string }>;
+};
+
+type KnowledgeFacets = {
+  projects: Array<{
+    key: string;
+    count: number;
+    latest_at: string;
+    categories: Array<{ key: string; count: number; latest_at: string }>;
+  }>;
+  tags: Array<{ key: string; count: number; latest_at: string }>;
 };
 
 type JournalEntry = {
@@ -444,6 +470,9 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
   const text = textByLocale[locale].knowledge;
   const [tab, setTab] = useState<"cases" | "candidates" | "journal">("cases");
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedProject, setSelectedProject] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState("");
+  const [selectedTag, setSelectedTag] = useState("");
   const [page, setPage] = useState(1);
   const pageSize = 25;
   const curation = useQuery({
@@ -452,10 +481,24 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
     refetchInterval: 30000,
   });
   const cases = useQuery({
-    queryKey: ["knowledge-cases", page],
+    queryKey: [
+      "knowledge-cases",
+      page,
+      selectedProject,
+      selectedCategory,
+      selectedTag,
+    ],
     queryFn: () => api<{ items: Case[]; total: number }>(
-      `/api/v1/knowledge/cases?page=${page}&page_size=${pageSize}`,
+      `/api/v1/knowledge/cases?page=${page}&page_size=${pageSize}`
+      + `${selectedProject ? `&project=${encodeURIComponent(selectedProject)}` : ""}`
+      + `${selectedCategory ? `&category=${encodeURIComponent(selectedCategory)}` : ""}`
+      + `${selectedTag ? `&tags=${encodeURIComponent(selectedTag)}` : ""}`,
     ),
+    enabled: tab === "cases",
+  });
+  const facets = useQuery({
+    queryKey: ["knowledge-facets"],
+    queryFn: () => api<KnowledgeFacets>("/api/v1/knowledge/facets"),
     enabled: tab === "cases",
   });
   const candidates = useQuery({
@@ -544,21 +587,78 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
         setTab("journal"); setSelected(null); setPage(1);
       }}>{text.journal}</button>
     </div>
-    <div className="master-detail">
+    <div className={tab === "cases" ? "knowledge-browser" : "master-detail"}>
+      {tab === "cases" && <aside className="panel knowledge-tree" role="tree"
+        aria-label={text.hierarchy}>
+        <div className="knowledge-tree-head"><FolderTree size={16} /><strong>{text.hierarchy}</strong></div>
+        <button role="treeitem" aria-selected={!selectedProject}
+          className={!selectedProject ? "selected" : ""} onClick={() => {
+          setSelectedProject(""); setSelectedCategory(""); setSelected(null); setPage(1);
+        }}>
+          <span>{text.allProjects}</span><small>{facets.data?.projects.reduce(
+            (sum, project) => sum + project.count, 0
+          ) ?? 0}</small>
+        </button>
+        {facets.data?.projects.map((project) => {
+          const expanded = selectedProject === project.key;
+          return <div key={project.key}>
+            <button role="treeitem" aria-expanded={expanded}
+              aria-selected={expanded && !selectedCategory}
+              className={expanded && !selectedCategory ? "selected" : ""} onClick={() => {
+              setSelectedProject(project.key);
+              setSelectedCategory("");
+              setSelected(null);
+              setPage(1);
+            }}>
+              {expanded ? <ChevronRight className="tree-rotated" size={13} /> : <ChevronRight size={13} />}
+              <span>{project.key}</span><small>{project.count}</small>
+            </button>
+            {expanded && <div className="knowledge-tree-children" role="group">
+              <button role="treeitem" aria-selected={!selectedCategory}
+                className={!selectedCategory ? "selected" : ""} onClick={() => {
+                setSelectedCategory(""); setSelected(null); setPage(1);
+              }}>
+                <span>{text.allCategories}</span><small>{project.count}</small>
+              </button>
+              {project.categories.map((category) => <button role="treeitem" key={category.key}
+                aria-selected={selectedCategory === category.key}
+                className={selectedCategory === category.key ? "selected" : ""}
+                onClick={() => {
+                  setSelectedCategory(category.key); setSelected(null); setPage(1);
+                }}>
+                <span>{knowledgeCategoryLabel(category.key, locale)}</span>
+                <small>{category.count}</small>
+              </button>)}
+            </div>}
+          </div>;
+        })}
+        <div className="knowledge-tag-filter">
+          <label htmlFor="knowledge-tag"><Tag size={14} />{text.tags}</label>
+          <select id="knowledge-tag" value={selectedTag} onChange={(event) => {
+            setSelectedTag(event.target.value); setSelected(null); setPage(1);
+          }}>
+            <option value="">{text.allTags}</option>
+            {facets.data?.tags.map((item) => <option key={item.key} value={item.key}>
+              {knowledgeTagLabel(item.key, locale)} ({item.count})
+            </option>)}
+          </select>
+        </div>
+      </aside>}
       <div className="panel record-list">
+        {tab === "cases" && <div className="record-sort">{text.latestFirst}</div>}
         {items.map((item) => <button key={item.id} onClick={() => setSelected(item.id)}
           className={selected === item.id ? "selected" : ""}>
           <BookCheck size={16} /><span><strong>{item.title}</strong>
-            <small>{"project" in item
+            <small>{"source_stop_activity_id" in item
               ? `${item.project} · ${new Date(item.occurred_at).toLocaleString(
                 locale === "ko" ? "ko-KR" : "en-US",
               )}`
-              : `${text.categoryLabels[
-                item.category as keyof typeof text.categoryLabels
-              ] ?? item.category}${!("evidence_gate_status" in item)
-                ? ` · ${item.occurrence_count}${locale === "ko" ? text.occurrences : ` ${text.occurrences}`}` : ""}`
+              : `${knowledgeCategoryLabel(item.category, locale)}${!("evidence_gate_status" in item)
+                ? ` · ${item.project} · ${new Date(item.last_seen_at).toLocaleString(
+                  locale === "ko" ? "ko-KR" : "en-US",
+                )}` : ""}`
             }</small></span>
-          <Badge value={"project" in item
+          <Badge value={"source_stop_activity_id" in item
             ? item.verification_status
             : "evidence_gate_status" in item
               ? candidateBadge(item) : item.status} locale={locale} /><ChevronRight size={14} />
@@ -570,11 +670,11 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
       <article className="panel detail-card">
         {selectedDetail ? <>
           <div className="panel-head"><h2>{selectedDetail.title}</h2>
-            <Badge value={"project" in selectedDetail
+            <Badge value={"source_stop_activity_id" in selectedDetail
               ? selectedDetail.verification_status
               : "evidence_gate_status" in selectedDetail
                 ? candidateBadge(selectedDetail) : selectedDetail.status} locale={locale} /></div>
-          {"project" in selectedDetail ? <>
+          {"source_stop_activity_id" in selectedDetail ? <>
             <p>{text.journalSubtitle}</p>
             <dl className="detail-grid">
               <div><dt>{text.intent}</dt><dd>{selectedDetail.intent}</dd></div>
@@ -605,6 +705,16 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
             </dl>
           </> : <>
           <dl className="detail-grid">
+            {!("evidence_gate_status" in selectedDetail) && <div><dt>{text.latest}</dt><dd>
+              {selectedDetail.project} · {new Date(selectedDetail.last_seen_at).toLocaleString(
+                locale === "ko" ? "ko-KR" : "en-US",
+              )}
+              {!!selectedDetail.tags.length && <div className="knowledge-tags">
+                {selectedDetail.tags.map((tag) => <span key={tag}>
+                  {knowledgeTagLabel(tag, locale)}
+                </span>)}
+              </div>}
+            </dd></div>}
             <div><dt>{text.problem}</dt><dd>{selectedDetail.problem}</dd></div>
             <div><dt>{text.symptom}</dt><dd>{selectedDetail.symptom}</dd></div>
             <div><dt>{text.cause}</dt><dd>{selectedDetail.root_cause}</dd></div>

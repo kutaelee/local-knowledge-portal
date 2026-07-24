@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 $Repo = Split-Path -Parent $PSScriptRoot
 $PrimarySpool = if ($env:LKP_HOOK_SPOOL_DIR) {
   $env:LKP_HOOK_SPOOL_DIR

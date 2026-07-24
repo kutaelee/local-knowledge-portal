@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     semantic_high_confidence_similarity: float = Field(default=0.6, ge=-1, le=1)
     query_embedding_cache_size: int = Field(default=512, ge=1, le=100_000)
     query_embedding_cache_ttl_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
-    query_embedding_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    query_embedding_timeout_seconds: int = Field(default=5, ge=1, le=120)
     query_embedding_prewarm: bool = False
     search_statement_timeout_ms: int = Field(default=5_000, ge=100, le=120_000)
     repository_embedding_mode: Literal["docs_only", "code_and_docs", "lexical_only"] = "docs_only"

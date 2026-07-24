@@ -6,6 +6,7 @@ from lkp_indexer.hook_collector import (
     _changed_files,
     _exit_code,
     _transcript_turn_instruction,
+    _transcript_turn_result,
     activity_signal,
 )
 
@@ -140,4 +141,42 @@ def test_turn_instruction_is_read_from_bounded_transcript(tmp_path: Path):
     assert (
         _transcript_turn_instruction(payload, sessions, "turn-1")
         == "다른 개발 작업도 증거 기반으로 사례화해"
+    )
+
+
+def test_turn_result_prefers_utf8_transcript_over_mojibake_hook_payload(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    transcript = sessions / "2026" / "07" / "24" / "rollout.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "turn_id": "turn-1"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "turn_id": "turn-1",
+                            "last_agent_message": "수정 완료했습니다. 재기동 검증도 통과했습니다.",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    payload = {
+        "transcript_path": r"\\?\C:\Users\kutae\.codex\sessions\2026\07\24\rollout.jsonl",
+        "last_assistant_message": "?섏젙 ?꾨즺?덉뒿?덈떎.",
+    }
+    assert (
+        _transcript_turn_result(payload, sessions, "turn-1")
+        == "수정 완료했습니다. 재기동 검증도 통과했습니다."
     )

@@ -89,6 +89,19 @@ read-only source catalog, while Knowledge Cases are a separate verified layer. C
 project overviews are indexed by project, category, situation, lifecycle, and knowledge-value tags;
 see [ADR 0015](docs/adr/0015-project-wiki-taxonomy-and-refresh.md).
 
+The portal information architecture keeps these datasets explicit:
+
+- **Source files**: registered repository files and human-authored Markdown, read-only. Managed
+  `_generated` pages are excluded from this tree.
+- **Unified search**: lexical, path, symbol, semantic, and hybrid retrieval across indexed source
+  and managed knowledge, always with provenance.
+- **Codex work**: selected raw activity and execution evidence; it is not canonical knowledge.
+- **Project knowledge**: project journals plus verified reusable cases. Cases are browsed as
+  project → work type, sorted by `last_seen_at DESC`, with localized display labels over stable
+  canonical tags.
+- **Ingest & operations / Change history / Document relations**: queue health, observed ingest
+  events, and extracted document links respectively.
+
 ## Global Codex activity capture
 
 The user-level `%USERPROFILE%\.codex\hooks.json` records activity from every trusted Codex
@@ -98,6 +111,10 @@ JSON envelope to `E:\Data\LocalKnowledgePortal\ingest\codex-spool\pending`. It n
 database. A bounded fallback spool, deterministic event IDs, secret redaction, malformed and
 oversized quarantine, and collector-side idempotency keep capture available during portal or
 database outages.
+
+The PowerShell hook forces UTF-8 for redirected stdin and stdout. For Stop events the collector
+prefers the matching UTF-8 Codex transcript result over the console payload; this prevents Windows
+code-page mojibake from entering activity, journal, candidate, and generated Markdown data.
 
 Ordinary Codex work is activity history only. It does not create or overwrite wiki pages. The
 embedding model only creates retrieval vectors. A separate local evidence editor may publish a
@@ -216,7 +233,12 @@ a dedicated bilingual/code corpus.
 
 ## API surface
 
-Implemented endpoints include keyword/hybrid/semantic search, RAG context, documents, versions, backlinks, projects, tree, jobs and auditable retry, workers, timeline, summary metrics, Prometheus text metrics, and split live/readiness health.
+Implemented endpoints include keyword/hybrid/semantic search, RAG context, documents, versions,
+backlinks, projects, tree, jobs and auditable retry, workers, timeline, summary metrics, Prometheus
+text metrics, split live/readiness health, indexed knowledge facets, source/managed catalog
+boundaries, and `/api/v1/system/services`. The latter checks the persistent WSL/Docker services
+without exposing the Docker socket: web, API, PostgreSQL, both Ollama roles, indexer, watcher,
+reconciler, hook collector, and the read-only host GPU scheduler health endpoint.
 
 The read-only GPU scheduler integration exposes only `GET /api/v1/gpu-queue/health`,
 `GET /api/v1/gpu-queue/status`, and `GET /api/v1/gpu-queue/jobs/{uuid}`. The upstream host URL is

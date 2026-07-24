@@ -20,19 +20,28 @@ import {
   Area, AreaChart, ResponsiveContainer, Tooltip, XAxis,
 } from "recharts";
 import { api, Metrics, SearchResult, TreeItem } from "@/lib/api";
+import { knowledgeTagLabel } from "@/lib/knowledge-labels";
 import { ActivityHistory, DocumentViewer, KnowledgeCases } from "./knowledge-views";
 
 gsap.registerPlugin(useGSAP);
 
 type View = "overview" | "explorer" | "document" | "search" | "activities" |
   "knowledge" | "operations" | "timeline" | "graph";
+type NavView = Exclude<View, "document">;
 type Job = {
   id: string; status: string; job_type: string; path: string; attempt_count: number;
   max_attempts: number; error_type: string | null; error_message: string | null; created_at: string;
 };
+type SystemService = {
+  key: string;
+  label: string;
+  state: string;
+  detail: string | null;
+  last_seen_at?: string;
+};
 type Locale = "ko" | "en";
 
-const nav: { id: View; icon: React.ComponentType<{ size?: number }> }[] = [
+const nav: { id: NavView; icon: React.ComponentType<{ size?: number }> }[] = [
   { id: "overview", icon: LayoutDashboard },
   { id: "explorer", icon: Folder },
   { id: "search", icon: Search },
@@ -46,10 +55,21 @@ const nav: { id: View; icon: React.ComponentType<{ size?: number }> }[] = [
 const translations = {
   ko: {
     nav: {
-      overview: "현황", explorer: "저장소 탐색", document: "문서",
-      search: "검색", activities: "활동 이력", knowledge: "지식 사례",
-      operations: "운영", timeline: "변경 타임라인", graph: "지식 그래프",
+      overview: "현황", explorer: "원본 파일", document: "문서",
+      search: "통합 검색", activities: "Codex 작업", knowledge: "프로젝트 지식",
+      operations: "수집·운영", timeline: "변경 기록", graph: "문서 관계",
       gpuQueue: "GPU 작업 큐",
+    },
+    navDescriptions: {
+      overview: "최신성·대기열",
+      explorer: "저장소·사람 작성 문서",
+      search: "파일·코드·지식 검색",
+      activities: "원시 작업과 실행 근거",
+      knowledge: "개발 일지·검증 사례",
+      operations: "작업·Worker·백업",
+      timeline: "파일 수집 이벤트",
+      graph: "문서 링크 시각화",
+      gpuQueue: "호스트 GPU 예약 현황",
     },
     workspace: "작업 공간",
     globalSearch: "문서, 경로, 코드 심볼 검색…",
@@ -66,7 +86,16 @@ const translations = {
       title: "선택 항목 정보", lines: "원본 줄", version: "문서 버전", chunk: "검색 단위",
       hash: "콘텐츠 해시", indexed: "인덱싱 시각", copy: "인용 정보 복사",
       empty: "검색 결과를 선택하면 원본 경로와 변경 불가능한 출처 정보를 확인할 수 있습니다.",
-      services: "연결 상태", healthy: "정상", offline: "연결 안 됨", unavailable: "사용 불가",
+      services: "WSL · Docker 연결 상태", checkedAt: "확인",
+      healthy: "정상", offline: "연결 안 됨", unavailable: "사용 불가",
+      stale: "응답 지연", error: "오류", disabled: "비활성",
+      serviceLabels: {
+        web: "웹 포털", api: "FastAPI", postgres: "PostgreSQL",
+        embedding: "Ollama 임베딩", generation: "Ollama 지식 편집기",
+        worker: "인덱서 Worker", watcher: "파일 Watcher",
+        reconciler: "전체 대조", "hook-collector": "Codex 훅 수집기",
+        "gpu-scheduler": "호스트 GPU 스케줄러",
+      },
     },
     overview: {
       eyebrow: "지식베이스 운영 현황",
@@ -140,7 +169,9 @@ const translations = {
     },
     explorer: {
       eyebrow: "읽기 전용 탐색기",
-      title: "저장소와 파일",
+      title: "원본 저장소와 파일",
+      subtitle: "등록 저장소와 사람이 작성한 문서를 탐색합니다. 포털 생성 개발일지·지식사례는 ‘프로젝트 지식’에만 표시됩니다.",
+      sourceOnly: "원본 카탈로그",
       visible: "표시 파일",
       limited: "일부만 표시",
       treeLabel: "소스 트리",
@@ -222,10 +253,21 @@ const translations = {
   },
   en: {
     nav: {
-      overview: "Overview", explorer: "Repository explorer", document: "Document",
-      search: "Search", activities: "Activity", knowledge: "Knowledge cases",
-      operations: "Operations", timeline: "Timeline", graph: "Knowledge graph",
+      overview: "Overview", explorer: "Source files", document: "Document",
+      search: "Unified search", activities: "Codex work", knowledge: "Project knowledge",
+      operations: "Ingest & operations", timeline: "Change history", graph: "Document relations",
       gpuQueue: "GPU queue",
+    },
+    navDescriptions: {
+      overview: "Freshness and queue",
+      explorer: "Repositories and authored docs",
+      search: "Files, code, and knowledge",
+      activities: "Raw work and evidence",
+      knowledge: "Journals and verified cases",
+      operations: "Jobs, workers, backups",
+      timeline: "Ingest events",
+      graph: "Document links",
+      gpuQueue: "Host GPU reservations",
     },
     workspace: "Workspace",
     globalSearch: "Search documents, paths, symbols…",
@@ -242,7 +284,16 @@ const translations = {
       title: "Context", lines: "Lines", version: "Version", chunk: "Chunk",
       hash: "Hash", indexed: "Indexed", copy: "Copy citation",
       empty: "Select a result to inspect immutable provenance.",
-      services: "Services", healthy: "healthy", offline: "offline", unavailable: "unavailable",
+      services: "WSL · Docker services", checkedAt: "Checked",
+      healthy: "healthy", offline: "offline", unavailable: "unavailable",
+      stale: "stale", error: "error", disabled: "disabled",
+      serviceLabels: {
+        web: "Web portal", api: "FastAPI", postgres: "PostgreSQL",
+        embedding: "Ollama embedding", generation: "Ollama knowledge editor",
+        worker: "Indexer worker", watcher: "File watcher",
+        reconciler: "Reconciler", "hook-collector": "Codex hook collector",
+        "gpu-scheduler": "Host GPU scheduler",
+      },
     },
     overview: {
       eyebrow: "Knowledge base status",
@@ -315,7 +366,9 @@ const translations = {
       justNow: "just now",
     },
     explorer: {
-      eyebrow: "Read-only explorer", title: "Repositories & files",
+      eyebrow: "Read-only explorer", title: "Source repositories & files",
+      subtitle: "Browse registered repositories and human-authored documents. Portal-generated journals and cases live only under Project knowledge.",
+      sourceOnly: "Source catalog",
       visible: "visible files", limited: "limited view", treeLabel: "Source tree",
       loadError: "The source tree could not be loaded.",
       emptyTitle: "No indexed documents",
@@ -427,6 +480,15 @@ export function Portal() {
     queryFn: () => api<{ status: string; database: boolean; ollama: boolean }>("/health/ready"),
     refetchInterval: 15_000,
   });
+  const services = useQuery({
+    queryKey: ["system-services"],
+    queryFn: () => api<{
+      overall: string;
+      checked_at: string;
+      services: SystemService[];
+    }>("/api/v1/system/services"),
+    refetchInterval: 10_000,
+  });
   useGSAP(() => {
     if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     gsap.fromTo(".view-enter", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.24 });
@@ -492,10 +554,12 @@ export function Portal() {
               key={item.id} className={view === item.id ? "active" : ""}
               onClick={() => setView(item.id)}
             >
-              <item.icon size={17} /> {text.nav[item.id]}
+              <item.icon size={17} /><span><strong>{text.nav[item.id]}</strong>
+                <small>{text.navDescriptions[item.id]}</small></span>
             </button>
           ))}
-          <a href="/gpu-queue"><Cpu size={17} /> {text.nav.gpuQueue}</a>
+          <a href="/gpu-queue"><Cpu size={17} /><span><strong>{text.nav.gpuQueue}</strong>
+            <small>{text.navDescriptions.gpuQueue}</small></span></a>
         </nav>
         <div className="sidebar-bottom">
           <p>{text.pipeline}</p>
@@ -526,7 +590,7 @@ export function Portal() {
       </main>
 
       <aside className="context">
-        <ContextPanel selected={selected} health={health.data} locale={locale} />
+        <ContextPanel selected={selected} services={services.data} locale={locale} />
       </aside>
     </div>
   );
@@ -812,12 +876,12 @@ function Explorer({ onOpen, locale }: {
       items: Array<{ key: string; document_count: number }>;
       total: number;
       document_total: number;
-    }>(`/api/v1/projects?page=${projectPage}&page_size=${projectPageSize}`),
+    }>(`/api/v1/projects?catalog=source&page=${projectPage}&page_size=${projectPageSize}`),
   });
   const tree = useQuery({
     queryKey: ["tree", openProject, page],
     queryFn: () => api<{ items: TreeItem[]; total: number }>(
-      `/api/v1/tree?project=${encodeURIComponent(openProject!)}&page=${page}&page_size=${pageSize}`,
+      `/api/v1/tree?catalog=source&project=${encodeURIComponent(openProject!)}&page=${page}&page_size=${pageSize}`,
     ),
     enabled: Boolean(openProject),
   });
@@ -826,7 +890,9 @@ function Explorer({ onOpen, locale }: {
   return (
     <section>
       <div className="page-title compact"><div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
-        <p>{projects.data?.document_total ?? 0} {text.visible}</p></div></div>
+        <p>{text.subtitle}</p>
+        <span className="catalog-note">{text.sourceOnly} · {projects.data?.document_total ?? 0} {text.visible}</span>
+      </div></div>
       <div className="panel tree-panel" role="tree" aria-label={text.treeLabel}>
         {projects.data?.items.map((project) => {
           const expanded = openProject === project.key;
@@ -940,7 +1006,7 @@ function SearchView({ initialQuery, onSelect, locale }: {
             return <button type="button" key={item.name} className={active ? "active" : ""}
               aria-pressed={active} onClick={() => setSelectedTags((current) =>
                 active ? current.filter((tag) => tag !== item.name) : [...current, item.name])}>
-              {item.name}<small>{item.count}</small>
+              {knowledgeTagLabel(item.name, locale)}<small>{item.count}</small>
             </button>;
           })}
           {!!selectedTags.length && <button type="button" onClick={() => setSelectedTags([])}>
@@ -964,7 +1030,9 @@ function SearchView({ initialQuery, onSelect, locale }: {
                 <span>L{result.provenance.start_line}–{result.provenance.end_line}</span></div>
               <p className="path">{result.provenance.source_root} / {result.provenance.relative_path}</p>
               {!!result.tags.length && <div className="result-tags">
-                {result.tags.slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}
+                {result.tags.slice(0, 6).map((tag) => <span key={tag}>
+                  {knowledgeTagLabel(tag, locale)}
+                </span>)}
               </div>}
               {result.heading_or_symbol && <h3>{result.heading_or_symbol}</h3>}
               <p className="snippet">{result.snippet}</p>
@@ -1165,12 +1233,19 @@ function GraphNotice({ locale }: { locale: Locale }) {
       <div className="fake-nodes"><span /><span /><span /><span /></div></div></section>;
 }
 
-function ContextPanel({ selected, health, locale }: {
+function ContextPanel({ selected, services, locale }: {
   selected: SearchResult | null;
-  health?: { database: boolean; ollama: boolean };
+  services?: { checked_at: string; services: SystemService[] };
   locale: Locale;
 }) {
   const text = translations[locale].contextPanel;
+  const stateLabel = (state: string) => {
+    if (state === "healthy" || state === "busy" || state === "idle") return text.healthy;
+    if (state === "stale") return text.stale;
+    if (state === "disabled") return text.disabled;
+    if (state === "error") return text.error;
+    return text.offline;
+  };
   return <div><p className="nav-heading">{text.title}</p>
     {selected ? <><h2>{selected.title}</h2><p className="context-path">{selected.provenance.relative_path}</p>
       <dl className="context-list">
@@ -1184,17 +1259,31 @@ function ContextPanel({ selected, health, locale }: {
         `${selected.provenance.canonical_path}:L${selected.provenance.start_line}-L${selected.provenance.end_line}`
       )}>{text.copy}</button></> : <div className="context-empty"><BookOpen size={24} /><p>{text.empty}</p></div>}
     <div className="service-status"><p className="nav-heading">{text.services}</p>
-      <div><Database size={15} /> PostgreSQL <Status value={health?.database ? "healthy" : "offline"}
-        label={health?.database ? text.healthy : text.offline} /></div>
-      <div><HeartPulse size={15} /> Ollama <Status value={health?.ollama ? "healthy" : "unavailable"}
-        label={health?.ollama ? text.healthy : text.unavailable} /></div>
+      {services?.services.map((service) => {
+        const Icon = service.key === "postgres"
+          ? Database
+          : service.key === "gpu-scheduler" ? Cpu : HeartPulse;
+        const label = text.serviceLabels[
+          service.key as keyof typeof text.serviceLabels
+        ] ?? service.label;
+        return <div key={service.key}><Icon size={15} /><span className="service-info">
+          <strong>{label}</strong><small title={service.detail ?? undefined}>
+            {service.detail ?? "—"}
+          </small></span><Status value={service.state} label={stateLabel(service.state)} /></div>;
+      })}
+      {!services && <div><AlertTriangle size={15} /> API
+        <Status value="offline" label={text.offline} /></div>}
+      {services?.checked_at && <small className="service-checked">{text.checkedAt}: {
+        new Date(services.checked_at).toLocaleTimeString(locale === "ko" ? "ko-KR" : "en-US")
+      }</small>}
     </div></div>;
 }
 
 function Status({ value, label }: { value: string; label?: string }) {
-  const good = ["healthy", "succeeded", "active", "idle", "processing"].includes(value);
-  return <span className={`status ${good ? "good" : value === "pending" ? "waiting" : "danger"}`}>
-    {good ? <CircleCheck size={12} /> : value === "pending" ? <Clock3 size={12} /> : <AlertTriangle size={12} />}{label ?? value}
+  const good = ["healthy", "succeeded", "active", "idle", "processing", "busy"].includes(value);
+  const waiting = ["pending", "stale", "disabled"].includes(value);
+  return <span className={`status ${good ? "good" : waiting ? "waiting" : "danger"}`}>
+    {good ? <CircleCheck size={12} /> : waiting ? <Clock3 size={12} /> : <AlertTriangle size={12} />}{label ?? value}
   </span>;
 }
 function EmptyState({ title, detail }: { title: string; detail: string }) {

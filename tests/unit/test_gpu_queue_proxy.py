@@ -51,3 +51,13 @@ def test_gpu_proxy_exposes_only_bounded_get_paths(monkeypatch):
         f"{main.settings.gpu_scheduler_base_url}/api/jobs/{job_id}",
     ]
     assert all(call[1]["follow_redirects"] is False for call in calls)
+
+
+def test_korean_knowledge_tags_resolve_to_stable_canonical_filters():
+    assert main._normalize_knowledge_tag("사례:성능·부하") == "case:performance"
+    assert main._normalize_knowledge_tag("작업특성:운영·장애") == "situation:operations"
+    assert main._normalize_knowledge_tag("상태:검증됨") == "lifecycle:verified"
+    assert (
+        main._normalize_knowledge_tag("프로젝트: Local-Knowledge-Portal")
+        == "project:local-knowledge-portal"
+    )

@@ -24,6 +24,9 @@ test("localized overview explains freshness and persists language", async ({ pag
   })).toBeVisible();
   await expect(page.getByText("마지막 인덱싱", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "최근 반영된 문서" })).toBeVisible();
+  await expect(page.getByText("WSL · Docker 연결 상태", { exact: true })).toBeVisible();
+  await expect(page.getByText("Codex 훅 수집기", { exact: true })).toBeVisible();
+  await expect(page.getByText("Ollama 지식 편집기", { exact: true })).toBeVisible();
 
   await page.reload();
   await expect(page.getByRole("heading", {
@@ -31,16 +34,16 @@ test("localized overview explains freshness and persists language", async ({ pag
   })).toBeVisible();
 
   const localizedScreens = [
-    ["저장소 탐색", "저장소와 파일"],
-    ["검색", "원본 지식 검색"],
-    ["활동 이력", "활동 이력"],
-    ["지식 사례", "지식 사례"],
-    ["운영", "지속형 작업 큐"],
-    ["변경 타임라인", "변경 타임라인"],
-    ["지식 그래프", "지식 그래프"],
+    ["원본 파일", "원본 저장소와 파일"],
+    ["통합 검색", "원본 지식 검색"],
+    ["Codex 작업", "활동 이력"],
+    ["프로젝트 지식", "프로젝트 지식"],
+    ["수집·운영", "지속형 작업 큐"],
+    ["변경 기록", "변경 타임라인"],
+    ["문서 관계", "지식 그래프"],
   ] as const;
   for (const [navigation, heading] of localizedScreens) {
-    await page.getByRole("button", { name: navigation, exact: true }).click();
+    await page.getByRole("button", { name: navigation }).click();
     await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
   }
 });
@@ -49,14 +52,14 @@ test("overview, explorer, document versions, and provenance", async ({ page, req
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "See what is current, at a glance." }))
     .toBeVisible();
-  await page.getByRole("button", { name: "Repository explorer" }).click();
-  await expect(page.getByRole("heading", { name: "Repositories & files" })).toBeVisible();
+  await page.getByRole("button", { name: /Source files/ }).click();
+  await expect(page.getByRole("heading", { name: "Source repositories & files" })).toBeVisible();
 
   let target: { id: string; project: string; path: string } | null = null;
   const visiblePerProject = new Map<string, number>();
   for (let treePage = 1; treePage <= 20 && !target; treePage += 1) {
     const tree = await (
-      await request.get(`${apiURL}/api/v1/tree?page=${treePage}&page_size=250`)
+      await request.get(`${apiURL}/api/v1/tree?catalog=source&page=${treePage}&page_size=250`)
     ).json();
     for (const item of tree.items) {
       const visibleIndex = visiblePerProject.get(item.project) ?? 0;
@@ -77,7 +80,7 @@ test("overview, explorer, document versions, and provenance", async ({ page, req
   await expect(page.getByText("Version timeline")).toBeVisible();
   await expect(page.getByText("Latest diff")).toBeVisible();
 
-  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("button", { name: /Unified search/ }).click();
   await page.getByPlaceholder(/Filename, error/).fill("PostgreSQL");
   await page.getByRole("button", { name: "Search", exact: true }).last().click();
   const result = page.locator(".result-card").first();
@@ -90,16 +93,18 @@ test("overview, explorer, document versions, and provenance", async ({ page, req
 
 test("activity, knowledge cases, and automatic evidence editor", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Activity", exact: true }).click();
+  await page.getByRole("button", { name: /Codex work/ }).click();
   await expect(page.getByRole("heading", { name: "Activity history" })).toBeVisible();
   await page.locator(".record-list > button").first().click();
   await expect(page.getByText("Reported result", { exact: true })).toBeVisible();
   await expect(page.getByText("Verified result", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Knowledge cases", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Knowledge cases" })).toBeVisible();
+  await page.getByRole("button", { name: /Project knowledge/ }).click();
+  await expect(page.getByRole("heading", { name: "Project knowledge" })).toBeVisible();
+  await expect(page.getByText("Project · work type", { exact: true })).toBeVisible();
+  await expect(page.getByText("Newest updated first", { exact: true })).toBeVisible();
   await expect(page.getByText("Local knowledge editor", { exact: true })).toBeVisible();
-  await expect(page.getByText(/qwen3\.5:9b-q4_K_M/)).toBeVisible();
+  await expect(page.getByText(/qwen3\.5:9b-q4_K_M/).first()).toBeVisible();
   await expect(page.getByText(/evidence-blog-v9/)).toBeVisible();
   await page.locator(".record-list > button").first().click();
   await expect(page.getByText("Root cause", { exact: true })).toBeVisible();
@@ -124,7 +129,7 @@ test("activity, knowledge cases, and automatic evidence editor", async ({ page }
 
 test("keyword, semantic, hybrid, operations, and worker heartbeat", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("button", { name: /Unified search/ }).click();
   const input = page.getByPlaceholder(/Filename, error/);
   const mode = page.getByLabel("Search mode");
   for (const value of ["keyword", "semantic", "hybrid"]) {
@@ -134,7 +139,7 @@ test("keyword, semantic, hybrid, operations, and worker heartbeat", async ({ pag
     await expect(page.locator(".result-card").first()).toBeVisible({ timeout: 30_000 });
   }
 
-  await page.getByRole("button", { name: "Operations", exact: true }).click();
+  await page.getByRole("button", { name: /Ingest & operations/ }).click();
   await expect(page.getByRole("heading", { name: "Durable queue" })).toBeVisible();
   const retry = page.getByRole("button", { name: "Retry" }).first();
   if (await retry.count()) {
@@ -143,10 +148,10 @@ test("keyword, semantic, hybrid, operations, and worker heartbeat", async ({ pag
   } else {
     await expect(page.locator("tbody tr").first()).toBeVisible();
   }
-  await page.getByRole("button", { name: "Workers" }).click();
+  await page.getByRole("button", { name: "Workers", exact: true }).click();
   await expect(page.getByText("watcher-service", { exact: false }).first()).toBeVisible();
   await expect(page.getByText(/idle|stale|healthy|busy/).first()).toBeVisible();
-  await page.getByRole("button", { name: "Backups" }).click();
+  await page.getByRole("button", { name: "Backups", exact: true }).click();
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/D:\\(LocalBackup|Backups)\\LocalKnowledgePortal/).first())
     .toBeVisible();

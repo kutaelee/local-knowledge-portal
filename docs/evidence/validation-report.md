@@ -507,3 +507,83 @@ hybrid same query: 26 ms cached, 3 results, confidence high
 
 검색 결과에는 계속 source path, document/version/chunk id, line range, content hash,
 indexed timestamp와 match reason이 포함된다.
+
+## 2026-07-24 프로젝트 지식 정보 구조·UTF-8·서비스 상태 보강
+
+최종 판정: `VERIFIED`
+
+개발 일지 모지베이크의 원인은 Windows PowerShell 훅 wrapper가 redirected stdin의
+인코딩을 명시하지 않아 UTF-8 Stop payload를 활성 code page로 해석한 것이었다.
+repository와 실제 설치 wrapper 모두 입력·출력을 BOM 없는 UTF-8로 고정했다. Collector는
+Stop/SubagentStop의 보고 결과를 hook payload보다 Codex UTF-8 transcript의 동일 turn
+`task_complete.last_agent_message`에서 우선 읽는다.
+
+기존 운영 데이터는 원본 파일을 건드리지 않고 다음처럼 복구·격리했다.
+
+- 손상된 `gpu-workload-scheduler` stop, project journal, candidate를 transcript에서 복구
+- 복구된 journal index를 atomic UTF-8 write로 다시 materialize
+- 추가 손상 Stop 2건을 transcript에서 복구
+- exact task-complete가 없는 legacy activity-only 1건은 삭제하지 않고 `rolled_up`으로 격리
+- 최종 visible activity, journal title/summary, candidate result의 mojibake 탐지: 모두 0
+
+포털 정보 구조는 데이터 경계를 기준으로 분리했다.
+
+- `원본 파일`: repository와 사람이 작성한 문서만 표시하고 Obsidian `_generated` 제외
+- `통합 검색`: source와 managed knowledge를 provenance와 함께 조회
+- `Codex 작업`: 활동과 실행 근거
+- `프로젝트 지식`: 프로젝트 → 작업 특성 트리, 태그 filter, 최신 갱신 순
+- `수집·운영`, `변경 기록`, `문서 관계`: queue/heartbeat, ingest event, link graph
+
+정식 tag key는 기존 영어 canonical value를 유지해 API·index 안정성을 보존하고, 한국어
+UI에서는 `사례: 성능·부하`, `작업 특성: 운영·장애`, `상태: 검증됨`,
+`프로젝트: <name>`으로 표시한다. API도 한국어 filter alias를 canonical tag로
+정규화한다. `knowledge_case`에는 project/category/latest partial B-tree와 tags GIN
+index를 추가했고 schema revision은 `0008_knowledge_navigation`이다.
+
+우측 연결 상태는 `/api/v1/system/services`에서 Docker socket 노출 없이 persistent
+service를 확인한다. 실제 운영 응답은 web, FastAPI, PostgreSQL, embedding Ollama,
+knowledge-editor Ollama, worker, watcher, reconciler, hook collector, host GPU scheduler
+10개였고 모두 `healthy`였다. Hook collector heartbeat도 새로 기록한다.
+
+검색은 ingestion이 Ollama를 점유한 경우 semantic/hybrid 요청이 30초까지 UI를 막던
+문제를 확인했다. query embedding timeout을 5초로 제한하고 실패 시 응답 mode를
+`semantic-degraded-keyword-only` 또는 `hybrid-degraded-keyword-only`로 명시한 뒤
+lexical provenance를 반환한다. 운영 부하 중 측정은 각각 약 5.03초, 결과 5건,
+confidence `low`였다. API 시작 예열도 background task로 전환해 readiness가 예열
+timeout을 기다리지 않는다.
+
+실제 실행·검증:
+
+```text
+uv run ruff check services tests db
+  PASS: All checks passed
+
+uv run pytest tests/unit -q
+  PASS: 72 passed
+
+dedicated DB lkp_test_navigation_20260724
+  PASS: 20 integration tests, 1 upstream deprecation warning
+  포함: clean migration through 0008, queue/recovery/indexing regressions
+
+docker compose ... build api web
+  PASS: API image and Next.js 16.2.11 production/TypeScript build
+
+Playwright 1.61.1 against loopback production services
+  PASS: 5/5 in 25.4s
+  포함: 한/영 메뉴, source explorer, project/work-type knowledge tree,
+        journal/candidate/case, keyword/semantic/hybrid degradation,
+        operations/worker, provenance, GPU queue
+
+live API probes
+  PASS: web HTTP 200
+  PASS: system services 10/10 healthy
+  PASS: verified cases latest ordered
+  PASS: source catalog first 1,000 rows had 0 managed `_generated` leaks
+  PASS: source projects 6 / source documents 2,293
+  PASS: managed projects 5 / managed documents 33
+```
+
+첫 E2E 실행은 기존 30초 hybrid timeout과 새 sidebar 설명으로 인해 모호해진 test
+locator 2건을 발견해 실패했다. Timeout/fallback 로직과 exact accessible locator를
+수정한 뒤 같은 전체 suite를 재실행해 5/5 통과했다. 장시간 endurance와 Windows
+절전 시험은 이번 변경 범위에서도 실행하지 않았다.

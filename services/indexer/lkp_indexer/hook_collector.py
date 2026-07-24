@@ -4,13 +4,14 @@ import argparse
 import json
 import os
 import re
+import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from lkp.db import SessionLocal
-from lkp.models import ActivityEvent, Document, HookSpoolEvent
+from lkp.models import ActivityEvent, Document, HookSpoolEvent, WorkerHeartbeat
 from lkp.settings import Settings, get_settings
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -54,6 +55,7 @@ _REUSABLE_INSTRUCTION = re.compile(
 )
 _MUTATING_TOOLS = {"apply_patch", "write_file", "edit_file"}
 _last_retention_check = 0.0
+_collector_started_at = datetime.now(timezone.utc)
 
 
 def _parse_time(value: str | None) -> datetime:
@@ -184,6 +186,64 @@ def _transcript_turn_instruction(
     if not messages:
         return None
     return "\n\n".join(messages)[:16000]
+
+
+def _transcript_turn_result(
+    payload: dict[str, Any],
+    sessions_root: Path | None,
+    turn_id: str | None,
+    max_bytes: int = 8_000_000,
+) -> str | None:
+    """Read the authoritative UTF-8 final result from the Codex transcript.
+
+    Windows PowerShell 5.1 can decode redirected stdin with the active console
+    code page. The transcript is the local UTF-8 source of truth, so Stop
+    events prefer it over the hook payload and avoid persisting mojibake.
+    """
+
+    if sessions_root is None or not turn_id:
+        return None
+    transcript = payload.get("transcript_path")
+    if not isinstance(transcript, str):
+        return None
+    normalized = transcript.replace("\\", "/")
+    marker = "/.codex/sessions/"
+    marker_index = normalized.casefold().find(marker)
+    if marker_index < 0:
+        return None
+    relative = normalized[marker_index + len(marker) :].lstrip("/")
+    if not relative or ".." in Path(relative).parts:
+        return None
+    root = sessions_root.resolve(strict=False)
+    source = (root / relative).resolve(strict=False)
+    try:
+        source.relative_to(root)
+        with source.open("rb") as handle:
+            size = source.stat().st_size
+            handle.seek(max(0, size - max_bytes))
+            raw = handle.read(max_bytes)
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+    for line in reversed(raw.decode("utf-8", errors="replace").splitlines()):
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict) or item.get("type") != "event_msg":
+            continue
+        record = item.get("payload")
+        if (
+            not isinstance(record, dict)
+            or record.get("type") != "task_complete"
+            or str(record.get("turn_id") or "") != turn_id
+        ):
+            continue
+        result = record.get("last_agent_message")
+        if isinstance(result, str) and result.strip():
+            return result[:16000]
+        return None
+    return None
 
 
 def _exit_code(payload: dict[str, Any], sessions_root: Path | None = None) -> int | None:
@@ -335,6 +395,14 @@ def envelope_to_activity(
             str(turn_id) if turn_id else None,
             transcript_tail_bytes,
         )
+    reported_result = _reported_result(payload, event_name)
+    if event_name in {"Stop", "SubagentStop"}:
+        reported_result = _transcript_turn_result(
+            payload,
+            sessions_root,
+            str(turn_id) if turn_id else None,
+            transcript_tail_bytes,
+        ) or reported_result
     verified_result = None
     verification_status = "UNVERIFIED"
     if event_name == "PostToolUse" and exit_code is not None:
@@ -369,7 +437,7 @@ def envelope_to_activity(
         exit_code=exit_code,
         changed_files=changed_files,
         document_version_ids=_document_versions(session, changed_files, cwd),
-        reported_result=_reported_result(payload, event_name),
+        reported_result=reported_result,
         verified_result=verified_result,
         verification_status=verification_status,
         metadata_json={
@@ -531,6 +599,34 @@ def collect_once(settings: Settings) -> dict[str, int]:
                     retention_days=settings.activity_detail_retention_days,
                 )
                 _last_retention_check = now_monotonic
+            heartbeat = session.get(WorkerHeartbeat, "hook-collector")
+            now = datetime.now(timezone.utc)
+            if heartbeat is None:
+                heartbeat = WorkerHeartbeat(
+                    worker_id="hook-collector",
+                    hostname=socket.gethostname(),
+                    process_id=os.getpid(),
+                    version=settings.pipeline_version,
+                    started_at=_collector_started_at,
+                    state="healthy",
+                    processed_count=0,
+                    failed_count=0,
+                )
+                session.add(heartbeat)
+            elif heartbeat.process_id != os.getpid() or heartbeat.hostname != socket.gethostname():
+                heartbeat.started_at = _collector_started_at
+            heartbeat.hostname = socket.gethostname()
+            heartbeat.process_id = os.getpid()
+            heartbeat.version = settings.pipeline_version
+            heartbeat.last_seen_at = now
+            heartbeat.state = "error" if counts["failed"] else "healthy"
+            heartbeat.processed_count += counts["processed"]
+            heartbeat.failed_count += counts["failed"]
+            heartbeat.metadata_json = {
+                "service": "hook-collector",
+                "spool_root_count": len(settings.hook_spool_roots),
+                "last_poll": counts,
+            }
             session.commit()
         counts.update({f"knowledge_{key}": value for key, value in knowledge_counts.items()})
         counts["activity_details_rolled_up"] = rolled_up
