@@ -81,7 +81,8 @@ this trust boundary, so the portal records `MANUAL_APPROVAL_REQUIRED` until the 
 
 ### Local evidence editor
 
-The default candidate is `gemma4:e4b`. The `ollama-generation` service stores it below
+Historical candidate configuration used `gemma4:e4b`; it is superseded by the current
+GPU-queued editor subsection below. The `ollama-generation` service stores models below
 `E:\AI\Models\Ollama\generation\models`, separately from the CPU embedding model. It remains
 unloaded until the scheduler observes at least 12,288 MB free VRAM, at most 15% utilization, and
 at most 70°C. Busy checks back off from 15 minutes to 4 hours; after six checks the scheduler
@@ -95,17 +96,65 @@ docker exec local-knowledge-portal-ollama-generation-1 ollama list
 docker exec local-knowledge-portal-ollama-generation-1 df -h /model-store
 ```
 
-The model's exact digest and prompt version must pass the built-in three-case qualification before
-automatic publication. A failed E4B qualification leaves the scheduler in `model_rejected`; set
-`LKP_GENERATION_MODEL=gemma4:12b`, pull it explicitly, pin its digest, and rerun the same
-qualification. Do not report either model as sufficient before the recorded result is `PASS`.
-Generated prose never satisfies an evidence gate without independent execution evidence.
+This historical candidate was never authorized merely by being available. Every replacement still
+requires an exact digest and prompt/harness qualification result of `PASS`. Generated prose never
+satisfies an evidence gate without independent execution evidence.
 
 Start or recreate these services only from WSL. Windows `docker compose` can interpret `/mnt/e`
 as a small internal ext4 mount even when E: has ample free space. If `df /model-store` does not
 show `E:\`, stop only `knowledge-curator`, `ollama-generation-model`, and
 `ollama-generation`; correct the invocation and recreate them. Never delete the shared model
 root.
+
+### Current GPU-queued evidence editor
+
+The qualified production editor is `qwen3.5:9b-q4_K_M`, digest
+`6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7`. The
+smaller candidate was not forced into service after it failed to demonstrate reliable structured
+evidence editing.
+
+The persistent curator is disabled from the default Compose profile. Submit one bounded batch
+through the workstation GPU reservation authority:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  \\wsl.localhost\Ubuntu\home\kutae\src\local-knowledge-portal\scripts\curate.ps1
+```
+
+`curate.ps1` checks for an existing `local-knowledge-portal-curation` workload, then calls
+`gpuq run --vram 8192 --eta 45 --priority 40`. It does not run the model directly or queue a
+duplicate workload while an equivalent job is active or waiting. The command starts a one-shot
+`knowledge-curator` container with the `manual-curation` profile. Host scheduling owns GPU
+admission, fairness, safety VRAM, bounded waiting, and job logs.
+
+Register the hourly, non-overlapping submission task:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\install-curation-schedule.ps1 -IntervalMinutes 60
+```
+
+The installer copies only the stable curation entrypoint to
+`C:\Docker\local-knowledge-portal`, backs up a differing prior copy, and registers
+`\LocalKnowledgePortal\CurateKnowledge`. It does not store a scheduler token.
+
+The exact digest passed prompt `evidence-blog-v9` with deterministic harness
+`evidence-gate-v3`. Reported-only success and unmeasured performance claims remained unpublished.
+The model only edits verified inputs. Deterministic code owns candidate state, publication,
+evidence binding, duplicate occurrence, revision, project/tag taxonomy, generated page paths, and
+project overview refresh. The model's `decision` is advisory. There is no minimum article length;
+optional sections are omitted instead of padded.
+
+Inspect the scheduler without triggering inference:
+
+```bash
+curl -s http://127.0.0.1:8010/api/v1/gpu-queue/health
+curl -s http://127.0.0.1:8010/api/v1/gpu-queue/status
+```
+
+The portal's `/gpu-queue` UI and proxy are read-only. The proxy allows only health, status, and a
+UUID-scoped job GET against loopback/`host.docker.internal`; POST and host mutation credentials
+are not exposed.
 
 ## Queue recovery
 

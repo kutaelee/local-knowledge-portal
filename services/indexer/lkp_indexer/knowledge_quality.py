@@ -28,15 +28,12 @@ _GENERIC_CAUSE_PREFIXES = (
 )
 
 
-def _is_low_quality_auto_case(
-    case: KnowledgeCase, candidates: list[KnowledgeCandidate]
-) -> bool:
+def _is_low_quality_auto_case(case: KnowledgeCase, candidates: list[KnowledgeCandidate]) -> bool:
     if not candidates or not case.root_cause.startswith(_GENERIC_CAUSE_PREFIXES):
         return False
     return all(
         (candidate.metadata_json or {}).get("auto_generated") is True
-        and (candidate.metadata_json or {}).get("extractor")
-        == "deterministic-activity-v1"
+        and (candidate.metadata_json or {}).get("extractor") == "deterministic-activity-v1"
         for candidate in candidates
     )
 
@@ -51,11 +48,7 @@ def review_low_quality_auto_cases(
     """Retract generic auto-published cases without deleting their audit trail."""
 
     results: list[dict[str, str | int | bool]] = []
-    cases = list(
-        session.scalars(
-            select(KnowledgeCase).where(KnowledgeCase.status == "verified")
-        )
-    )
+    cases = list(session.scalars(select(KnowledgeCase).where(KnowledgeCase.status == "verified")))
     for case in cases:
         candidate_ids = list(
             session.scalars(
@@ -67,9 +60,7 @@ def review_low_quality_auto_cases(
         candidates = (
             list(
                 session.scalars(
-                    select(KnowledgeCandidate).where(
-                        KnowledgeCandidate.id.in_(candidate_ids)
-                    )
+                    select(KnowledgeCandidate).where(KnowledgeCandidate.id.in_(candidate_ids))
                 )
             )
             if candidate_ids
@@ -118,9 +109,7 @@ def review_low_quality_auto_cases(
         if not relative_path:
             continue
         documents = list(
-            session.scalars(
-                select(Document).where(Document.relative_path == relative_path)
-            )
+            session.scalars(select(Document).where(Document.relative_path == relative_path))
         )
         for document in documents:
             document.state = DocumentState.ignored
@@ -136,19 +125,11 @@ def review_low_quality_auto_cases(
             result["quarantine"] = "source_missing"
             continue
         header = source.read_text(encoding="utf-8", errors="strict")[:4096]
-        if (
-            "managed: true" not in header
-            or "generator: local-knowledge-portal" not in header
-        ):
+        if "managed: true" not in header or "generator: local-knowledge-portal" not in header:
             result["quarantine"] = "refused_non_managed_page"
             continue
 
-        retired_relative = (
-            Path("_generated")
-            / "_retired"
-            / "Knowledge-Cases"
-            / source.name
-        )
+        retired_relative = Path("_generated") / "_retired" / "Knowledge-Cases" / source.name
         target = (vault_dir / retired_relative).resolve(strict=False)
         target.relative_to(managed_root)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -157,9 +138,7 @@ def review_low_quality_auto_cases(
             continue
         os.replace(source, target)
         page = session.scalar(
-            select(GeneratedPage).where(
-                GeneratedPage.relative_path == relative_path
-            )
+            select(GeneratedPage).where(GeneratedPage.relative_path == relative_path)
         )
         if page is not None:
             page.relative_path = retired_relative.as_posix()
@@ -169,18 +148,14 @@ def review_low_quality_auto_cases(
         auto_candidates = list(session.scalars(select(KnowledgeCandidate)))
         for candidate in auto_candidates:
             metadata = candidate.metadata_json or {}
-            if (
-                metadata.get("auto_generated") is not True
-                or candidate.status == "published"
-            ):
+            if metadata.get("auto_generated") is not True or candidate.status == "published":
                 continue
             quality_status, _ = evaluate_quality(candidate)
             if quality_status == "NEEDS_REVIEW":
                 candidate.status = "needs_review"
                 reviewed_candidates += 1
-            if (
-                content_language == "ko"
-                and candidate.root_cause.startswith("Observed implementation in ")
+            if content_language == "ko" and candidate.root_cause.startswith(
+                "Observed implementation in "
             ):
                 candidate_metadata = dict(candidate.metadata_json or {})
                 candidate_metadata.setdefault(
@@ -210,27 +185,19 @@ def review_low_quality_auto_cases(
                 candidate.metadata_json = candidate_metadata
                 evidence_rows = list(
                     session.scalars(
-                        select(EvidenceRecord).where(
-                            EvidenceRecord.candidate_id == candidate.id
-                        )
+                        select(EvidenceRecord).where(EvidenceRecord.candidate_id == candidate.id)
                     )
                 )
                 for evidence in evidence_rows:
-                    if evidence.claim.startswith(
-                        "Observed successful file mutation in "
-                    ):
-                        evidence.claim = (
-                            f"{project}에서 성공한 파일 변경을 관측했습니다."
-                        )
+                    if evidence.claim.startswith("Observed successful file mutation in "):
+                        evidence.claim = f"{project}에서 성공한 파일 변경을 관측했습니다."
                     elif evidence.claim.startswith("Observed successful "):
                         family = evidence.claim.removeprefix("Observed successful ")
                         evidence.claim = f"성공한 {family} 실행을 관측했습니다."
                     elif evidence.claim.startswith("Observed ") and evidence.claim.endswith(
                         " failure"
                     ):
-                        family = evidence.claim.removeprefix("Observed ").removesuffix(
-                            " failure"
-                        )
+                        family = evidence.claim.removeprefix("Observed ").removesuffix(" failure")
                         evidence.claim = f"{family} 실패를 관측했습니다."
                     if (evidence.verified_value or "").startswith("observed exit_code="):
                         evidence.verified_value = evidence.verified_value.replace(
@@ -239,9 +206,7 @@ def review_low_quality_auto_cases(
         retired_documents = list(
             session.scalars(
                 select(Document).where(
-                    Document.relative_path.like(
-                        "_generated/_retired/Knowledge-Cases/%"
-                    )
+                    Document.relative_path.like("_generated/_retired/Knowledge-Cases/%")
                 )
             )
         )

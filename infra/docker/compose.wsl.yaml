@@ -29,9 +29,12 @@ x-app: &app
     LKP_QUERY_EMBEDDING_TIMEOUT_SECONDS: ${LKP_QUERY_EMBEDDING_TIMEOUT_SECONDS:-30}
     LKP_QUERY_EMBEDDING_PREWARM: ${LKP_QUERY_EMBEDDING_PREWARM:-true}
     LKP_SEARCH_STATEMENT_TIMEOUT_MS: ${LKP_SEARCH_STATEMENT_TIMEOUT_MS:-5000}
+    LKP_GPU_SCHEDULER_BASE_URL: ${LKP_GPU_SCHEDULER_BASE_URL:-http://host.docker.internal:8790}
+    LKP_GPU_SCHEDULER_TIMEOUT_SECONDS: ${LKP_GPU_SCHEDULER_TIMEOUT_SECONDS:-2}
     LKP_REPOSITORY_EMBEDDING_MODE: ${LKP_REPOSITORY_EMBEDDING_MODE:-docs_only}
     LKP_PIPELINE_VERSION: ${LKP_PIPELINE_VERSION:-1.2.0}
     LKP_WORKER_JOB_COOLDOWN_SECONDS: ${LKP_WORKER_JOB_COOLDOWN_SECONDS:-1}
+    LKP_WORKER_ID: ${LKP_WORKER_ID:-worker-service:primary}
     LKP_WORKER_BURST_JOBS: ${LKP_WORKER_BURST_JOBS:-20}
     LKP_WORKER_BURST_COOLDOWN_SECONDS: ${LKP_WORKER_BURST_COOLDOWN_SECONDS:-15}
     LKP_WORKER_LEXICAL_JOB_COOLDOWN_SECONDS: ${LKP_WORKER_LEXICAL_JOB_COOLDOWN_SECONDS:-0.05}
@@ -224,8 +227,9 @@ services:
 
   knowledge-curator:
     <<: *app
-    command: ["python", "-m", "lkp_indexer.knowledge_curator"]
-    restart: unless-stopped
+    profiles: ["manual-curation"]
+    command: ["python", "-m", "lkp_indexer.knowledge_curator", "--once"]
+    restart: "no"
     gpus: all
     cpus: "${LKP_KNOWLEDGE_CURATOR_CPUS:-0.5}"
     mem_limit: 768m

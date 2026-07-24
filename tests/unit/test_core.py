@@ -51,6 +51,27 @@ def test_markdown_heading_lines():
     assert chunks[-1].start_line == 6
 
 
+def test_markdown_retrieval_metadata_carries_project_and_value_tags():
+    chunks, metadata = chunk_markdown(
+        "---\n"
+        "project: local-knowledge-portal\n"
+        "tags: [situation:performance, platform:wsl2]\n"
+        "knowledge_value_tier: promote\n"
+        "knowledge_value_labels: [knowledge-value:promote]\n"
+        "private_note: never-copy-to-chunks\n"
+        "---\n"
+        "# CPU guard\n"
+        "bounded worker load"
+    )
+    assert metadata["private_note"] == "never-copy-to-chunks"
+    assert chunks[-1].metadata == {
+        "project": "local-knowledge-portal",
+        "tags": ["situation:performance", "platform:wsl2"],
+        "knowledge_value_tier": "promote",
+        "knowledge_value_labels": ["knowledge-value:promote"],
+    }
+
+
 def test_code_symbols():
     chunks = chunk_code("def first():\n    pass\n\ndef second():\n    pass\n", ".py")
     assert [chunk.symbol_name for chunk in chunks] == ["first", "second"]
@@ -63,17 +84,22 @@ def test_embedding_cost_limit_prevents_unbounded_document_jobs():
             self.content = content
 
     assert embedding_cost_decision(
-        [Chunk("small"), Chunk("document")], max_chunks=4, max_chars=100,
+        [Chunk("small"), Chunk("document")],
+        max_chunks=4,
+        max_chars=100,
         path=Path("docs/runbook.md"),
     ) == (True, None)
-    assert embedding_cost_decision(
-        [Chunk("x")] * 5, max_chunks=4, max_chars=100
-    ) == (False, "chunk_limit")
+    assert embedding_cost_decision([Chunk("x")] * 5, max_chunks=4, max_chars=100) == (
+        False,
+        "chunk_limit",
+    )
     assert embedding_cost_decision(
         [Chunk("x" * 60), Chunk("y" * 60)], max_chunks=4, max_chars=100
     ) == (False, "character_limit")
     assert embedding_cost_decision(
-        [Chunk("dependencies")], max_chunks=4, max_chars=100,
+        [Chunk("dependencies")],
+        max_chunks=4,
+        max_chars=100,
         path=Path("pnpm-lock.yaml"),
     ) == (False, "low_value_artifact")
 
@@ -107,18 +133,22 @@ def test_repository_semantic_policy_separates_code_from_docs(tmp_path: Path):
         include_patterns=["**/*"],
         exclude_patterns=[],
     )
-    assert semantic_policy(
-        tmp_path / "README.md", root, repository_mode="docs_only"
-    ) == (True, None)
-    assert semantic_policy(
-        tmp_path / "model.py", root, repository_mode="docs_only"
-    ) == (False, "repository_docs_only")
-    assert semantic_policy(
-        tmp_path / "model.py", root, repository_mode="code_and_docs"
-    ) == (True, None)
-    assert semantic_policy(
-        nested_dependency / "README.md", root, repository_mode="docs_only"
-    ) == (False, "nested_repository_dependency")
+    assert semantic_policy(tmp_path / "README.md", root, repository_mode="docs_only") == (
+        True,
+        None,
+    )
+    assert semantic_policy(tmp_path / "model.py", root, repository_mode="docs_only") == (
+        False,
+        "repository_docs_only",
+    )
+    assert semantic_policy(tmp_path / "model.py", root, repository_mode="code_and_docs") == (
+        True,
+        None,
+    )
+    assert semantic_policy(nested_dependency / "README.md", root, repository_mode="docs_only") == (
+        False,
+        "nested_repository_dependency",
+    )
 
 
 def test_worker_uses_separate_semantic_and_lexical_rate_limits():

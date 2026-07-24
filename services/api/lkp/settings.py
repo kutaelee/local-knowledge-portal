@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8010
     cors_origins: str = "http://127.0.0.1:3010,http://localhost:3010"
+    gpu_scheduler_base_url: str = "http://host.docker.internal:8790"
+    gpu_scheduler_timeout_seconds: float = Field(default=2.0, ge=0.2, le=10)
     ollama_base_url: str = "http://127.0.0.1:11434"
     embedding_provider: str = "ollama"
     embedding_model: str = "qwen3-embedding:0.6b"
@@ -33,29 +35,21 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=2, ge=1, le=32)
     embedding_batch_cooldown_seconds: float = Field(default=0.5, ge=0, le=60)
     embedding_max_chunks_per_document: int = Field(default=128, ge=1, le=4096)
-    embedding_max_chars_per_document: int = Field(
-        default=250_000, ge=1_000, le=100_000_000
-    )
-    semantic_high_confidence_similarity: float = Field(
-        default=0.6, ge=-1, le=1
-    )
+    embedding_max_chars_per_document: int = Field(default=250_000, ge=1_000, le=100_000_000)
+    semantic_high_confidence_similarity: float = Field(default=0.6, ge=-1, le=1)
     query_embedding_cache_size: int = Field(default=512, ge=1, le=100_000)
-    query_embedding_cache_ttl_seconds: int = Field(
-        default=86_400, ge=60, le=2_592_000
-    )
+    query_embedding_cache_ttl_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
     query_embedding_timeout_seconds: int = Field(default=30, ge=1, le=120)
     query_embedding_prewarm: bool = False
     search_statement_timeout_ms: int = Field(default=5_000, ge=100, le=120_000)
-    repository_embedding_mode: Literal[
-        "docs_only", "code_and_docs", "lexical_only"
-    ] = "docs_only"
+    repository_embedding_mode: Literal["docs_only", "code_and_docs", "lexical_only"] = "docs_only"
     generation_provider: str = "disabled"
     generation_base_url: str = "http://127.0.0.1:11434"
     generation_model: str = ""
     generation_model_digest: str = "unresolved"
     generation_timeout_seconds: int = 120
     generation_max_input_chars: int = 40000
-    generation_prompt_version: str = "evidence-blog-v7"
+    generation_prompt_version: str = "evidence-blog-v9"
     generation_fallback_models: str = "gemma4:12b,qwen3:14b"
     generation_temperature: float = Field(default=0, ge=0, le=2)
     generation_context_window: int = Field(default=16_384, ge=2_048, le=262_144)
@@ -63,31 +57,25 @@ class Settings(BaseSettings):
     knowledge_curation_enabled: bool = False
     knowledge_curation_auto_publish: bool = True
     knowledge_curation_poll_seconds: int = Field(default=60, ge=10, le=3600)
-    knowledge_curation_gpu_min_free_mb: int = Field(
-        default=12_288, ge=1_024, le=131_072
-    )
+    knowledge_curation_gpu_min_free_mb: int = Field(default=12_288, ge=1_024, le=131_072)
     knowledge_curation_gpu_max_utilization: int = Field(default=15, ge=0, le=100)
     knowledge_curation_gpu_max_temperature: int = Field(default=70, ge=20, le=100)
-    knowledge_curation_busy_retry_base_seconds: int = Field(
-        default=900, ge=60, le=86_400
-    )
-    knowledge_curation_busy_retry_max_seconds: int = Field(
-        default=14_400, ge=60, le=604_800
-    )
+    knowledge_curation_busy_retry_base_seconds: int = Field(default=900, ge=60, le=86_400)
+    knowledge_curation_busy_retry_max_seconds: int = Field(default=14_400, ge=60, le=604_800)
     knowledge_curation_busy_max_checks: int = Field(default=6, ge=1, le=100)
     knowledge_curation_exhausted_cooldown_seconds: int = Field(
         default=86_400, ge=3_600, le=2_592_000
     )
     knowledge_curation_batch_size: int = Field(default=1, ge=1, le=10)
     knowledge_curation_min_article_chars: int = Field(default=0, ge=0, le=5000)
-    knowledge_curation_max_article_chars: int = Field(
-        default=10_000, ge=1_000, le=50_000
-    )
+    knowledge_curation_max_article_chars: int = Field(default=10_000, ge=1_000, le=50_000)
     hook_spool_dir: Path = Path("runtime/ingest/codex-spool")
     hook_spool_fallback_dir: Path = Field(
-        default_factory=lambda: Path(os.getenv("LOCALAPPDATA", str(Path.home())))
-        / "LocalKnowledgePortal"
-        / "spool-fallback"
+        default_factory=lambda: (
+            Path(os.getenv("LOCALAPPDATA", str(Path.home())))
+            / "LocalKnowledgePortal"
+            / "spool-fallback"
+        )
     )
     codex_sessions_dir: Path = Path("/codex-sessions")
     hook_collector_poll_seconds: float = 2.0
@@ -98,9 +86,7 @@ class Settings(BaseSettings):
     activity_retention_check_seconds: int = Field(default=3600, ge=60, le=86400)
     mount_guard_paths: str = ""
     mount_guard_nonempty_dirs: str = ""
-    knowledge_transcript_tail_bytes: int = Field(
-        default=8_000_000, ge=1_000_000, le=32_000_000
-    )
+    knowledge_transcript_tail_bytes: int = Field(default=8_000_000, ge=1_000_000, le=32_000_000)
     pipeline_version: str = "1.2.0"
     parser_version: str = "markdown-it-py-4"
     chunker_version: str = "lkp-heading-symbol-v1"
@@ -110,13 +96,12 @@ class Settings(BaseSettings):
     heartbeat_seconds: int = 10
     stale_after_seconds: int = 45
     worker_job_cooldown_seconds: float = Field(default=1.0, ge=0, le=300)
+    worker_id: str = Field(default="worker-service:primary", min_length=3, max_length=200)
     worker_burst_jobs: int = Field(default=20, ge=1, le=10000)
     worker_burst_cooldown_seconds: float = Field(default=15.0, ge=0, le=3600)
     worker_lexical_job_cooldown_seconds: float = Field(default=0.05, ge=0, le=300)
     worker_lexical_burst_jobs: int = Field(default=200, ge=1, le=10000)
-    worker_lexical_burst_cooldown_seconds: float = Field(
-        default=2.0, ge=0, le=3600
-    )
+    worker_lexical_burst_cooldown_seconds: float = Field(default=2.0, ge=0, le=3600)
     worker_pause_file: Path = Path("runtime/embedding.pause")
     worker_pause_poll_seconds: float = Field(default=5.0, ge=0.5, le=300)
     reconciliation_seconds: int = 300
@@ -148,10 +133,26 @@ class Settings(BaseSettings):
             "ollama-generation",
         }:
             raise ValueError(
-                "model providers must use localhost/loopback or the private Docker service "
-                "'ollama'"
+                "model providers must use localhost/loopback or the private Docker service 'ollama'"
             )
         return value
+
+    @field_validator("gpu_scheduler_base_url")
+    @classmethod
+    def local_gpu_scheduler_guard(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme != "http" or parsed.hostname not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+            "host.docker.internal",
+        }:
+            raise ValueError(
+                "GPU scheduler must use loopback or Docker Desktop's host.docker.internal"
+            )
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("GPU scheduler base URL cannot contain a path, query, or fragment")
+        return value.rstrip("/")
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -160,9 +161,7 @@ class Settings(BaseSettings):
     @property
     def codex_home_list(self) -> list[Path]:
         additional = [
-            Path(item.strip())
-            for item in self.codex_additional_homes.split(";")
-            if item.strip()
+            Path(item.strip()) for item in self.codex_additional_homes.split(";") if item.strip()
         ]
         return [self.codex_home, *additional]
 

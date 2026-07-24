@@ -280,9 +280,7 @@ async def run(once: bool = False) -> int:
             asyncio.create_task(
                 _supervise(
                     reconcile_id,
-                    lambda root=root: reconciliation_loop(
-                        SessionLocal, root, settings, stopping
-                    ),
+                    lambda root=root: reconciliation_loop(SessionLocal, root, settings, stopping),
                     stopping,
                     settings.heartbeat_seconds,
                 )

@@ -24,9 +24,7 @@ class ReconcileStats:
     errors: int = 0
 
 
-def reconcile_root(
-    session: Session, source_root: SourceRoot, settings: Settings
-) -> ReconcileStats:
+def reconcile_root(session: Session, source_root: SourceRoot, settings: Settings) -> ReconcileStats:
     scan = scan_root(session, source_root, settings.max_file_bytes)
     stats = ReconcileStats(
         visited=scan.visited,

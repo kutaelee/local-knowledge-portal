@@ -12,9 +12,7 @@ from lkp_indexer.hook_collector import (
 
 def test_apply_patch_response_extracts_exit_code_and_changed_files():
     payload = {
-        "tool_input": {
-            "input": "*** Begin Patch\n*** Update File: src/app.py\n*** End Patch\n"
-        },
+        "tool_input": {"input": "*** Begin Patch\n*** Update File: src/app.py\n*** End Patch\n"},
         "tool_response": (
             "Exit code: 0\nWall time: 0.1 seconds\nOutput:\n"
             "Success. Updated the following files:\nM src/app.py\n"
@@ -68,9 +66,7 @@ def test_exit_code_can_be_resolved_from_read_only_transcript(tmp_path: Path):
         encoding="utf-8",
     )
     payload = {
-        "transcript_path": (
-            r"\\?\C:\Users\kutae\.codex\sessions\2026\07\24\rollout.jsonl"
-        ),
+        "transcript_path": (r"\\?\C:\Users\kutae\.codex\sessions\2026\07\24\rollout.jsonl"),
         "tool_use_id": "call-123",
     }
     assert _exit_code(payload, sessions) == 0
@@ -140,11 +136,7 @@ def test_turn_instruction_is_read_from_bounded_transcript(tmp_path: Path):
         ),
         encoding="utf-8",
     )
-    payload = {
-        "transcript_path": (
-            r"\\?\C:\Users\kutae\.codex\sessions\2026\07\24\rollout.jsonl"
-        )
-    }
+    payload = {"transcript_path": (r"\\?\C:\Users\kutae\.codex\sessions\2026\07\24\rollout.jsonl")}
     assert (
         _transcript_turn_instruction(payload, sessions, "turn-1")
         == "다른 개발 작업도 증거 기반으로 사례화해"

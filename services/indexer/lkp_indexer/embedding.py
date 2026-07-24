@@ -120,10 +120,7 @@ class CachedEmbedder:
         self.misses = 0
 
     def _key(self, text: str) -> str:
-        identity = (
-            f"{self.provider}\0{self.model}\0{self.digest}\0"
-            f"{self.dimension}\0{text}"
-        )
+        identity = f"{self.provider}\0{self.model}\0{self.digest}\0{self.dimension}\0{text}"
         return hashlib.sha256(identity.encode()).hexdigest()
 
     def cache_info(self) -> dict[str, int | float]:

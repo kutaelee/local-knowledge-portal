@@ -111,9 +111,7 @@ def evaluate_mode(
                 provenance.start_line > 0
                 and provenance.end_line >= provenance.start_line
                 and len(provenance.content_hash) == 64
-                and Path(provenance.canonical_path).is_relative_to(
-                    Path(root.canonical_path)
-                )
+                and Path(provenance.canonical_path).is_relative_to(Path(root.canonical_path))
             )
             citations_correct += int(correct)
             filtered_correct = filtered_correct and correct
@@ -145,9 +143,7 @@ def main() -> None:
     engine = create_engine(database_url)
     fixture = Path("tests/fixtures/retrieval").resolve()
     with Session(engine) as session:
-        root = session.scalar(
-            select(SourceRoot).where(SourceRoot.canonical_path == str(fixture))
-        )
+        root = session.scalar(select(SourceRoot).where(SourceRoot.canonical_path == str(fixture)))
         if root is None:
             root = SourceRoot(
                 name="retrieval-evaluation",

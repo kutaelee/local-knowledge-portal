@@ -1,6 +1,10 @@
 from lkp.settings import Settings
-from lkp_indexer.generation import CuratedKnowledgeArticle, EvidenceBoundParagraph
-from lkp_indexer.knowledge import assess_knowledge_value
+from lkp_indexer.generation import (
+    CuratedKnowledgeArticle,
+    EvidenceBoundParagraph,
+    _normalize_curated_payload,
+)
+from lkp_indexer.knowledge import assess_knowledge_value, case_tags
 from lkp_indexer.knowledge_curator import (
     GpuSnapshot,
     busy_retry_seconds,
@@ -113,9 +117,7 @@ def test_value_harness_requires_measured_performance_evidence():
         problem="검색이 느리다.",
         root_cause="부하 원인은 측정되지 않았다.",
         solution="설정을 변경했다.",
-        evidence=[
-            {"evidence_type": "code_change", "verified": True, "exit_code": 0}
-        ],
+        evidence=[{"evidence_type": "code_change", "verified": True, "exit_code": 0}],
     )
     measured = assess_knowledge_value(
         category="performance",
@@ -148,6 +150,22 @@ def test_value_harness_never_reopens_previously_quarantined_activity():
     )
     assert result["tier"] == "activity_only"
     assert "previously_quarantined_activity" in result["blockers"]
+
+
+def test_case_tags_are_project_scoped_and_multi_dimensional():
+    assert case_tags(
+        category="performance",
+        project="Local Knowledge Portal",
+        raw_tags=["platform:WSL2", "Situation:Performance"],
+        knowledge_value={"embedding_labels": ["knowledge-value:promote"]},
+    ) == [
+        "case:performance",
+        "knowledge-value:promote",
+        "lifecycle:verified",
+        "platform:wsl2",
+        "project:local-knowledge-portal",
+        "situation:performance",
+    ]
 
 
 def test_second_curator_stays_standby_when_database_lock_is_held():
@@ -220,7 +238,61 @@ def test_article_value_is_not_decided_by_a_minimum_character_quota():
     assert reasons == []
 
 
-def test_article_with_unsupported_number_or_hype_is_held():
+def test_model_editorial_recommendation_does_not_own_publish_state():
+    draft = _article(decision="needs_review")
+    status, reasons, article = validate_draft(
+        draft,
+        {
+            "E1": "two sentinel files are checked service_runtime.py",
+            "E2": "mount guard tests passed exit_code=0",
+        },
+        Settings(),
+    )
+    assert status == "PASS"
+    assert reasons == []
+    assert "## 무엇을 어떻게 바꿨나" in article
+
+
+def test_optional_context_and_limitations_are_not_padded_or_hard_gated():
+    draft = _article(
+        context=[],
+        limitations=[],
+        unsupported_inferences=["장기 절전 복귀 결과는 확인되지 않았다."],
+    )
+    status, reasons, article = validate_draft(
+        draft,
+        {
+            "E1": "two sentinel files are checked service_runtime.py",
+            "E2": "mount guard tests passed exit_code=0",
+        },
+        Settings(),
+    )
+    assert status == "PASS"
+    assert reasons == []
+    assert "## 상황과 맥락" not in article
+    assert "## 한계와 다음 확인" not in article
+    assert "장기 절전 복귀 결과" not in article
+
+
+def test_explicit_standfirst_evidence_tokens_are_normalized_not_guessed():
+    draft = _article(
+        standfirst="마운트 검증 변경과 테스트 결과를 정리했다. E1, E2",
+        standfirst_evidence_ids=[],
+    )
+    status, reasons, article = validate_draft(
+        draft,
+        {
+            "E1": "two sentinel files are checked service_runtime.py",
+            "E2": "mount guard tests passed exit_code=0",
+        },
+        Settings(),
+    )
+    assert status == "PASS"
+    assert reasons == []
+    assert article.startswith("> 마운트 검증 변경과 테스트 결과를 정리했다. [E1] [E2]")
+
+
+def test_unsupported_number_is_held_but_style_wording_is_not_a_hard_gate():
     settings = Settings(
         knowledge_curation_min_article_chars=300,
         knowledge_curation_max_article_chars=10_000,
@@ -246,7 +318,7 @@ def test_article_with_unsupported_number_or_hype_is_held():
     )
     assert status == "NEEDS_REVIEW"
     assert "verification_unsupported_number" in reasons
-    assert "inflated_language" in reasons
+    assert "inflated_language" not in reasons
 
 
 def test_renderer_owns_citations_and_invalid_evidence_ids_are_held():
@@ -289,9 +361,7 @@ def test_summary_and_paragraph_numbers_must_exist_in_verified_evidence():
         standfirst="근거에는 없는 처리 시간 99ms를 요약에 추가했다.",
         standfirst_evidence_ids=["E1"],
         implementation=[
-            EvidenceBoundParagraph(
-                text="처리 시간이 99ms였다.", evidence_ids=["E1", "E2"]
-            )
+            EvidenceBoundParagraph(text="처리 시간이 99ms였다.", evidence_ids=["E1", "E2"])
         ],
     )
     status, reasons, _article_text = validate_draft(
@@ -329,8 +399,25 @@ def test_invalid_structured_output_rejects_model_instead_of_retrying_forever():
     )
     assert report["status"] == "FAIL"
     assert len(report["results"]) == 3
+    assert report["results"][0]["actual"] == "invalid_structured_output"
+    assert report["results"][0]["reasons"] == ["pydantic_validation_failed"]
     assert all(
-        item["actual"] == "invalid_structured_output"
-        and item["reasons"] == ["pydantic_validation_failed"]
-        for item in report["results"]
+        item["actual"] == "held" and item["decision"] == "deterministic_harness_hold"
+        for item in report["results"][1:]
     )
+
+
+def test_uncited_extra_paragraphs_are_dropped_without_guessing_evidence():
+    payload = _article().model_dump()
+    payload["context"].append({"text": "모델이 덧붙인 출처 없는 설명", "evidence_ids": []})
+    normalized = _normalize_curated_payload(payload)
+    assert len(normalized.context) == 1
+    assert normalized.context[0].evidence_ids == ["E1", "E2"]
+
+
+def test_non_publish_editorial_recommendation_keeps_evidence_bound_content():
+    payload = _article(decision="needs_review").model_dump()
+    normalized = _normalize_curated_payload(payload)
+    assert normalized.decision == "needs_review"
+    assert normalized.title
+    assert normalized.context

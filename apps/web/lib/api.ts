@@ -83,6 +83,8 @@ export type TreeItem = {
 
 export type SearchResult = {
   title: string;
+  project: string | null;
+  tags: string[];
   heading_or_symbol: string | null;
   snippet: string;
   lexical_rank: number | null;

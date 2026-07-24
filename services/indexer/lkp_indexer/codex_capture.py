@@ -132,11 +132,7 @@ def parse_transcript(path: Path) -> Transcript:
                 session_id = str(payload.get("session_id") or payload.get("id") or "")
                 started_at = str(payload.get("timestamp") or timestamp or "")
                 cwd = str(payload.get("cwd") or "")
-                workspace = (
-                    PureWindowsPath(cwd).name
-                    if "\\" in cwd
-                    else Path(cwd).name
-                )
+                workspace = PureWindowsPath(cwd).name if "\\" in cwd else Path(cwd).name
                 originator = str(payload.get("originator") or originator)
                 cli_version = str(payload.get("cli_version") or "")
                 continue
@@ -309,9 +305,11 @@ def _generation_source_text(transcript: Transcript, max_chars: int) -> str:
         selected.append(rendered)
         used += len(rendered)
     selected.reverse()
-    prefix = "[Earlier messages omitted deterministically]\n\n" if len(selected) < len(
-        transcript.messages
-    ) else ""
+    prefix = (
+        "[Earlier messages omitted deterministically]\n\n"
+        if len(selected) < len(transcript.messages)
+        else ""
+    )
     return prefix + "\n\n".join(selected)
 
 
@@ -506,9 +504,7 @@ def sync_one(
 
 def _transcripts(codex_homes: list[Path]) -> list[Path]:
     files = [
-        transcript
-        for home in codex_homes
-        for transcript in (home / "sessions").glob("**/*.jsonl")
+        transcript for home in codex_homes for transcript in (home / "sessions").glob("**/*.jsonl")
     ]
     return sorted(files, key=lambda item: item.stat().st_mtime_ns)
 
@@ -523,10 +519,7 @@ def watch(
     import_existing: bool,
 ) -> None:
     files = _transcripts(codex_homes)
-    known = {
-        path: (path.stat().st_mtime_ns, path.stat().st_size)
-        for path in files
-    }
+    known = {path: (path.stat().st_mtime_ns, path.stat().st_size) for path in files}
     if import_existing:
         for path in files:
             sync_one(

@@ -77,12 +77,11 @@ def assess_knowledge_value(
 
     metadata = dict(metadata or {})
     verified = [item for item in evidence if _evidence_value(item, "verified", False)]
-    evidence_types = {
-        str(_evidence_value(item, "evidence_type", "")) for item in verified
-    }
+    evidence_types = {str(_evidence_value(item, "evidence_type", "")) for item in verified}
     failed = any(
         _evidence_value(item, "exit_code") not in {None, 0}
-        or _evidence_value(item, "evidence_type") in {
+        or _evidence_value(item, "evidence_type")
+        in {
             "command_failure",
             "incident_failure",
         }
@@ -100,9 +99,7 @@ def assess_knowledge_value(
         for item in verified
     )
     changed = bool(evidence_types & {"code_change", "document_version"})
-    validation = bool(
-        evidence_types & {"build_pass", "command_success", "test_pass"}
-    )
+    validation = bool(evidence_types & {"build_pass", "command_success", "test_pass"})
     performance = {
         "performance_before",
         "performance_after",
@@ -113,14 +110,12 @@ def assess_knowledge_value(
     generic_structure = (
         root_cause.startswith("Observed implementation in ")
         or solution.startswith("Changed artifacts:")
-        or "재사용 가능한 원인이나 구현 결정은 아직 구조화되지 않았습니다"
-        in root_cause
+        or "재사용 가능한 원인이나 구현 결정은 아직 구조화되지 않았습니다" in root_cause
     )
     structured = bool(metadata.get("structured_knowledge"))
     if not metadata.get("auto_generated"):
         structured = structured or (
-            min(len(problem.strip()), len(root_cause.strip()), len(solution.strip()))
-            >= 12
+            min(len(problem.strip()), len(root_cause.strip()), len(solution.strip())) >= 12
             and not generic_structure
         )
 
@@ -135,9 +130,7 @@ def assess_knowledge_value(
         for path in changed_paths
         if PurePosixPath(path.replace("\\", "/")).suffix
     }
-    presentation_only = bool(path_suffixes) and path_suffixes.issubset(
-        _PRESENTATION_ONLY_SUFFIXES
-    )
+    presentation_only = bool(path_suffixes) and path_suffixes.issubset(_PRESENTATION_ONLY_SUFFIXES)
 
     signals: list[str] = []
     blockers: list[str] = []
@@ -271,14 +264,11 @@ def create_candidate(
 
 def evaluate_gate(session: Session, candidate: KnowledgeCandidate) -> str:
     evidence = list(
-        session.scalars(
-            select(EvidenceRecord).where(EvidenceRecord.candidate_id == candidate.id)
-        )
+        session.scalars(select(EvidenceRecord).where(EvidenceRecord.candidate_id == candidate.id))
     )
     verified_types = {item.evidence_type for item in evidence if item.verified}
     failed_command = any(
-        item.verified and item.exit_code is not None and item.exit_code != 0
-        for item in evidence
+        item.verified and item.exit_code is not None and item.exit_code != 0 for item in evidence
     )
     successful_command = any(item.verified and item.exit_code == 0 for item in evidence)
     passed = False
@@ -289,9 +279,8 @@ def evaluate_gate(session: Session, candidate: KnowledgeCandidate) -> str:
             and bool(verified_types & {"code_change", "document_version"})
         )
     elif candidate.category in {"implementation", "custom_success"}:
-        passed = (
-            bool(verified_types & {"code_change", "document_version"})
-            and bool(verified_types & {"test_pass", "build_pass", "command_success"})
+        passed = bool(verified_types & {"code_change", "document_version"}) and bool(
+            verified_types & {"test_pass", "build_pass", "command_success"}
         )
     elif candidate.category == "performance":
         passed = {
@@ -401,12 +390,18 @@ def evaluate_quality(candidate: KnowledgeCandidate) -> tuple[str, list[str]]:
         reasons.append("knowledge_value_harness_not_promotable")
 
     curation_validated = (
-        metadata.get("approval_policy") == "local_llm_evidence_bound"
+        metadata.get("approval_policy")
+        in {
+            "local_llm_evidence_bound",
+            "deterministic_evidence_gate_with_llm_editor",
+        }
         and metadata.get("curation_validation_status") == "PASS"
     )
-    status = "PASS" if not reasons and (
-        not metadata.get("auto_generated") or curation_validated
-    ) else "NEEDS_REVIEW"
+    status = (
+        "PASS"
+        if not reasons and (not metadata.get("auto_generated") or curation_validated)
+        else "NEEDS_REVIEW"
+    )
     if metadata.get("auto_generated") and not curation_validated:
         reasons.append("local_llm_evidence_validation_required")
     metadata.update(
@@ -414,7 +409,7 @@ def evaluate_quality(candidate: KnowledgeCandidate) -> tuple[str, list[str]]:
             "quality_gate_status": status,
             "quality_gate_reasons": reasons,
             "approval_policy": (
-                "local_llm_evidence_bound"
+                "deterministic_evidence_gate_with_llm_editor"
                 if curation_validated
                 else metadata.get("approval_policy", "human_review")
             ),
@@ -426,9 +421,7 @@ def evaluate_quality(candidate: KnowledgeCandidate) -> tuple[str, list[str]]:
 
 def _evidence_summary(session: Session, candidate_id: uuid.UUID) -> dict[str, Any]:
     evidence = list(
-        session.scalars(
-            select(EvidenceRecord).where(EvidenceRecord.candidate_id == candidate_id)
-        )
+        session.scalars(select(EvidenceRecord).where(EvidenceRecord.candidate_id == candidate_id))
     )
     return {
         "verified_count": sum(item.verified for item in evidence),
@@ -466,9 +459,9 @@ def _new_revision(
             "content_language": candidate_metadata.get("content_language"),
             "curation": candidate_metadata.get("curation"),
             "knowledge_value": candidate_metadata.get("knowledge_value"),
-            "evidence_bound_claims": candidate_metadata.get(
-                "evidence_bound_claims"
-            ),
+            "project": candidate_metadata.get("project"),
+            "tags": _case_tags_from_candidate(candidate),
+            "evidence_bound_claims": candidate_metadata.get("evidence_bound_claims"),
         },
         evidence_summary=_evidence_summary(session, candidate.id),
     )
@@ -478,9 +471,62 @@ def _new_revision(
     return revision
 
 
+_CATEGORY_SITUATION_TAG = {
+    "error_resolution": "situation:troubleshooting",
+    "implementation": "situation:implementation",
+    "custom_success": "situation:implementation",
+    "performance": "situation:performance",
+    "operations": "situation:operations",
+}
+
+
+def _normalized_tag(value: Any) -> str | None:
+    cleaned = re.sub(r"\s+", "-", str(value).strip().lower())
+    cleaned = re.sub(r"[^0-9a-z가-힣_.:-]+", "-", cleaned).strip("-")
+    return cleaned[:120] or None
+
+
+def case_tags(
+    *,
+    category: str,
+    project: str | None,
+    raw_tags: list[Any] | str | None = None,
+    knowledge_value: dict[str, Any] | None = None,
+) -> list[str]:
+    raw_tags = raw_tags or []
+    if isinstance(raw_tags, str):
+        raw_tags = [raw_tags]
+    value = knowledge_value or {}
+    labels = value.get("embedding_labels") or [] if isinstance(value, dict) else []
+    tags: set[str] = {
+        "lifecycle:verified",
+        f"case:{category}",
+    }
+    situation = _CATEGORY_SITUATION_TAG.get(category)
+    if situation:
+        tags.add(situation)
+    normalized_project = _normalized_tag(project)
+    if normalized_project:
+        tags.add(f"project:{normalized_project}")
+    for item in [*raw_tags, *labels]:
+        if normalized := _normalized_tag(item):
+            tags.add(normalized)
+    return sorted(tags)
+
+
+def _case_tags_from_candidate(candidate: KnowledgeCandidate) -> list[str]:
+    metadata = dict(candidate.metadata_json or {})
+    return case_tags(
+        category=candidate.category,
+        project=metadata.get("project"),
+        raw_tags=metadata.get("tags"),
+        knowledge_value=metadata.get("knowledge_value"),
+    )
+
+
 def _case_metadata_from_candidate(candidate: KnowledgeCandidate) -> dict[str, Any]:
     metadata = dict(candidate.metadata_json or {})
-    return {
+    result = {
         key: metadata[key]
         for key in (
             "article_markdown",
@@ -491,9 +537,12 @@ def _case_metadata_from_candidate(candidate: KnowledgeCandidate) -> dict[str, An
             "evidence_bound_claims",
             "approval_policy",
             "knowledge_value",
+            "project",
         )
         if metadata.get(key) is not None
     }
+    result["tags"] = _case_tags_from_candidate(candidate)
+    return result
 
 
 def publish_candidate(
@@ -514,11 +563,7 @@ def publish_candidate(
             candidate.evidence_gate_status = "NEEDS_REVIEW"
             return None, "NEEDS_REVIEW"
         target = session.get(KnowledgeCase, target_id)
-        if (
-            target is None
-            or target.status != "verified"
-            or target.category != candidate.category
-        ):
+        if target is None or target.status != "verified" or target.category != candidate.category:
             candidate.status = "needs_review"
             candidate.evidence_gate_status = "NEEDS_REVIEW"
             return None, "NEEDS_REVIEW"
@@ -600,10 +645,9 @@ def publish_candidate(
     candidate_text = " ".join([candidate.problem, candidate.root_cause, candidate.solution])
     for case in cases:
         case_text = " ".join([case.problem, case.root_cause, case.solution])
-        if (
-            _jaccard(candidate_text, case_text) >= 0.55
-            and candidate.similarity_key != similarity_key(case.symptom)
-        ):
+        if _jaccard(
+            candidate_text, case_text
+        ) >= 0.55 and candidate.similarity_key != similarity_key(case.symptom):
             candidate.status = "needs_review"
             candidate.evidence_gate_status = "NEEDS_REVIEW"
             candidate.metadata_json = {

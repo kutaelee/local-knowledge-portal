@@ -20,9 +20,7 @@ from .knowledge import (
     publish_candidate,
 )
 
-_PROJECT_PATH = re.compile(
-    r"(?ix)(?:[a-z]:/dev/repos|/home/[^/]+/src)/(?P<project>[^/\\]+)"
-)
+_PROJECT_PATH = re.compile(r"(?ix)(?:[a-z]:/dev/repos|/home/[^/]+/src)/(?P<project>[^/\\]+)")
 _MEANINGFUL_SUFFIXES = {
     ".c",
     ".cpp",
@@ -67,24 +65,20 @@ _PROGRESS_LEAD = re.compile(
     r"요청\s*범위.*partial|아니요|초기\s*상태|아직\s*최종|"
     r"목표는\s*활성|partial\b|in\s+progress\b)"
 )
-_SECRET_ARGUMENT = re.compile(
-    r"(?i)(password|passwd|token|secret|api[_-]?key|authorization)"
-)
-_LABELED_CAUSE = re.compile(
-    r"(?im)^\s*(?:[-*]\s*)?(?:원인|root\s+cause|cause)\s*[:：]\s*(.+?)\s*$"
-)
+_SECRET_ARGUMENT = re.compile(r"(?i)(password|passwd|token|secret|api[_-]?key|authorization)")
+_LABELED_CAUSE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?:원인|root\s+cause|cause)\s*[:：]\s*(.+?)\s*$")
 _LABELED_SOLUTION = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:조치|해결|수정|solution|resolution|fix)\s*[:：]\s*(.+?)\s*$"
 )
-_LABELED_GOAL = re.compile(
-    r"(?im)^\s*(?:[-*]\s*)?(?:목표|문제|goal|problem)\s*[:：]\s*(.+?)\s*$"
-)
+_LABELED_GOAL = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?:목표|문제|goal|problem)\s*[:：]\s*(.+?)\s*$")
 _LABELED_APPROACH = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:구현\s*방식|방식|접근|approach|implementation)\s*[:：]\s*(.+?)\s*$"
 )
 _LABELED_VERIFICATION = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:검증|확인\s*결과|verification|validated\s*result)\s*[:：]\s*(.+?)\s*$"
 )
+
+
 @dataclass(frozen=True)
 class TurnSummary:
     project: str
@@ -227,9 +221,7 @@ def summarize_turn(session: Session, stop: ActivityEvent) -> TurnSummary:
     )
 
 
-def _candidate_evidence(
-    summary: TurnSummary, content_language: str = "ko"
-) -> list[dict]:
+def _candidate_evidence(summary: TurnSummary, content_language: str = "ko") -> list[dict]:
     records: list[dict] = []
     korean = content_language == "ko"
     for event in summary.change_events[:20]:
@@ -287,9 +279,7 @@ def _candidate_evidence(
                     else f"Observed successful {family}"
                 ),
                 "locator": family,
-                "verified_value": (
-                    "관측된 exit_code=0" if korean else "observed exit_code=0"
-                ),
+                "verified_value": ("관측된 exit_code=0" if korean else "observed exit_code=0"),
                 "exit_code": 0,
                 "verified": True,
             }
@@ -297,23 +287,26 @@ def _candidate_evidence(
     return records
 
 
-def _candidate_fields(
-    summary: TurnSummary, content_language: str = "ko"
-) -> dict[str, str]:
+def _candidate_fields(summary: TurnSummary, content_language: str = "ko") -> dict[str, str]:
     report_title = _first_line(summary.report, limit=140)
     instruction_title = _first_line(summary.instruction, limit=240)
     korean = content_language == "ko"
-    title = report_title or instruction_title or (
-        f"{summary.project} 검증 작업" if korean else f"{summary.project} verified change"
+    title = (
+        report_title
+        or instruction_title
+        or (f"{summary.project} 검증 작업" if korean else f"{summary.project} verified change")
     )
-    goal = instruction_title or report_title or (
-        f"{summary.project}에서 검증된 개발 작업"
-        if korean
-        else f"Verified development work in {summary.project}"
+    goal = (
+        instruction_title
+        or report_title
+        or (
+            f"{summary.project}에서 검증된 개발 작업"
+            if korean
+            else f"Verified development work in {summary.project}"
+        )
     )
     file_names = [
-        PurePosixPath(path.replace("\\", "/")).name
-        for path in summary.changed_files[:12]
+        PurePosixPath(path.replace("\\", "/")).name for path in summary.changed_files[:12]
     ]
     validation_families = sorted(
         {_safe_command_family(item.command) for item in summary.successful_events}
@@ -369,8 +362,7 @@ def finalize_stop(
 ) -> tuple[KnowledgeCandidate | None, str]:
     existing = session.scalar(
         select(KnowledgeCandidate).where(
-            KnowledgeCandidate.metadata_json["source_stop_activity_id"].astext
-            == str(stop.id)
+            KnowledgeCandidate.metadata_json["source_stop_activity_id"].astext == str(stop.id)
         )
     )
     if existing is not None:
@@ -378,11 +370,7 @@ def finalize_stop(
 
     summary = summarize_turn(session, stop)
     metadata = dict(stop.metadata_json or {})
-    if (
-        not summary.report.strip()
-        or not summary.changed_files
-        or not summary.successful_events
-    ):
+    if not summary.report.strip() or not summary.changed_files or not summary.successful_events:
         metadata["knowledge_pipeline"] = {
             "state": "activity_only",
             "reason": (
@@ -410,10 +398,7 @@ def finalize_stop(
         fields["solution"] = labeled_solution.group(1)[:4000]
         structured_knowledge = True
     elif (
-        category == "implementation"
-        and labeled_goal
-        and labeled_approach
-        and labeled_verification
+        category == "implementation" and labeled_goal and labeled_approach and labeled_verification
     ):
         fields["problem"] = labeled_goal.group(1)[:2000]
         fields["symptom"] = labeled_goal.group(1)[:2000]

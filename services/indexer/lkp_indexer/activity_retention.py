@@ -23,9 +23,7 @@ def roll_up_activity_details(
     current = now or datetime.now(timezone.utc)
     cutoff = current - timedelta(days=retention_days)
     linked_evidence = exists(
-        select(EvidenceRecord.id).where(
-            EvidenceRecord.activity_id == ActivityEvent.id
-        )
+        select(EvidenceRecord.id).where(EvidenceRecord.activity_id == ActivityEvent.id)
     )
     rows = list(
         session.scalars(

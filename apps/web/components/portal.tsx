@@ -10,7 +10,7 @@ import {
   Activity, AlertTriangle, Blocks, BookOpen, ChevronDown, ChevronRight,
   CircleCheck, Clock3, Command, Database, FileCode2, Files, Folder,
   GitBranch, HeartPulse, LayoutDashboard, Moon, Network, PanelRightClose,
-  RefreshCcw, Search, ServerCog, Sun, TerminalSquare, BookCheck, Languages,
+  RefreshCcw, Search, ServerCog, Sun, TerminalSquare, BookCheck, Languages, Cpu,
 } from "lucide-react";
 import gsap from "gsap";
 import {
@@ -49,6 +49,7 @@ const translations = {
       overview: "현황", explorer: "저장소 탐색", document: "문서",
       search: "검색", activities: "활동 이력", knowledge: "지식 사례",
       operations: "운영", timeline: "변경 타임라인", graph: "지식 그래프",
+      gpuQueue: "GPU 작업 큐",
     },
     workspace: "작업 공간",
     globalSearch: "문서, 경로, 코드 심볼 검색…",
@@ -155,6 +156,12 @@ const translations = {
       mode: "검색 방식",
       modes: { hybrid: "하이브리드", keyword: "키워드", semantic: "의미", path: "경로", symbol: "심볼" },
       submit: "검색",
+      project: "프로젝트",
+      allProjects: "전체 프로젝트",
+      tags: "상황 태그",
+      tagAll: "선택 태그 모두",
+      tagAny: "선택 태그 중 하나",
+      clearTags: "태그 해제",
       results: "개 결과",
       confidence: "신뢰도",
       loadError: "검색에 실패했습니다. 의미 검색에는 Ollama가 필요하지만 키워드 검색은 계속 사용할 수 있습니다.",
@@ -218,6 +225,7 @@ const translations = {
       overview: "Overview", explorer: "Repository explorer", document: "Document",
       search: "Search", activities: "Activity", knowledge: "Knowledge cases",
       operations: "Operations", timeline: "Timeline", graph: "Knowledge graph",
+      gpuQueue: "GPU queue",
     },
     workspace: "Workspace",
     globalSearch: "Search documents, paths, symbols…",
@@ -320,6 +328,8 @@ const translations = {
       mode: "Search mode",
       modes: { hybrid: "Hybrid", keyword: "Keyword", semantic: "Semantic", path: "Path", symbol: "Symbol" },
       submit: "Search", results: " results", confidence: "confidence",
+      project: "Project", allProjects: "All projects", tags: "Situation tags",
+      tagAll: "Match all selected", tagAny: "Match any selected", clearTags: "Clear tags",
       loadError: "Search failed. Semantic mode requires Ollama; keyword mode remains available.",
       emptyTitle: "No grounded result",
       emptyDetail: "Try a filename, path segment, exact symbol, or broader wording.",
@@ -485,6 +495,7 @@ export function Portal() {
               <item.icon size={17} /> {text.nav[item.id]}
             </button>
           ))}
+          <a href="/gpu-queue"><Cpu size={17} /> {text.nav.gpuQueue}</a>
         </nav>
         <div className="sidebar-bottom">
           <p>{text.pipeline}</p>
@@ -817,11 +828,24 @@ function SearchView({ initialQuery, onSelect, locale }: {
   const [value, setValue] = useState(initialQuery);
   const [mode, setMode] = useState("hybrid");
   const [submitted, setSubmitted] = useState(initialQuery);
+  const [project, setProject] = useState("");
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [tagMode, setTagMode] = useState<"all" | "any">("all");
   const parent = useRef<HTMLDivElement>(null);
+  const facets = useQuery({
+    queryKey: ["search-facets"],
+    queryFn: () => api<{
+      projects: { name: string; count: number }[];
+      tags: { name: string; count: number }[];
+    }>("/api/v1/search/facets"),
+  });
   const results = useQuery({
-    queryKey: ["search", submitted, mode],
+    queryKey: ["search", submitted, mode, project, selectedTags, tagMode],
     queryFn: () => api<{ confidence: string; results: SearchResult[]; total: number }>("/api/v1/search/hybrid", {
-      method: "POST", body: JSON.stringify({ query: submitted, mode, top_k: 50 }),
+      method: "POST", body: JSON.stringify({
+        query: submitted, mode, top_k: 50,
+        project: project || null, tags: selectedTags, tag_mode: tagMode,
+      }),
     }),
     enabled: submitted.trim().length > 0,
   });
@@ -840,6 +864,35 @@ function SearchView({ initialQuery, onSelect, locale }: {
             <option key={value} value={value}>{label}</option>)}
         </select><button className="primary">{text.submit}</button>
       </form>
+      <div className="search-filters" aria-label={text.tags}>
+        <label>{text.project}
+          <select value={project} onChange={(event) => setProject(event.target.value)}>
+            <option value="">{text.allProjects}</option>
+            {facets.data?.projects.map((item) =>
+              <option key={item.name} value={item.name}>{item.name} ({item.count})</option>)}
+          </select>
+        </label>
+        <label>{text.tags}
+          <select value={tagMode} onChange={(event) =>
+            setTagMode(event.target.value as "all" | "any")}>
+            <option value="all">{text.tagAll}</option>
+            <option value="any">{text.tagAny}</option>
+          </select>
+        </label>
+        <div className="tag-filter-list">
+          {facets.data?.tags.slice(0, 24).map((item) => {
+            const active = selectedTags.includes(item.name);
+            return <button type="button" key={item.name} className={active ? "active" : ""}
+              aria-pressed={active} onClick={() => setSelectedTags((current) =>
+                active ? current.filter((tag) => tag !== item.name) : [...current, item.name])}>
+              {item.name}<small>{item.count}</small>
+            </button>;
+          })}
+          {!!selectedTags.length && <button type="button" onClick={() => setSelectedTags([])}>
+            {text.clearTags}
+          </button>}
+        </div>
+      </div>
       <div className="result-meta"><span>{results.data?.total ?? 0}{text.results}</span>
         {results.data && <span className={`confidence ${results.data.confidence}`}>
           {results.data.confidence} {text.confidence}</span>}</div>
@@ -855,6 +908,9 @@ function SearchView({ initialQuery, onSelect, locale }: {
               <div className="result-title"><FileCode2 size={17} /><strong>{result.title}</strong>
                 <span>L{result.provenance.start_line}–{result.provenance.end_line}</span></div>
               <p className="path">{result.provenance.source_root} / {result.provenance.relative_path}</p>
+              {!!result.tags.length && <div className="result-tags">
+                {result.tags.slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}
+              </div>}
               {result.heading_or_symbol && <h3>{result.heading_or_symbol}</h3>}
               <p className="snippet">{result.snippet}</p>
               <div className="score-row">

@@ -146,31 +146,45 @@ def test_activity_signal_filters_noise_and_keeps_reusable_evidence():
 
     assert activity_signal(envelope("SessionStart")) == (False, ["lifecycle_only"])
     assert activity_signal(envelope("UserPromptSubmit", prompt="?"))[0] is False
-    assert activity_signal(
-        envelope("UserPromptSubmit", prompt="검색 실패 원인을 찾아 재발하지 않게 수정해줘")
-    )[0] is True
+    assert (
+        activity_signal(
+            envelope("UserPromptSubmit", prompt="검색 실패 원인을 찾아 재발하지 않게 수정해줘")
+        )[0]
+        is True
+    )
     assert activity_signal(
         envelope(
             "UserPromptSubmit",
             prompt="오늘 확인한 문서 내용을 간단하게 다시 설명해 주세요",
         )
     ) == (False, ["general_prompt_without_knowledge_signal"])
-    assert activity_signal(
-        envelope(
-            "PostToolUse",
-            tool_name="shell_command",
-            tool_input={"command": "Get-ChildItem"},
-            exit_code=0,
-        )
-    )[0] is False
-    assert activity_signal(
-        envelope(
-            "PostToolUse",
-            tool_name="shell_command",
-            tool_input={"command": "pytest tests/unit"},
-            exit_code=0,
-        )
-    )[0] is True
-    assert activity_signal(
-        envelope("Stop", last_assistant_message="테스트를 실행하지 않고 성공이라고 보고했습니다.")
-    )[0] is True
+    assert (
+        activity_signal(
+            envelope(
+                "PostToolUse",
+                tool_name="shell_command",
+                tool_input={"command": "Get-ChildItem"},
+                exit_code=0,
+            )
+        )[0]
+        is False
+    )
+    assert (
+        activity_signal(
+            envelope(
+                "PostToolUse",
+                tool_name="shell_command",
+                tool_input={"command": "pytest tests/unit"},
+                exit_code=0,
+            )
+        )[0]
+        is True
+    )
+    assert (
+        activity_signal(
+            envelope(
+                "Stop", last_assistant_message="테스트를 실행하지 않고 성공이라고 보고했습니다."
+            )
+        )[0]
+        is True
+    )

@@ -10,6 +10,8 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=10, ge=1, le=100)
     source_root_id: UUID | None = None
     project: str | None = None
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    tag_mode: Literal["all", "any"] = "all"
     path_prefix: str | None = None
     embedding_revision: str | None = None
     minimum_similarity: float = Field(default=0.5, ge=-1, le=1)
@@ -30,6 +32,8 @@ class Provenance(BaseModel):
 
 class SearchResult(BaseModel):
     title: str
+    project: str | None = None
+    tags: list[str] = Field(default_factory=list)
     heading_or_symbol: str | None
     snippet: str
     lexical_rank: float | None

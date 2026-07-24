@@ -30,6 +30,7 @@ from .models import (
     DocumentChunk,
     DocumentLink,
     DocumentState,
+    DocumentTag,
     DocumentVersion,
     EvidenceRecord,
     IngestEvent,
@@ -42,6 +43,7 @@ from .models import (
     KnowledgeOccurrence,
     SourceRoot,
     SystemSetting,
+    Tag,
     WorkerHeartbeat,
 )
 from .schemas import (
@@ -183,6 +185,57 @@ def ready(db: Session = Depends(get_db)) -> dict:
     }
 
 
+def _gpu_scheduler_get(path: str) -> dict:
+    try:
+        response = httpx.get(
+            f"{settings.gpu_scheduler_base_url}{path}",
+            timeout=settings.gpu_scheduler_timeout_seconds,
+            follow_redirects=False,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            504,
+            detail={"service": "gpu-scheduler", "status": "timeout"},
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            502,
+            detail={
+                "service": "gpu-scheduler",
+                "status": "upstream_error",
+                "upstream_status": exc.response.status_code,
+            },
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(
+            503,
+            detail={"service": "gpu-scheduler", "status": "unavailable"},
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            502,
+            detail={"service": "gpu-scheduler", "status": "invalid_response"},
+        )
+    return payload
+
+
+@app.get("/api/v1/gpu-queue/health")
+def gpu_queue_health() -> dict:
+    return _gpu_scheduler_get("/api/health")
+
+
+@app.get("/api/v1/gpu-queue/status")
+def gpu_queue_status() -> dict:
+    return _gpu_scheduler_get("/api/status")
+
+
+@app.get("/api/v1/gpu-queue/jobs/{job_id}")
+def gpu_queue_job(job_id: uuid.UUID) -> dict:
+    return _gpu_scheduler_get(f"/api/jobs/{job_id}")
+
+
 @app.get("/api/v1/search", response_model=SearchResponse)
 def keyword_search(
     q: str = Query(min_length=1, max_length=500),
@@ -211,6 +264,38 @@ def hybrid_search(request: SearchRequest, db: Session = Depends(get_db)) -> Sear
     return response
 
 
+@app.get("/api/v1/search/facets")
+def search_facets(db: Session = Depends(get_db)) -> dict:
+    active = (
+        select(Document.id, Document.project_key)
+        .join(SourceRoot, SourceRoot.id == Document.source_root_id)
+        .where(
+            Document.state == DocumentState.active,
+            SourceRoot.data_scope == "production",
+        )
+        .subquery()
+    )
+    projects = db.execute(
+        select(active.c.project_key, func.count())
+        .where(active.c.project_key.is_not(None))
+        .group_by(active.c.project_key)
+        .order_by(func.count().desc(), active.c.project_key)
+        .limit(200)
+    ).all()
+    tags = db.execute(
+        select(Tag.name, func.count(func.distinct(DocumentTag.document_id)))
+        .join(DocumentTag, DocumentTag.tag_id == Tag.id)
+        .join(active, active.c.id == DocumentTag.document_id)
+        .group_by(Tag.name)
+        .order_by(func.count(func.distinct(DocumentTag.document_id)).desc(), Tag.name)
+        .limit(200)
+    ).all()
+    return {
+        "projects": [{"name": name, "count": count} for name, count in projects],
+        "tags": [{"name": name, "count": count} for name, count in tags],
+    }
+
+
 @app.post("/api/v1/rag/context")
 def rag_context(request: RagRequest, db: Session = Depends(get_db)) -> dict:
     search_request = SearchRequest(
@@ -218,6 +303,8 @@ def rag_context(request: RagRequest, db: Session = Depends(get_db)) -> dict:
         mode="hybrid",
         top_k=request.top_k,
         project=request.filters.get("project"),
+        tags=request.filters.get("tags") or [],
+        tag_mode=request.filters.get("tag_mode") or "all",
         path_prefix=request.filters.get("path_prefix"),
     )
     response = hybrid_search(search_request, db)
@@ -460,9 +547,7 @@ def activities(
         statement = statement.where(ActivityEvent.event_type == event_type)
         count_statement = count_statement.where(ActivityEvent.event_type == event_type)
     if verification_status:
-        statement = statement.where(
-            ActivityEvent.verification_status == verification_status
-        )
+        statement = statement.where(ActivityEvent.verification_status == verification_status)
         count_statement = count_statement.where(
             ActivityEvent.verification_status == verification_status
         )
@@ -583,14 +668,10 @@ def knowledge_curation_status(db: Session = Depends(get_db)) -> dict:
         },
         "gpu_policy": {
             "minimum_free_mb": settings.knowledge_curation_gpu_min_free_mb,
-            "maximum_utilization_percent": (
-                settings.knowledge_curation_gpu_max_utilization
-            ),
+            "maximum_utilization_percent": (settings.knowledge_curation_gpu_max_utilization),
             "maximum_temperature_c": settings.knowledge_curation_gpu_max_temperature,
             "maximum_checks_per_cycle": settings.knowledge_curation_busy_max_checks,
-            "exhausted_cooldown_seconds": (
-                settings.knowledge_curation_exhausted_cooldown_seconds
-            ),
+            "exhausted_cooldown_seconds": (settings.knowledge_curation_exhausted_cooldown_seconds),
         },
         "scheduler": state,
         "qualification": qualification,
@@ -685,9 +766,7 @@ def _case_json(row: KnowledgeCase) -> dict:
         "solution": row.solution,
         "status": row.status,
         "occurrence_count": row.occurrence_count,
-        "current_revision_id": str(row.current_revision_id)
-        if row.current_revision_id
-        else None,
+        "current_revision_id": str(row.current_revision_id) if row.current_revision_id else None,
         "first_seen_at": row.first_seen_at,
         "last_seen_at": row.last_seen_at,
         "metadata": row.metadata_json,
@@ -697,19 +776,28 @@ def _case_json(row: KnowledgeCase) -> dict:
 @app.get("/api/v1/knowledge/cases")
 def knowledge_cases(
     category: str | None = None,
+    project: str | None = None,
+    tags: list[str] = Query(default=[]),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> dict:
     statement = select(KnowledgeCase).where(KnowledgeCase.status == "verified")
     count_statement = (
-        select(func.count())
-        .select_from(KnowledgeCase)
-        .where(KnowledgeCase.status == "verified")
+        select(func.count()).select_from(KnowledgeCase).where(KnowledgeCase.status == "verified")
     )
     if category:
         statement = statement.where(KnowledgeCase.category == category)
         count_statement = count_statement.where(KnowledgeCase.category == category)
+    if project:
+        statement = statement.where(KnowledgeCase.metadata_json["project"].as_string() == project)
+        count_statement = count_statement.where(
+            KnowledgeCase.metadata_json["project"].as_string() == project
+        )
+    for tag in sorted({item.strip().lower() for item in tags if item.strip()}):
+        predicate = KnowledgeCase.metadata_json.contains({"tags": [tag]})
+        statement = statement.where(predicate)
+        count_statement = count_statement.where(predicate)
     rows = db.scalars(
         statement.order_by(KnowledgeCase.last_seen_at.desc())
         .offset((page - 1) * page_size)
@@ -777,9 +865,7 @@ def knowledge_case_detail(case_id: uuid.UUID, db: Session = Depends(get_db)) -> 
 
 
 @app.post("/api/v1/knowledge/cases/{case_id}/materialize")
-def materialize_knowledge_case(
-    case_id: uuid.UUID, db: Session = Depends(get_db)
-) -> dict:
+def materialize_knowledge_case(case_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     row = db.get(KnowledgeCase, case_id)
     if not row or row.status != "verified":
         raise HTTPException(404, "verified knowledge case not found")
@@ -887,8 +973,7 @@ def retry_job(job_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     return {"id": str(new_job.id), "status": new_job.status.value, "retry_of": str(job_id)}
 
 
-@app.get("/api/v1/workers")
-def workers(db: Session = Depends(get_db)) -> list[dict]:
+def _worker_payload(db: Session, *, include_retired: bool) -> list[dict]:
     now = datetime.now(timezone.utc)
     rows = db.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())).all()
     return [
@@ -896,7 +981,8 @@ def workers(db: Session = Depends(get_db)) -> list[dict]:
             "worker_id": row.worker_id,
             "hostname": row.hostname,
             "state": "stale"
-            if now - row.last_seen_at > timedelta(seconds=settings.stale_after_seconds)
+            if row.state != "stopped"
+            and now - row.last_seen_at > timedelta(seconds=settings.stale_after_seconds)
             else row.state,
             "last_seen_at": row.last_seen_at,
             "current_job_id": row.current_job_id,
@@ -905,14 +991,21 @@ def workers(db: Session = Depends(get_db)) -> list[dict]:
             "metadata": row.metadata_json or {},
         }
         for row in rows
+        if include_retired or not (row.metadata_json or {}).get("retired", False)
     ]
+
+
+@app.get("/api/v1/workers")
+def workers(
+    include_retired: bool = Query(False),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    return _worker_payload(db, include_retired=include_retired)
 
 
 @app.get("/api/v1/backups")
 def backups(db: Session = Depends(get_db)) -> list[dict]:
-    rows = db.scalars(
-        select(BackupRun).order_by(BackupRun.created_at.desc()).limit(100)
-    ).all()
+    rows = db.scalars(select(BackupRun).order_by(BackupRun.created_at.desc()).limit(100)).all()
     return [
         {
             "id": str(row.id),
@@ -955,22 +1048,28 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
             IngestJob.status == JobStatus.pending
         )
     )
-    succeeded_in_window = db.scalar(
-        select(func.count())
-        .select_from(IngestJob)
-        .where(
-            IngestJob.status == JobStatus.succeeded,
-            IngestJob.finished_at >= now - timedelta(hours=queue_window_hours),
+    succeeded_in_window = (
+        db.scalar(
+            select(func.count())
+            .select_from(IngestJob)
+            .where(
+                IngestJob.status == JobStatus.succeeded,
+                IngestJob.finished_at >= now - timedelta(hours=queue_window_hours),
+            )
         )
-    ) or 0
-    failed_in_window = db.scalar(
-        select(func.count())
-        .select_from(IngestJob)
-        .where(
-            IngestJob.status.in_([JobStatus.failed, JobStatus.dead_letter]),
-            IngestJob.finished_at >= now - timedelta(hours=1),
+        or 0
+    )
+    failed_in_window = (
+        db.scalar(
+            select(func.count())
+            .select_from(IngestJob)
+            .where(
+                IngestJob.status.in_([JobStatus.failed, JobStatus.dead_letter]),
+                IngestJob.finished_at >= now - timedelta(hours=1),
+            )
         )
-    ) or 0
+        or 0
+    )
     queue_rate_per_hour = float(succeeded_in_window) / queue_window_hours
     pending_count = int(counts.get(JobStatus.pending, 0))
     queue_eta_seconds = (
@@ -1085,9 +1184,7 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
             .order_by(SourceRoot.name)
         ).all()
     ]
-    current_workers = [
-        item for item in workers(db) if not item["metadata"].get("retired", False)
-    ]
+    current_workers = _worker_payload(db, include_retired=False)
     worker_states: dict[str, int] = {}
     for item in current_workers:
         worker_states[item["state"]] = worker_states.get(item["state"], 0) + 1
@@ -1107,9 +1204,7 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
             .label("code_files"),
             func.count(Document.id)
             .filter(
-                ~Document.extension.in_(
-                    sorted(CODE_EXTENSIONS | {".md", ".mdx"})
-                ),
+                ~Document.extension.in_(sorted(CODE_EXTENSIONS | {".md", ".mdx"})),
                 SourceRoot.source_type != "obsidian",
             )
             .label("support_files"),
@@ -1199,9 +1294,7 @@ def metrics_summary(db: Session = Depends(get_db)) -> dict:
         ),
         "chunks": current_chunks,
         "semantic_chunks": semantic_chunks,
-        "semantic_coverage": (
-            semantic_chunks / current_chunks if current_chunks else 0.0
-        ),
+        "semantic_coverage": (semantic_chunks / current_chunks if current_chunks else 0.0),
         "document_breakdown": {
             "knowledge_documents": int(document_breakdown_row.knowledge_documents),
             "code_files": int(document_breakdown_row.code_files),

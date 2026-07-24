@@ -20,6 +20,7 @@ from lkp.models import (
     IngestJob,
     JobStatus,
     SourceRoot,
+    WorkerHeartbeat,
 )
 from lkp.settings import Settings
 from lkp_indexer.hook_collector import collect_file
@@ -28,6 +29,7 @@ from lkp_indexer.purpose_migration import migrate_purpose_scope
 from lkp_indexer.queue import enqueue, lease
 from lkp_indexer.reconcile import reconcile_root
 from lkp_indexer.watcher import watch_root
+from lkp_indexer.worker_service import retire_legacy_worker_rows
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -83,6 +85,44 @@ def test_expired_lease_is_recovered(database_url: str, tmp_path: Path):
         session.commit()
 
 
+def test_legacy_ephemeral_workers_are_retired_without_deleting_history(database_url: str):
+    engine = create_engine(database_url)
+    legacy_id = "abcdef123456-1234abcd"
+    stable_id = f"worker-service:test-{uuid.uuid4()}"
+    with Session(engine) as session:
+        session.add_all(
+            [
+                WorkerHeartbeat(
+                    worker_id=legacy_id,
+                    hostname="old-container",
+                    process_id=10,
+                    version="0.1.0",
+                    state="stale",
+                    metadata_json={"resource_guard_enabled": True},
+                ),
+                WorkerHeartbeat(
+                    worker_id=stable_id,
+                    hostname="stable-container",
+                    process_id=11,
+                    version="0.1.0",
+                    state="idle",
+                    metadata_json={"resource_guard_enabled": True},
+                ),
+            ]
+        )
+        session.commit()
+        assert retire_legacy_worker_rows(session, stable_id) == 1
+        session.commit()
+        legacy = session.get(WorkerHeartbeat, legacy_id)
+        stable = session.get(WorkerHeartbeat, stable_id)
+        assert legacy is not None
+        assert legacy.state == "stopped"
+        assert legacy.metadata_json["retired"] is True
+        assert legacy.metadata_json["superseded_by"] == stable_id
+        assert stable is not None
+        assert stable.metadata_json.get("retired") is not True
+
+
 @pytest.mark.asyncio
 async def test_watcher_coalesces_create_modify_rename_delete(database_url: str, tmp_path: Path):
     engine = create_engine(database_url)
@@ -126,9 +166,7 @@ async def test_watcher_coalesces_create_modify_rename_delete(database_url: str, 
     stop.set()
     await asyncio.wait_for(task, timeout=5)
     with factory() as session:
-        jobs = session.scalars(
-            select(IngestJob).where(IngestJob.source_root_id == root.id)
-        ).all()
+        jobs = session.scalars(select(IngestJob).where(IngestJob.source_root_id == root.id)).all()
         job_types = {job.job_type for job in jobs}
         assert "watch_index" in job_types
         assert "watch_delete" in job_types
@@ -188,9 +226,7 @@ def test_reconciliation_recovers_missed_delete(database_url: str, tmp_path: Path
         session.commit()
 
 
-def test_reconciliation_quarantines_newly_ignored_documents(
-    database_url: str, tmp_path: Path
-):
+def test_reconciliation_quarantines_newly_ignored_documents(database_url: str, tmp_path: Path):
     engine = create_engine(database_url)
     settings = Settings(database_url=database_url)
     generated = tmp_path / "tokenizer_configs" / "model" / "merges.txt"
@@ -232,9 +268,7 @@ def test_reconciliation_quarantines_newly_ignored_documents(
         assert document.state == DocumentState.ignored
 
 
-def test_ignored_cleanup_removes_only_derived_rows(
-    database_url: str, tmp_path: Path
-):
+def test_ignored_cleanup_removes_only_derived_rows(database_url: str, tmp_path: Path):
     engine = create_engine(database_url)
     source = tmp_path / "tokenizer_configs" / "model" / "vocab.json"
     source.parent.mkdir(parents=True)
@@ -331,9 +365,10 @@ def test_ignored_cleanup_removes_only_derived_rows(
         assert session.get(Document, document_id) is None
         assert session.get(DocumentVersion, version_id) is None
         assert session.get(DocumentChunk, chunk_id) is None
-        assert session.scalar(
-            select(ChunkEmbedding).where(ChunkEmbedding.chunk_id == chunk_id)
-        ) is None
+        assert (
+            session.scalar(select(ChunkEmbedding).where(ChunkEmbedding.chunk_id == chunk_id))
+            is None
+        )
         preserved_job = session.get(IngestJob, job_id)
         assert preserved_job is not None
         assert preserved_job.document_id is None
@@ -361,9 +396,10 @@ def test_low_signal_hook_is_not_persisted(database_url: str, tmp_path: Path):
         assert collect_file(session, path) is True
         session.commit()
         assert session.get(HookSpoolEvent, event_id) is None
-        assert session.scalar(
-            select(ActivityEvent).where(ActivityEvent.session_id == session_id)
-        ) is None
+        assert (
+            session.scalar(select(ActivityEvent).where(ActivityEvent.session_id == session_id))
+            is None
+        )
 
 
 def test_purpose_migration_reclassifies_projects_and_keeps_doc_vectors(
@@ -473,13 +509,15 @@ def test_purpose_migration_reclassifies_projects_and_keeps_doc_vectors(
         assert code_document.project_relative_path == "src/model.py"
         assert doc_document.project_key == "ExampleRepo"
         assert doc_document.project_relative_path == "README.md"
-        assert session.scalar(
-            select(ChunkEmbedding).where(
-                ChunkEmbedding.chunk_id == chunk_ids["model.py"]
+        assert (
+            session.scalar(
+                select(ChunkEmbedding).where(ChunkEmbedding.chunk_id == chunk_ids["model.py"])
             )
-        ) is None
-        assert session.scalar(
-            select(ChunkEmbedding).where(
-                ChunkEmbedding.chunk_id == chunk_ids["README.md"]
+            is None
+        )
+        assert (
+            session.scalar(
+                select(ChunkEmbedding).where(ChunkEmbedding.chunk_id == chunk_ids["README.md"])
             )
-        ) is not None
+            is not None
+        )

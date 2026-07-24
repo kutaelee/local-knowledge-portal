@@ -29,11 +29,7 @@ def test_ollama_generation_uses_structured_output_and_records_digest():
         if request.url.path == "/api/tags":
             return httpx.Response(
                 200,
-                json={
-                    "models": [
-                        {"name": "local-summary:latest", "digest": "sha256:model-v1"}
-                    ]
-                },
+                json={"models": [{"name": "local-summary:latest", "digest": "sha256:model-v1"}]},
             )
         payload = json.loads(request.content)
         assert request.url.path == "/api/chat"
@@ -76,11 +72,7 @@ def test_ollama_generation_fails_closed_on_digest_change():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={
-                "models": [
-                    {"name": "local-summary:latest", "digest": "sha256:changed"}
-                ]
-            },
+            json={"models": [{"name": "local-summary:latest", "digest": "sha256:changed"}]},
         )
 
     provider = OllamaGenerationProvider(
@@ -162,7 +154,7 @@ def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():
     assert provider.generation_parameters["context_window"] == 16_384
 
 
-def test_ollama_curator_repairs_invalid_publish_structure_once():
+def test_ollama_curator_drops_uncited_paragraph_without_guessing_an_id():
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -242,5 +234,5 @@ def test_ollama_curator_repairs_invalid_publish_structure_once():
         language="ko",
         prompt_version="test-v1",
     )
-    assert calls == 2
-    assert draft.context[0].evidence_ids == ["E1"]
+    assert calls == 1
+    assert draft.context == []

@@ -11,14 +11,16 @@ from lkp.models import (
     Document,
     DocumentChunk,
     DocumentState,
+    DocumentTag,
     DocumentVersion,
     IngestEvent,
     IngestJob,
     SourceRoot,
+    Tag,
     WorkerHeartbeat,
 )
 from lkp.settings import Settings
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
 from .chunking import chunk_document
@@ -46,6 +48,40 @@ LOW_VALUE_EMBEDDING_NAMES = {
 }
 
 
+def _frontmatter_tags(metadata: dict) -> list[str]:
+    raw = metadata.get("tags") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    labels = metadata.get("knowledge_value_labels") or []
+    if isinstance(labels, str):
+        labels = [labels]
+    values = [*raw, *labels]
+    for key, prefix in (
+        ("category", "case"),
+        ("knowledge_value_tier", "knowledge-value"),
+        ("lifecycle_status", "lifecycle"),
+    ):
+        if metadata.get(key):
+            values.append(f"{prefix}:{metadata[key]}")
+    project = metadata.get("project")
+    if project:
+        values.append(f"project:{project}")
+    return sorted(
+        {normalized for item in values if (normalized := str(item).strip().lower()[:200])}
+    )
+
+
+def _sync_document_tags(session: Session, document: Document, metadata: dict) -> None:
+    session.execute(delete(DocumentTag).where(DocumentTag.document_id == document.id))
+    for name in _frontmatter_tags(metadata):
+        tag = session.scalar(select(Tag).where(Tag.name == name))
+        if tag is None:
+            tag = Tag(name=name)
+            session.add(tag)
+            session.flush()
+        session.add(DocumentTag(document_id=document.id, tag_id=tag.id))
+
+
 def embedding_cost_decision(
     chunks: list,
     *,
@@ -55,11 +91,7 @@ def embedding_cost_decision(
 ) -> tuple[bool, str | None]:
     if path is not None:
         name = path.name.casefold()
-        if (
-            name in LOW_VALUE_EMBEDDING_NAMES
-            or ".min." in name
-            or ".generated." in name
-        ):
+        if name in LOW_VALUE_EMBEDDING_NAMES or ".min." in name or ".generated." in name:
             return False, "low_value_artifact"
     if len(chunks) > max_chunks:
         return False, "chunk_limit"
@@ -140,9 +172,7 @@ def _embed_missing(
                 "embedding_skip_reason": policy_reason,
                 "embedding_policy": "purpose-aware-v2",
                 "embedding_chunk_count": len(chunks),
-                "embedding_character_count": sum(
-                    len(chunk.content) for chunk in chunks
-                ),
+                "embedding_character_count": sum(len(chunk.content) for chunk in chunks),
             }
             return
     allowed, reason = embedding_cost_decision(
@@ -267,9 +297,7 @@ def process_job(
             finish(session, job)
             heartbeat(session, worker_id, "idle", success=True)
             return
-        rejection_reason = source_file_rejection_reason(
-            canonical, settings.max_file_bytes
-        )
+        rejection_reason = source_file_rejection_reason(canonical, settings.max_file_bytes)
         if rejection_reason:
             if existing:
                 existing.state = DocumentState.unsupported
@@ -343,6 +371,15 @@ def process_job(
         existing.state = DocumentState.active
         existing.project_key = identity.key
         existing.project_relative_path = identity.relative_path
+        chunks, parsed_metadata = chunk_document(canonical, content)
+        managed_project = parsed_metadata.get("project")
+        if (
+            parsed_metadata.get("managed") is True
+            and isinstance(managed_project, str)
+            and managed_project.strip()
+        ):
+            existing.project_key = managed_project.strip()[:200]
+        _sync_document_tags(session, existing, parsed_metadata)
         if existing.current_content_hash == digest:
             if embedder and existing.current_version_id:
                 current_version = session.get(DocumentVersion, existing.current_version_id)
@@ -367,7 +404,6 @@ def process_job(
             finish(session, job)
             heartbeat(session, worker_id, "idle", success=True)
             return
-        chunks, parsed_metadata = chunk_document(canonical, content)
         policy_allowed, policy_reason = semantic_policy(
             canonical,
             root,
@@ -383,9 +419,7 @@ def process_job(
         embedding_skip_reason = policy_reason if not policy_allowed else cost_reason
         should_embed = bool(embedder and chunks and embedding_allowed)
         vectors = embedder.embed([chunk.content for chunk in chunks]) if should_embed else []
-        if should_embed and any(
-            len(vector) != settings.embedding_dimension for vector in vectors
-        ):
+        if should_embed and any(len(vector) != settings.embedding_dimension for vector in vectors):
             raise RuntimeError("embedding dimension mismatch; pipeline stopped fail-closed")
         embedding_status = (
             "complete"
@@ -415,7 +449,7 @@ def process_job(
                 "embedding_chunk_count": len(chunks),
                 "embedding_character_count": sum(len(chunk.content) for chunk in chunks),
                 "embedding_policy": "purpose-aware-v2",
-                "project_key": identity.key,
+                "project_key": existing.project_key,
                 "project_relative_path": identity.relative_path,
                 "indexed_at": _utcnow().isoformat(),
             },

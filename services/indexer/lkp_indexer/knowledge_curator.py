@@ -40,6 +40,7 @@ logger = structlog.get_logger()
 _SCHEDULER_KEY = "knowledge_curator.scheduler"
 _EVIDENCE_REPAIR_KEY = "knowledge.evidence_repair.non_execution_v1"
 _VALUE_BACKFILL_KEY = "knowledge.value_backfill.v3"
+_CURATION_HARNESS_VERSION = "evidence-gate-v3"
 _INLINE_CITATION = re.compile(
     r"\[[^\]\r\n]{1,50}\]|\((?:\s*E\d+\s*,?)+\s*\)",
     re.IGNORECASE,
@@ -58,6 +59,13 @@ _HYPE = (
 )
 
 
+def style_warnings(article: str) -> list[str]:
+    lowered = article.casefold()
+    return ["possible_inflated_language"] if any(
+        term.casefold() in lowered for term in _HYPE
+    ) else []
+
+
 @dataclass(frozen=True, slots=True)
 class GpuSnapshot:
     total_mb: int
@@ -71,8 +79,7 @@ def probe_gpu() -> GpuSnapshot:
     completed = subprocess.run(
         [
             "nvidia-smi",
-            "--query-gpu=memory.total,memory.used,memory.free,"
-            "utilization.gpu,temperature.gpu",
+            "--query-gpu=memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu",
             "--format=csv,noheader,nounits",
         ],
         check=True,
@@ -90,8 +97,7 @@ def probe_gpu() -> GpuSnapshot:
 def gpu_is_available(snapshot: GpuSnapshot, settings: Settings) -> bool:
     return (
         snapshot.free_mb >= settings.knowledge_curation_gpu_min_free_mb
-        and snapshot.utilization_percent
-        <= settings.knowledge_curation_gpu_max_utilization
+        and snapshot.utilization_percent <= settings.knowledge_curation_gpu_max_utilization
         and snapshot.temperature_c <= settings.knowledge_curation_gpu_max_temperature
     )
 
@@ -99,8 +105,7 @@ def gpu_is_available(snapshot: GpuSnapshot, settings: Settings) -> bool:
 def busy_retry_seconds(check_count: int, settings: Settings) -> int:
     return min(
         settings.knowledge_curation_busy_retry_max_seconds,
-        settings.knowledge_curation_busy_retry_base_seconds
-        * (2 ** max(0, check_count - 1)),
+        settings.knowledge_curation_busy_retry_base_seconds * (2 ** max(0, check_count - 1)),
     )
 
 
@@ -155,13 +160,13 @@ def render_article(draft: CuratedKnowledgeArticle, language: str) -> str:
     standfirst_refs = _render_references(draft.standfirst_evidence_ids)
     lines = [f"> {standfirst} {standfirst_refs}".rstrip(), ""]
     for heading, content in headings:
+        if not content.strip():
+            continue
         lines.extend([f"## {heading}", "", content.strip(), ""])
     return "\n".join(lines).strip()
 
 
-def _evidence_rows(
-    session: Session, candidate: KnowledgeCandidate
-) -> list[EvidenceRecord]:
+def _evidence_rows(session: Session, candidate: KnowledgeCandidate) -> list[EvidenceRecord]:
     return list(
         session.scalars(
             select(EvidenceRecord)
@@ -187,11 +192,7 @@ def _payload(
                 item.claim,
                 item.verified_value or "",
                 item.locator or "",
-                (
-                    f"exit_code={item.exit_code}"
-                    if item.exit_code is not None
-                    else ""
-                ),
+                (f"exit_code={item.exit_code}" if item.exit_code is not None else ""),
             ]
             if value
         )
@@ -217,9 +218,7 @@ def _payload(
         },
         "reported_result_not_evidence": candidate.reported_result,
         "verified_evidence": serialized,
-        "deterministic_value_assessment": (candidate.metadata_json or {}).get(
-            "knowledge_value"
-        ),
+        "deterministic_value_assessment": (candidate.metadata_json or {}).get("knowledge_value"),
         "publication_rule": (
             "Choose publish only when verified evidence supports a reusable, non-inflated "
             "article. Reported text may provide context but is not verified evidence."
@@ -253,6 +252,7 @@ def _generation_parameters(provider: GenerationProvider) -> dict[str, Any]:
 
 def _scheduler_revision(settings: Settings) -> str:
     payload = {
+        "harness_version": _CURATION_HARNESS_VERSION,
         "model": settings.generation_model,
         "model_digest": settings.generation_model_digest,
         "prompt_version": settings.generation_prompt_version,
@@ -277,47 +277,49 @@ def validate_draft(
     evidence_map: dict[str, str],
     settings: Settings,
 ) -> tuple[str, list[str], str]:
+    if not draft.standfirst_evidence_ids:
+        explicit_ids = list(dict.fromkeys(re.findall(r"(?<!\w)E\d+(?!\w)", draft.standfirst)))
+        if explicit_ids:
+            clean_standfirst = re.sub(
+                r"(?:\s*[,;]?\s*E\d+)+[.!]?\s*$",
+                "",
+                draft.standfirst,
+            ).rstrip(" ,;")
+            draft = draft.model_copy(
+                update={
+                    "standfirst": clean_standfirst,
+                    "standfirst_evidence_ids": explicit_ids,
+                }
+            )
     article = render_article(draft, settings.knowledge_content_language)
     reasons: list[str] = []
-    if draft.decision != "publish":
-        reasons.append(f"model_decision_{draft.decision}")
     if not draft.title.strip():
         reasons.append("title_missing")
     if len(article) > settings.knowledge_curation_max_article_chars:
         reasons.append("article_too_long")
-    if draft.unsupported_inferences:
-        reasons.append("unsupported_inferences_present")
 
     all_evidence_text = " ".join(evidence_map.values())
-    all_source_numbers = {
-        token.replace(",", "") for token in _NUMBER.findall(all_evidence_text)
-    }
+    all_source_numbers = {token.replace(",", "") for token in _NUMBER.findall(all_evidence_text)}
     for name, content in {
         "title": draft.title,
     }.items():
         if any(
-            token.replace(",", "") not in all_source_numbers
-            for token in _NUMBER.findall(content)
+            token.replace(",", "") not in all_source_numbers for token in _NUMBER.findall(content)
         ):
             reasons.append(f"{name}_unsupported_number")
 
-    if draft.decision == "publish":
-        if not draft.standfirst_evidence_ids:
-            reasons.append("standfirst_missing_citation")
-        elif any(item not in evidence_map for item in draft.standfirst_evidence_ids):
-            reasons.append("standfirst_invalid_citation")
-        else:
-            cited_text = " ".join(
-                evidence_map[item] for item in draft.standfirst_evidence_ids
-            )
-            source_numbers = {
-                token.replace(",", "") for token in _NUMBER.findall(cited_text)
-            }
-            if any(
-                token.replace(",", "") not in source_numbers
-                for token in _NUMBER.findall(_plain_text(draft.standfirst))
-            ):
-                reasons.append("standfirst_unsupported_number")
+    if not draft.standfirst_evidence_ids:
+        reasons.append("standfirst_missing_citation")
+    elif any(item not in evidence_map for item in draft.standfirst_evidence_ids):
+        reasons.append("standfirst_invalid_citation")
+    else:
+        cited_text = " ".join(evidence_map[item] for item in draft.standfirst_evidence_ids)
+        source_numbers = {token.replace(",", "") for token in _NUMBER.findall(cited_text)}
+        if any(
+            token.replace(",", "") not in source_numbers
+            for token in _NUMBER.findall(_plain_text(draft.standfirst))
+        ):
+            reasons.append("standfirst_unsupported_number")
 
     sections: dict[str, list[EvidenceBoundParagraph]] = {
         "context": draft.context,
@@ -328,8 +330,14 @@ def validate_draft(
         "limitations": draft.limitations,
     }
     cited_ids: set[str] = set()
+    required_sections = {
+        "problem",
+        "cause_or_decision",
+        "implementation",
+        "verification",
+    }
     for name, paragraphs in sections.items():
-        if draft.decision == "publish" and not paragraphs:
+        if name in required_sections and not paragraphs:
             reasons.append(f"{name}_missing")
         for paragraph in paragraphs:
             paragraph_citations = set(paragraph.evidence_ids)
@@ -341,12 +349,8 @@ def validate_draft(
             if invalid:
                 reasons.append(f"{name}_invalid_citation")
                 continue
-            cited_text = " ".join(
-                evidence_map[item] for item in paragraph_citations
-            )
-            source_numbers = {
-                token.replace(",", "") for token in _NUMBER.findall(cited_text)
-            }
+            cited_text = " ".join(evidence_map[item] for item in paragraph_citations)
+            source_numbers = {token.replace(",", "") for token in _NUMBER.findall(cited_text)}
             if any(
                 token.replace(",", "") not in source_numbers
                 for token in _NUMBER.findall(_plain_text(paragraph.text))
@@ -355,9 +359,6 @@ def validate_draft(
 
     if len(cited_ids) < 2:
         reasons.append("insufficient_evidence_coverage")
-    lowered = article.casefold()
-    if any(term.casefold() in lowered for term in _HYPE):
-        reasons.append("inflated_language")
     status = "PASS" if not reasons else "NEEDS_REVIEW"
     return status, sorted(set(reasons)), article
 
@@ -443,9 +444,7 @@ def _record_gpu_wait(
         **previous,
         "state": state,
         "busy_check_count": 0 if exhausted else count,
-        "completed_busy_cycle_count": int(
-            previous.get("completed_busy_cycle_count") or 0
-        )
+        "completed_busy_cycle_count": int(previous.get("completed_busy_cycle_count") or 0)
         + (1 if exhausted else 0),
         "next_attempt_at": (now + timedelta(seconds=delay)).isoformat(),
         "last_checked_at": now.isoformat(),
@@ -633,6 +632,20 @@ def qualify_provider(
 ) -> dict[str, Any]:
     results = []
     for name, payload, expected in _qualification_payloads():
+        value_assessment = payload.get("deterministic_value_assessment") or {}
+        if value_assessment.get("tier") != "promote":
+            results.append(
+                {
+                    "name": name,
+                    "expected": expected,
+                    "actual": "held",
+                    "passed": expected == "held",
+                    "reasons": list(value_assessment.get("blockers") or []),
+                    "decision": "deterministic_harness_hold",
+                    "article_chars": 0,
+                }
+            )
+            continue
         try:
             draft, _digest = provider.curate(
                 payload,
@@ -668,9 +681,7 @@ def qualify_provider(
             )
             for item in payload["verified_evidence"]
         }
-        validation, reasons, article = validate_draft(
-            draft, evidence_map, settings
-        )
+        validation, reasons, article = validate_draft(draft, evidence_map, settings)
         actual = "publish" if validation == "PASS" else "held"
         results.append(
             {
@@ -683,6 +694,7 @@ def qualify_provider(
                 "decision": draft.decision,
                 "decision_reason": draft.decision_reason,
                 "article_markdown": article,
+                "style_warnings": style_warnings(article),
             }
         )
     passed = all(item["passed"] for item in results)
@@ -698,6 +710,7 @@ def _qualification_key(
     identity = hashlib.sha256(
         json.dumps(
             {
+                "harness_version": _CURATION_HARNESS_VERSION,
                 "model": model,
                 "digest": digest,
                 "prompt_version": prompt_version,
@@ -740,17 +753,13 @@ def curate_candidate(
         ).hexdigest()
         previous_curation = dict(metadata.get("curation") or {})
         if (
-            previous_curation.get("validation_status")
-            == "VALUE_HARNESS_REJECTED"
+            previous_curation.get("validation_status") == "VALUE_HARNESS_REJECTED"
             and previous_curation.get("value_hash") == value_hash
-            and previous_curation.get("prompt_version")
-            == settings.generation_prompt_version
+            and previous_curation.get("prompt_version") == settings.generation_prompt_version
         ):
             return "UNCHANGED", None
         candidate.status = (
-            "activity_only"
-            if value_assessment["tier"] == "activity_only"
-            else "needs_review"
+            "activity_only" if value_assessment["tier"] == "activity_only" else "needs_review"
         )
         metadata["curation"] = {
             "state": candidate.status,
@@ -791,18 +800,10 @@ def curate_candidate(
         raise RuntimeError("generation model digest changed during curation")
     validation, reasons, article = validate_draft(draft, evidence_map, settings)
     now = datetime.now(timezone.utc)
-    output_hash = hashlib.sha256(
-        draft.model_dump_json().encode("utf-8")
-    ).hexdigest()
+    output_hash = hashlib.sha256(draft.model_dump_json().encode("utf-8")).hexdigest()
     metadata = dict(candidate.metadata_json or {})
     curation = {
-        "state": (
-            "activity_only"
-            if draft.decision == "activity_only"
-            else "needs_review"
-            if validation != "PASS"
-            else "validated"
-        ),
+        "state": "needs_review" if validation != "PASS" else "validated",
         "provider": provider.provider,
         "model": provider.model,
         "model_digest": model_digest,
@@ -812,31 +813,25 @@ def curate_candidate(
         "output_hash": output_hash,
         "validation_status": validation,
         "validation_reasons": reasons,
-        "decision": draft.decision,
+        "editorial_recommendation": draft.decision,
         "decision_reason": draft.decision_reason,
+        "style_warnings": style_warnings(article),
+        "unsupported_inferences_omitted": draft.unsupported_inferences,
         "curated_at": now.isoformat(),
     }
     metadata["curation"] = curation
-    metadata["approval_policy"] = "local_llm_evidence_bound"
+    metadata["approval_policy"] = "deterministic_evidence_gate_with_llm_editor"
     metadata.setdefault("pre_curation_dedup_key", candidate.dedup_key)
     metadata.setdefault("pre_curation_similarity_key", candidate.similarity_key)
-    if draft.decision == "activity_only":
-        metadata["quality_gate_status"] = "ACTIVITY_ONLY"
-        metadata["quality_gate_reasons"] = ["not_reusable_knowledge"]
-        candidate.metadata_json = metadata
-        candidate.status = "activity_only"
-        candidate.updated_at = now
-        return "ACTIVITY_ONLY", None
     if validation != "PASS":
         metadata["quality_gate_status"] = "NEEDS_REVIEW"
         metadata["quality_gate_reasons"] = reasons
-        metadata["approval_policy"] = "local_llm_evidence_bound"
+        metadata["approval_policy"] = "deterministic_evidence_gate_with_llm_editor"
         candidate.metadata_json = metadata
         candidate.status = "needs_review"
         candidate.updated_at = now
         return "NEEDS_REVIEW", None
 
-    candidate.category = draft.category
     candidate.title = draft.title.strip()
     candidate.problem = _section_plain(draft.problem)
     candidate.symptom = _section_plain(draft.context)
@@ -849,7 +844,7 @@ def curate_candidate(
         {
             "structured_knowledge": True,
             "content_language": settings.knowledge_content_language,
-            "approval_policy": "local_llm_evidence_bound",
+            "approval_policy": "deterministic_evidence_gate_with_llm_editor",
             "article_markdown": article,
             "standfirst": _plain_text(draft.standfirst),
             "limitations": _section_plain(draft.limitations),
@@ -956,10 +951,7 @@ def run_once(
             "state": "gpu_probe_error",
             "last_error": f"{type(exc).__name__}: {exc}"[:1000],
             "next_attempt_at": (
-                now
-                + timedelta(
-                    seconds=settings.knowledge_curation_busy_retry_base_seconds
-                )
+                now + timedelta(seconds=settings.knowledge_curation_busy_retry_base_seconds)
             ).isoformat(),
             "last_checked_at": now.isoformat(),
         }
@@ -987,10 +979,7 @@ def run_once(
             "state": "model_unavailable",
             "last_error": f"{type(exc).__name__}: {exc}"[:1000],
             "next_attempt_at": (
-                now
-                + timedelta(
-                    seconds=settings.knowledge_curation_exhausted_cooldown_seconds
-                )
+                now + timedelta(seconds=settings.knowledge_curation_exhausted_cooldown_seconds)
             ).isoformat(),
             "last_checked_at": now.isoformat(),
             "last_gpu": asdict(snapshot),
@@ -1021,6 +1010,7 @@ def run_once(
             key=qualification_key,
             value={
                 **report,
+                "harness_version": _CURATION_HARNESS_VERSION,
                 "provider": provider.provider,
                 "model": provider.model,
                 "model_digest": model_digest,

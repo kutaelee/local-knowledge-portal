@@ -28,9 +28,7 @@ _SECRET_KEY = re.compile(
 _SECRET_TEXT = (
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
-    re.compile(
-        r"(?i)\b(password|secret|token|api[_-]?key)\b(\s*[:=]\s*)([^\s,;]{8,})"
-    ),
+    re.compile(r"(?i)\b(password|secret|token|api[_-]?key)\b(\s*[:=]\s*)([^\s,;]{8,})"),
 )
 
 

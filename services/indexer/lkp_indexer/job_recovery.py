@@ -25,9 +25,7 @@ def resolve_non_retryable_dead_letters(
 
     roots = {root.id: root for root in session.scalars(select(SourceRoot))}
     results: list[dict[str, str | bool]] = []
-    jobs = session.scalars(
-        select(IngestJob).where(IngestJob.status == JobStatus.dead_letter)
-    )
+    jobs = session.scalars(select(IngestJob).where(IngestJob.status == JobStatus.dead_letter))
     for job in jobs:
         root = roots.get(job.source_root_id)
         if root is None:

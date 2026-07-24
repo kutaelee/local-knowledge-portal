@@ -63,7 +63,7 @@ generation_provider=$(sed -n 's/^LKP_GENERATION_PROVIDER=//p' "$env_file" | tr -
 generation_model=$(sed -n 's/^LKP_GENERATION_MODEL=//p' "$env_file" | tr -d '\r')
 generation_model_digest=$(sed -n 's/^LKP_GENERATION_MODEL_DIGEST=//p' "$env_file" | tr -d '\r')
 generation_prompt_version=$(sed -n 's/^LKP_GENERATION_PROMPT_VERSION=//p' "$env_file" | tr -d '\r')
-generation_prompt_version=${generation_prompt_version:-evidence-blog-v7}
+generation_prompt_version=${generation_prompt_version:-evidence-blog-v9}
 generation_temperature=$(sed -n 's/^LKP_GENERATION_TEMPERATURE=//p' "$env_file" | tr -d '\r')
 generation_temperature=${generation_temperature:-0}
 generation_context_window=$(sed -n 's/^LKP_GENERATION_CONTEXT_WINDOW=//p' "$env_file" | tr -d '\r')

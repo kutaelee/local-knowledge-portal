@@ -412,7 +412,7 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
       <Cpu size={18} />
       <div><strong>{text.curator}</strong>
         <span>{curation.data?.model || "gemma4:e4b"} ·
-          {" "}{curation.data?.prompt_version || "evidence-blog-v7"} · {schedulerLabel}</span></div>
+          {" "}{curation.data?.prompt_version || "evidence-blog-v9"} · {schedulerLabel}</span></div>
       <div><small>{text.gpu}</small><strong>{scheduler?.last_gpu
         ? `${Math.round(scheduler.last_gpu.free_mb / 1024)} GB / ${scheduler.last_gpu.utilization_percent}% / ${scheduler.last_gpu.temperature_c}°C`
         : "—"}</strong></div>

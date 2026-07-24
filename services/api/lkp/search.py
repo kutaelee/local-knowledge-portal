@@ -55,7 +55,10 @@ INDEXED_LEXICAL_SQL = text(
       GROUP BY chunk_id
     )
     SELECT d.id document_id, v.id version_id, c.id chunk_id, r.name source_root,
-      d.canonical_path, d.relative_path, d.filename, c.heading_path, c.symbol_name,
+      d.canonical_path, d.relative_path, d.filename, d.project_key,
+      ARRAY(SELECT t.name FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+            WHERE dt.document_id = d.id ORDER BY t.name) tags,
+      c.heading_path, c.symbol_name,
       c.start_line, c.end_line, c.content, c.content_hash, v.detected_at,
       ranked.lexical_rank, ranked.path_match, ranked.symbol_match,
       ranked.fuzzy_match
@@ -68,6 +71,26 @@ INDEXED_LEXICAL_SQL = text(
       AND (CAST(:source_root_id AS uuid) IS NULL
            OR d.source_root_id = CAST(:source_root_id AS uuid))
       AND (CAST(:project AS text) IS NULL OR d.project_key = CAST(:project AS text))
+      AND (
+        cardinality(CAST(:tags AS text[])) = 0
+        OR (
+          CAST(:tag_mode AS text) = 'any'
+          AND EXISTS (
+            SELECT 1 FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+            WHERE dt.document_id = d.id AND t.name = ANY(CAST(:tags AS text[]))
+          )
+        )
+        OR (
+          CAST(:tag_mode AS text) = 'all'
+          AND NOT EXISTS (
+            SELECT 1 FROM unnest(CAST(:tags AS text[])) requested(name)
+            WHERE NOT EXISTS (
+              SELECT 1 FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+              WHERE dt.document_id = d.id AND t.name = requested.name
+            )
+          )
+        )
+      )
       AND (CAST(:path_prefix AS text) IS NULL
            OR lower(d.relative_path) LIKE lower(:path_filter))
     ORDER BY ranked.symbol_match DESC, ranked.path_match DESC,
@@ -80,7 +103,10 @@ INDEXED_LEXICAL_SQL = text(
 FUZZY_FALLBACK_SQL = text(
     """
     SELECT d.id document_id, v.id version_id, c.id chunk_id, r.name source_root,
-      d.canonical_path, d.relative_path, d.filename, c.heading_path, c.symbol_name,
+      d.canonical_path, d.relative_path, d.filename, d.project_key,
+      ARRAY(SELECT t.name FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+            WHERE dt.document_id = d.id ORDER BY t.name) tags,
+      c.heading_path, c.symbol_name,
       c.start_line, c.end_line, c.content, c.content_hash, v.detected_at,
       word_similarity(:query, c.content) lexical_rank,
       0 path_match, 0 symbol_match, 1 fuzzy_match
@@ -92,6 +118,20 @@ FUZZY_FALLBACK_SQL = text(
       AND (CAST(:source_root_id AS uuid) IS NULL
            OR d.source_root_id = CAST(:source_root_id AS uuid))
       AND (CAST(:project AS text) IS NULL OR d.project_key = CAST(:project AS text))
+      AND (
+        cardinality(CAST(:tags AS text[])) = 0
+        OR (CAST(:tag_mode AS text) = 'any' AND EXISTS (
+          SELECT 1 FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+          WHERE dt.document_id = d.id AND t.name = ANY(CAST(:tags AS text[]))
+        ))
+        OR (CAST(:tag_mode AS text) = 'all' AND NOT EXISTS (
+          SELECT 1 FROM unnest(CAST(:tags AS text[])) requested(name)
+          WHERE NOT EXISTS (
+            SELECT 1 FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+            WHERE dt.document_id = d.id AND t.name = requested.name
+          )
+        ))
+      )
       AND (CAST(:path_prefix AS text) IS NULL
            OR lower(d.relative_path) LIKE lower(:path_filter))
       AND c.content %> :query
@@ -103,7 +143,10 @@ FUZZY_FALLBACK_SQL = text(
 CONTENT_FALLBACK_SQL = text(
     """
     SELECT d.id document_id, v.id version_id, c.id chunk_id, r.name source_root,
-      d.canonical_path, d.relative_path, d.filename, c.heading_path, c.symbol_name,
+      d.canonical_path, d.relative_path, d.filename, d.project_key,
+      ARRAY(SELECT t.name FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+            WHERE dt.document_id = d.id ORDER BY t.name) tags,
+      c.heading_path, c.symbol_name,
       c.start_line, c.end_line, c.content, c.content_hash, v.detected_at,
       0 lexical_rank, 0 path_match, 0 symbol_match, 0 fuzzy_match
     FROM document_chunk c
@@ -114,6 +157,20 @@ CONTENT_FALLBACK_SQL = text(
       AND (CAST(:source_root_id AS uuid) IS NULL
            OR d.source_root_id = CAST(:source_root_id AS uuid))
       AND (CAST(:project AS text) IS NULL OR d.project_key = CAST(:project AS text))
+      AND (
+        cardinality(CAST(:tags AS text[])) = 0
+        OR (CAST(:tag_mode AS text) = 'any' AND EXISTS (
+          SELECT 1 FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+          WHERE dt.document_id = d.id AND t.name = ANY(CAST(:tags AS text[]))
+        ))
+        OR (CAST(:tag_mode AS text) = 'all' AND NOT EXISTS (
+          SELECT 1 FROM unnest(CAST(:tags AS text[])) requested(name)
+          WHERE NOT EXISTS (
+            SELECT 1 FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+            WHERE dt.document_id = d.id AND t.name = requested.name
+          )
+        ))
+      )
       AND (CAST(:path_prefix AS text) IS NULL
            OR lower(d.relative_path) LIKE lower(:path_filter))
       AND c.content ILIKE :contains
@@ -125,7 +182,10 @@ CONTENT_FALLBACK_SQL = text(
 VECTOR_SQL = text(
     """
     SELECT d.id document_id, v.id version_id, c.id chunk_id, r.name source_root,
-      d.canonical_path, d.relative_path, d.filename, c.heading_path, c.symbol_name,
+      d.canonical_path, d.relative_path, d.filename, d.project_key,
+      ARRAY(SELECT t.name FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+            WHERE dt.document_id = d.id ORDER BY t.name) tags,
+      c.heading_path, c.symbol_name,
       c.start_line, c.end_line, c.content, c.content_hash, v.detected_at,
       1 - (e.embedding <=> CAST(:vector AS vector)) vector_similarity
     FROM chunk_embedding e
@@ -138,6 +198,20 @@ VECTOR_SQL = text(
       AND (CAST(:source_root_id AS uuid) IS NULL
            OR d.source_root_id = CAST(:source_root_id AS uuid))
       AND (CAST(:project AS text) IS NULL OR d.project_key = CAST(:project AS text))
+      AND (
+        cardinality(CAST(:tags AS text[])) = 0
+        OR (CAST(:tag_mode AS text) = 'any' AND EXISTS (
+          SELECT 1 FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+          WHERE dt.document_id = d.id AND t.name = ANY(CAST(:tags AS text[]))
+        ))
+        OR (CAST(:tag_mode AS text) = 'all' AND NOT EXISTS (
+          SELECT 1 FROM unnest(CAST(:tags AS text[])) requested(name)
+          WHERE NOT EXISTS (
+            SELECT 1 FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+            WHERE dt.document_id = d.id AND t.name = requested.name
+          )
+        ))
+      )
       AND (CAST(:path_prefix AS text) IS NULL
            OR lower(d.relative_path) LIKE lower(:path_filter))
     ORDER BY e.embedding <=> CAST(:vector AS vector)
@@ -156,9 +230,7 @@ def classify_confidence(
         return "none"
     if mode in {"keyword", "path", "symbol"}:
         return "high"
-    if mode == "hybrid" and any(
-        (result.lexical_rank or 0) > 0 for result in results
-    ):
+    if mode == "hybrid" and any((result.lexical_rank or 0) > 0 for result in results):
         return "high"
     best_similarity = max(
         (result.vector_similarity or -1 for result in results),
@@ -177,6 +249,8 @@ def _params(request: SearchRequest) -> dict:
         "allow_symbol": request.mode in {"keyword", "hybrid", "symbol"},
         "source_root_id": str(request.source_root_id) if request.source_root_id else None,
         "project": request.project,
+        "tags": sorted({item.strip().lower() for item in request.tags if item.strip()}),
+        "tag_mode": request.tag_mode,
         "path_prefix": request.path_prefix,
         "path_filter": (request.path_prefix or "") + "%",
     }
@@ -193,24 +267,16 @@ def search(
     lexical_rows = []
     vector_rows = []
     if request.mode in {"keyword", "hybrid", "path", "symbol"}:
-        lexical_rows = list(
-            session.execute(INDEXED_LEXICAL_SQL, _params(request)).mappings()
-        )
+        lexical_rows = list(session.execute(INDEXED_LEXICAL_SQL, _params(request)).mappings())
         if request.mode == "keyword" and not lexical_rows:
-            session.execute(
-                text("SET LOCAL pg_trgm.word_similarity_threshold = 0.15")
-            )
-            fallback_rows = list(
-                session.execute(FUZZY_FALLBACK_SQL, _params(request)).mappings()
-            )
+            session.execute(text("SET LOCAL pg_trgm.word_similarity_threshold = 0.15"))
+            fallback_rows = list(session.execute(FUZZY_FALLBACK_SQL, _params(request)).mappings())
             indexed_chunk_ids = {row["chunk_id"] for row in lexical_rows}
             lexical_rows.extend(
                 row for row in fallback_rows if row["chunk_id"] not in indexed_chunk_ids
             )
         if request.mode == "keyword" and not lexical_rows:
-            fallback_rows = list(
-                session.execute(CONTENT_FALLBACK_SQL, _params(request)).mappings()
-            )
+            fallback_rows = list(session.execute(CONTENT_FALLBACK_SQL, _params(request)).mappings())
             indexed_chunk_ids = {row["chunk_id"] for row in lexical_rows}
             lexical_rows.extend(
                 row for row in fallback_rows if row["chunk_id"] not in indexed_chunk_ids
@@ -262,6 +328,8 @@ def search(
         results.append(
             SearchResult(
                 title=row["filename"],
+                project=row["project_key"],
+                tags=list(row["tags"] or []),
                 heading_or_symbol=row["heading_path"] or row["symbol_name"],
                 snippet=row["content"][:800],
                 lexical_rank=item["lex"],

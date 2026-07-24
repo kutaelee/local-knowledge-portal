@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import re
 import signal
-import socket
 import threading
 import uuid
 from dataclasses import dataclass
@@ -14,7 +14,7 @@ from lkp.db import SessionLocal
 from lkp.logging import configure_logging
 from lkp.models import IngestJob, JobStatus, SourceRoot, WorkerHeartbeat
 from lkp.settings import get_settings
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from .cli import get_embedder
 from .queue import lease
@@ -23,6 +23,7 @@ from .service_runtime import assert_mount_guards, service_pid
 from .worker import heartbeat, process_job
 
 logger = structlog.get_logger()
+_LEGACY_EPHEMERAL_WORKER_ID = re.compile(r"^[0-9a-f]{12}-[0-9a-f]{8}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,16 +54,35 @@ def _resource_policy(settings) -> dict:
         "job_cooldown_seconds": settings.worker_job_cooldown_seconds,
         "burst_jobs": settings.worker_burst_jobs,
         "burst_cooldown_seconds": settings.worker_burst_cooldown_seconds,
-        "lexical_job_cooldown_seconds": (
-            settings.worker_lexical_job_cooldown_seconds
-        ),
+        "lexical_job_cooldown_seconds": (settings.worker_lexical_job_cooldown_seconds),
         "lexical_burst_jobs": settings.worker_lexical_burst_jobs,
-        "lexical_burst_cooldown_seconds": (
-            settings.worker_lexical_burst_cooldown_seconds
-        ),
+        "lexical_burst_cooldown_seconds": (settings.worker_lexical_burst_cooldown_seconds),
         "pause_file": str(settings.worker_pause_file),
         "resource_guard_enabled": True,
     }
+
+
+def retire_legacy_worker_rows(session, current_worker_id: str) -> int:
+    retired = 0
+    rows = session.scalars(select(WorkerHeartbeat)).all()
+    for row in rows:
+        if row.worker_id == current_worker_id:
+            continue
+        if not _LEGACY_EPHEMERAL_WORKER_ID.fullmatch(row.worker_id):
+            continue
+        metadata = dict(row.metadata_json or {})
+        if metadata.get("retired") is True:
+            continue
+        row.state = "stopped"
+        row.current_job_id = None
+        row.metadata_json = {
+            **metadata,
+            "retired": True,
+            "retired_reason": "superseded_ephemeral_worker_identity",
+            "superseded_by": current_worker_id,
+        }
+        retired += 1
+    return retired
 
 
 def _renew_lease(
@@ -83,8 +103,7 @@ def _renew_lease(
                     IngestJob.status.in_([JobStatus.leased, JobStatus.processing]),
                 )
                 .values(
-                    lease_expires_at=datetime.now(timezone.utc)
-                    + timedelta(seconds=lease_seconds),
+                    lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=lease_seconds),
                     updated_at=datetime.now(timezone.utc),
                 )
             )
@@ -97,8 +116,17 @@ def _renew_lease(
 def run(deterministic: bool = False, once: bool = False) -> int:
     settings = get_settings()
     assert_mount_guards(settings)
-    worker_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
+    worker_id = settings.worker_id
     stopping = threading.Event()
+    with SessionLocal() as session:
+        retired_count = retire_legacy_worker_rows(session, worker_id)
+        session.commit()
+    if retired_count:
+        logger.info(
+            "legacy_worker_rows_retired",
+            count=retired_count,
+            worker_id=worker_id,
+        )
 
     def request_stop(_signum, _frame) -> None:
         stopping.set()
@@ -157,9 +185,7 @@ def run(deterministic: bool = False, once: bool = False) -> int:
                             root,
                             repository_mode=settings.repository_embedding_mode,
                         )
-                        resource_class = (
-                            "semantic" if semantic_allowed else "lexical"
-                        )
+                        resource_class = "semantic" if semantic_allowed else "lexical"
                 session.commit()
         except Exception:
             stopping.wait(2)

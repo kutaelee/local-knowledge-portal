@@ -84,7 +84,10 @@ default. Explorer projects are the top-level Git repositories below the source r
 incidental parent such as `ai`. Canonical cases require verified execution evidence, reusable
 knowledge structure, and a qualified local evidence editor. See
 [ADR 0006](docs/adr/0006-knowledge-value-selection.md) and
-[ADR 0013](docs/adr/0013-local-llm-evidence-editor.md).
+[ADR 0013](docs/adr/0013-local-llm-evidence-editor.md). File Explorer remains the
+read-only source catalog, while Knowledge Cases are a separate verified layer. Cases and generated
+project overviews are indexed by project, category, situation, lifecycle, and knowledge-value tags;
+see [ADR 0015](docs/adr/0015-project-wiki-taxonomy-and-refresh.md).
 
 ## Global Codex activity capture
 
@@ -125,17 +128,40 @@ case editing is isolated behind a provider interface:
 ```dotenv
 LKP_GENERATION_PROVIDER=ollama
 LKP_GENERATION_BASE_URL=http://ollama-generation:11434
-LKP_GENERATION_MODEL=gemma4:e4b
-LKP_GENERATION_MODEL_DIGEST=unresolved
+LKP_GENERATION_MODEL=qwen3.5:9b-q4_K_M
+LKP_GENERATION_MODEL_DIGEST=6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7
 LKP_KNOWLEDGE_CURATION_ENABLED=true
 ```
 
-The editor uses a private, GPU-enabled Ollama service separate from CPU-bounded embedding. It
-checks free VRAM, utilization, and temperature before each one-item batch, uses bounded exponential
-backoff while the GPU is busy, and unloads the generation model after two minutes. E4B must pass
-the built-in supported/unsupported claim corpus for its exact digest and prompt version; otherwise
-it is rejected and 12B is the documented fallback. Generated text is never accepted as verified
-evidence by itself. See [ADR 0013](docs/adr/0013-local-llm-evidence-editor.md).
+The editor uses a private, GPU-enabled Ollama service separate from CPU-bounded embedding.
+`qwen3.5:9b-q4_K_M` is the qualified production editor because the available smaller model did not
+reliably satisfy the structured evidence contract. The model only edits verified inputs into
+readable Korean prose; deterministic code owns publication state, deduplication, revisions, tags,
+citations, and generated page updates. There is no minimum character quota. Optional context is
+omitted instead of padded, while unsupported claims are excluded and retained for review.
+
+Every curation run that reserves at least 2 GiB or is expected to exceed 30 seconds must enter the
+workstation GPU scheduler:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\curate.ps1
+```
+
+The script submits a one-shot Compose curator through `gpuq run`, deduplicates an already active or
+queued portal curation workload, and never exposes the scheduler mutation token to the portal.
+`/gpu-queue` is a read-only Korean/English view of GPU capacity, active/queued/completed jobs,
+effective priority, and scheduling notes. See
+[ADR 0013](docs/adr/0013-local-llm-evidence-editor.md).
+
+Install the hourly, non-overlapping submission task after the GPU scheduler is available:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\install-curation-schedule.ps1 -IntervalMinutes 60
+```
+
+The Scheduled Task only invokes the same `gpuq` entrypoint. A queued job waits under the host
+scheduler's bounded fairness and safety policy, so the task never bypasses GPU admission.
 
 Production embedding uses Ollama `qwen3-embedding:0.6b`, digest
 `ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d`, dimension
@@ -169,6 +195,10 @@ a dedicated bilingual/code corpus.
 ## API surface
 
 Implemented endpoints include keyword/hybrid/semantic search, RAG context, documents, versions, backlinks, projects, tree, jobs and auditable retry, workers, timeline, summary metrics, Prometheus text metrics, and split live/readiness health.
+
+The read-only GPU scheduler integration exposes only `GET /api/v1/gpu-queue/health`,
+`GET /api/v1/gpu-queue/status`, and `GET /api/v1/gpu-queue/jobs/{uuid}`. The upstream host URL is
+restricted to loopback or `host.docker.internal`; POST and credentials are not proxied.
 
 Every retrieval result includes document, version, chunk, source root, canonical/relative path, source lines, content hash, indexed time, retrieval score, and match reason.
 

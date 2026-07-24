@@ -75,9 +75,7 @@ def _nested(payload: dict[str, Any], *names: str) -> Any:
 
 
 _EXIT_CODE_LINE = re.compile(r"(?im)^\s*Exit code:\s*(-?\d+)\s*$")
-_PATCH_FILE_LINE = re.compile(
-    r"(?m)^\*{3}\s+(?:Add|Update|Delete) File:\s+(.+?)\s*$"
-)
+_PATCH_FILE_LINE = re.compile(r"(?m)^\*{3}\s+(?:Add|Update|Delete) File:\s+(.+?)\s*$")
 _CHANGE_STATUS_LINE = re.compile(r"(?m)^\s*[AMD]\s+(.+?)\s*$")
 
 
@@ -90,9 +88,7 @@ def _response_text(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _transcript_tool_output(
-    payload: dict[str, Any], sessions_root: Path | None
-) -> str:
+def _transcript_tool_output(payload: dict[str, Any], sessions_root: Path | None) -> str:
     if sessions_root is None:
         return ""
     transcript = payload.get("transcript_path")
@@ -190,9 +186,7 @@ def _transcript_turn_instruction(
     return "\n\n".join(messages)[:16000]
 
 
-def _exit_code(
-    payload: dict[str, Any], sessions_root: Path | None = None
-) -> int | None:
+def _exit_code(payload: dict[str, Any], sessions_root: Path | None = None) -> int | None:
     value = _nested(payload, "exit_code", "exitCode", "status_code")
     if isinstance(value, int):
         return value
@@ -303,9 +297,7 @@ def activity_signal(
     return False, ["unsupported_activity_signal"]
 
 
-def _document_versions(
-    session: Session, changed_files: list[str], cwd: str | None
-) -> list:
+def _document_versions(session: Session, changed_files: list[str], cwd: str | None) -> list:
     versions = []
     for raw_path in changed_files:
         path = Path(raw_path)
@@ -533,19 +525,14 @@ def collect_once(settings: Settings) -> dict[str, int]:
             knowledge_counts = finalize_pending_stops(session, settings)
             rolled_up = 0
             now_monotonic = time.monotonic()
-            if (
-                now_monotonic - _last_retention_check
-                >= settings.activity_retention_check_seconds
-            ):
+            if now_monotonic - _last_retention_check >= settings.activity_retention_check_seconds:
                 rolled_up = roll_up_activity_details(
                     session,
                     retention_days=settings.activity_detail_retention_days,
                 )
                 _last_retention_check = now_monotonic
             session.commit()
-        counts.update(
-            {f"knowledge_{key}": value for key, value in knowledge_counts.items()}
-        )
+        counts.update({f"knowledge_{key}": value for key, value in knowledge_counts.items()})
         counts["activity_details_rolled_up"] = rolled_up
     except Exception:
         counts["failed"] += 1

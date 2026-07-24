@@ -98,7 +98,7 @@ test("activity, knowledge cases, and automatic evidence editor", async ({ page }
   await expect(page.getByRole("heading", { name: "Knowledge cases" })).toBeVisible();
   await expect(page.getByText("Local knowledge editor", { exact: true })).toBeVisible();
   await expect(page.getByText(/qwen3\.5:9b-q4_K_M/)).toBeVisible();
-  await expect(page.getByText(/evidence-blog-v7/)).toBeVisible();
+  await expect(page.getByText(/evidence-blog-v9/)).toBeVisible();
   await page.locator(".record-list > button").first().click();
   await expect(page.getByText("Root cause", { exact: true })).toBeVisible();
   await expect(page.getByText("Revisions & occurrences")).toBeVisible();
@@ -142,4 +142,24 @@ test("keyword, semantic, hybrid, operations, and worker heartbeat", async ({ pag
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/D:\\(LocalBackup|Backups)\\LocalKnowledgePortal/).first())
     .toBeVisible();
+});
+
+test("GPU queue shows host capacity, job groups, and read-only details", async ({ page }) => {
+  await page.goto("/gpu-queue");
+  await expect(page.getByRole("heading", { name: "GPU work queue" })).toBeVisible();
+  await expect(page.getByText("Total VRAM", { exact: true })).toBeVisible();
+  await expect(page.getByText("GPU utilization", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Active" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Queued" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Recent completed" })).toBeVisible();
+
+  const completed = page.locator(".gpu-job-panel").filter({
+    has: page.getByRole("heading", { name: "Recent completed" }),
+  });
+  const row = completed.locator("tbody tr").first();
+  if (await row.count()) {
+    await row.click();
+    await expect(page.locator(".gpu-detail .detail-grid")).toBeVisible();
+    await expect(page.locator(".gpu-detail").getByText("Command", { exact: true })).toBeVisible();
+  }
 });

@@ -129,9 +129,7 @@ async def watch_root(
                     old_path = rename_for.get(canonical)
                     job_type = "watch_rename" if old_path else "watch_index"
                     details = {"rename_from": old_path} if old_path else {}
-                    key_path = (
-                        f"rename:{old_path}->{canonical}" if old_path else canonical
-                    )
+                    key_path = f"rename:{old_path}->{canonical}" if old_path else canonical
                     key = idempotency_key(
                         str(source_root.id), key_path, info.st_size, info.st_mtime_ns
                     )

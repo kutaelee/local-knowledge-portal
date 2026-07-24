@@ -72,7 +72,7 @@ class FakeEvidenceEditor:
 
     def curate(self, _payload, *, language, prompt_version):
         assert language == "ko"
-        assert prompt_version == "evidence-blog-v7"
+        assert prompt_version == "evidence-blog-v9"
         section = [
             EvidenceBoundParagraph(
                 text=(
@@ -117,9 +117,7 @@ def candidate(session: Session, **overrides):
         "solution": "add the required field",
         "reported_result": "fixed",
         "verified_result": "pytest exit 0",
-        "evidence": evidence(
-            ("command_failure", 1), ("code_change", None), ("test_pass", 0)
-        ),
+        "evidence": evidence(("command_failure", 1), ("code_change", None), ("test_pass", 0)),
     }
     values.update(overrides)
     return create_candidate(session, **values)
@@ -148,7 +146,12 @@ def test_local_editor_publishes_only_after_deterministic_validation(
             reported_result="완벽하게 구현됐다.",
             verified_result="테스트 성공",
             evidence=evidence(("code_change", None), ("test_pass", 0)),
-            metadata={"auto_generated": True, "structured_knowledge": True},
+            metadata={
+                "auto_generated": True,
+                "structured_knowledge": True,
+                "project": "local-knowledge-portal",
+                "tags": ["platform:wsl2"],
+            },
         )
         outcome, case_id = curate_candidate(
             session,
@@ -168,6 +171,18 @@ def test_local_editor_publishes_only_after_deterministic_validation(
         assert "## 상황과 맥락" in content
         assert "완벽하게 구현됐다" not in content
         assert "## 검증 근거" in content
+        assert 'project: "local-knowledge-portal"' in content
+        assert "situation:implementation" in content
+        overview = (
+            tmp_path
+            / "vault"
+            / "_generated"
+            / "Projects"
+            / "local-knowledge-portal"
+            / "overview.md"
+        )
+        assert overview.exists()
+        assert "## 최근 검증 사례" in overview.read_text(encoding="utf-8")
         session.rollback()
 
 
@@ -175,22 +190,16 @@ def test_collector_separates_reported_and_verified(database_url: str, tmp_path: 
     engine = create_engine(database_url)
     session_id = f"s-collector-{uuid.uuid4()}"
     instruction_raw = (
-        '{"session_id":"'
-        + session_id
-        + '","turn_id":"t-collector",'
+        '{"session_id":"' + session_id + '","turn_id":"t-collector",'
         '"hook_event_name":"UserPromptSubmit","cwd":"C:\\\\Dev\\\\Repos\\\\sample",'
         '"prompt":"테스트 실패 원인을 수정하고 다시 검증해줘"}'
     ).encode()
     stop_raw = (
-        '{"session_id":"'
-        + session_id
-        + '","turn_id":"t-collector",'
+        '{"session_id":"' + session_id + '","turn_id":"t-collector",'
         '"hook_event_name":"Stop","cwd":"C:\\\\Dev\\\\Repos\\\\sample",'
         '"last_assistant_message":"all tests pass"}'
     ).encode()
-    instruction_path = spool(
-        instruction_raw, tmp_path / "spool", tmp_path / "fallback"
-    )
+    instruction_path = spool(instruction_raw, tmp_path / "spool", tmp_path / "fallback")
     stop_path = spool(stop_raw, tmp_path / "spool", tmp_path / "fallback")
     with Session(engine) as session:
         assert collect_file(session, instruction_path)
@@ -284,9 +293,7 @@ def test_evidence_gate_dedup_and_relationships(database_url: str, tmp_path: Path
             == materialized
         )
         assert materialized.stat().st_mtime_ns == materialized_mtime
-        assert (
-            session.scalar(select(func.count()).select_from(GeneratedPage)) == 1
-        )
+        assert session.scalar(select(func.count()).select_from(GeneratedPage)) == 1
         info = materialized.stat()
         assert (
             enqueue(
@@ -380,9 +387,7 @@ def test_evidence_gate_dedup_and_relationships(database_url: str, tmp_path: Path
         session.rollback()
 
 
-def test_global_activity_turns_become_evidence_gated_cases(
-    database_url: str, tmp_path: Path
-):
+def test_global_activity_turns_become_evidence_gated_cases(database_url: str, tmp_path: Path):
     engine = create_engine(database_url)
     session_id = f"global-session-{uuid.uuid4()}"
     now = datetime.now(timezone.utc)
@@ -481,15 +486,15 @@ def test_global_activity_turns_become_evidence_gated_cases(
         assert counts["needs_review"] == 1
         generated = session.scalar(
             select(KnowledgeCandidate).where(
-                KnowledgeCandidate.metadata_json["source_session_id"].astext
-                == session_id
+                KnowledgeCandidate.metadata_json["source_session_id"].astext == session_id
             )
         )
         assert generated is not None
         assert generated.status == "needs_review"
         assert generated.metadata_json["reported_result_is_evidence"] is False
-        assert "local_llm_evidence_validation_required" in (
-            generated.metadata_json["quality_gate_reasons"]
+        assert (
+            "local_llm_evidence_validation_required"
+            in (generated.metadata_json["quality_gate_reasons"])
         )
         assert "sample-project" in generated.title
         assert (
@@ -503,9 +508,12 @@ def test_global_activity_turns_become_evidence_gated_cases(
             )
             == 1
         )
-        assert session.scalar(
-            select(KnowledgeCase).where(KnowledgeCase.dedup_key == generated.dedup_key)
-        ) is None
+        assert (
+            session.scalar(
+                select(KnowledgeCase).where(KnowledgeCase.dedup_key == generated.dedup_key)
+            )
+            is None
+        )
 
         assert finalize_pending_stops(session, settings)["considered"] == 0
         session.rollback()
@@ -589,9 +597,7 @@ def test_legacy_patch_validation_evidence_is_retracted_without_deleting_history(
         session.rollback()
 
 
-def test_late_tool_evidence_reopens_activity_only_stop(
-    database_url: str, tmp_path: Path
-):
+def test_late_tool_evidence_reopens_activity_only_stop(database_url: str, tmp_path: Path):
     engine = create_engine(database_url)
     session_id = f"late-session-{uuid.uuid4()}"
     now = datetime.now(timezone.utc)
@@ -626,9 +632,7 @@ def test_late_tool_evidence_reopens_activity_only_stop(
         candidate, outcome = finalize_stop(session, stop, settings)
         assert candidate is None
         assert outcome == "ACTIVITY_ONLY"
-        assert stop.metadata_json["knowledge_pipeline"]["reason"] == (
-            "no_meaningful_file_change"
-        )
+        assert stop.metadata_json["knowledge_pipeline"]["reason"] == ("no_meaningful_file_change")
 
         envelope_to_activity(
             session,
@@ -678,9 +682,7 @@ def test_late_tool_evidence_reopens_activity_only_stop(
         session.rollback()
 
 
-def test_qualified_error_case_dedup_and_different_cause_relation(
-    database_url: str, tmp_path: Path
-):
+def test_qualified_error_case_dedup_and_different_cause_relation(database_url: str, tmp_path: Path):
     engine = create_engine(database_url)
     now = datetime.now(timezone.utc)
     settings = Settings(
@@ -762,6 +764,7 @@ def test_qualified_error_case_dedup_and_different_cause_relation(
         return stop
 
     with Session(engine) as session:
+
         def qualify_and_publish(candidate: KnowledgeCandidate):
             candidate.metadata_json = {
                 **(candidate.metadata_json or {}),
@@ -817,17 +820,14 @@ def test_qualified_error_case_dedup_and_different_cause_relation(
             select(KnowledgeCaseRelation).where(
                 KnowledgeCaseRelation.source_case_id == first_case.id,
                 KnowledgeCaseRelation.target_case_id == other_case.id,
-                KnowledgeCaseRelation.relation_type
-                == "same_symptom_different_cause",
+                KnowledgeCaseRelation.relation_type == "same_symptom_different_cause",
             )
         )
         assert relation is not None
         session.rollback()
 
 
-def test_generic_auto_case_is_retracted_without_deleting_history(
-    database_url: str, tmp_path: Path
-):
+def test_generic_auto_case_is_retracted_without_deleting_history(database_url: str, tmp_path: Path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         auto = create_candidate(
@@ -866,15 +866,11 @@ def test_generic_auto_case_is_retracted_without_deleting_history(
         session.add(KnowledgeOccurrence(case_id=case.id, candidate_id=auto.id))
         session.flush()
 
-        preview = review_low_quality_auto_cases(
-            session, vault_dir=tmp_path / "vault", apply=False
-        )
+        preview = review_low_quality_auto_cases(session, vault_dir=tmp_path / "vault", apply=False)
         assert any(item["case_id"] == str(case.id) for item in preview)
         assert case.status == "verified"
 
-        applied = review_low_quality_auto_cases(
-            session, vault_dir=tmp_path / "vault", apply=True
-        )
+        applied = review_low_quality_auto_cases(session, vault_dir=tmp_path / "vault", apply=True)
         assert any(item["case_id"] == str(case.id) for item in applied)
         assert case.status == "retired"
         assert auto.status == "needs_review"

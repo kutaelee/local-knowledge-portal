@@ -61,9 +61,9 @@ def _source_hash(
             for item in evidence
         ],
     }
-    encoded = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -123,10 +123,11 @@ def render_case_markdown(
         else "promote"
     )
     embedding_labels = (
-        knowledge_value.get("embedding_labels", [])
-        if isinstance(knowledge_value, dict)
-        else []
+        knowledge_value.get("embedding_labels", []) if isinstance(knowledge_value, dict) else []
     )
+    case_metadata = getattr(case, "metadata_json", None) or {}
+    project = revision_content.get("project") or case_metadata.get("project")
+    tags = revision_content.get("tags") or case_metadata.get("tags") or []
     lines = [
         "---",
         "managed: true",
@@ -139,6 +140,10 @@ def render_case_markdown(
         f"category: {json.dumps(case.category)}",
         f"case_id: {json.dumps(str(case.id))}",
         f"case_revision: {revision_number}",
+        f"project: {json.dumps(project, ensure_ascii=False)}",
+        f"tags: {json.dumps(tags, ensure_ascii=False)}",
+        'lifecycle_status: "verified"',
+        f"last_verified_at: {json.dumps(getattr(case, 'last_seen_at', generated_at).isoformat())}",
         f"knowledge_value_tier: {json.dumps(value_tier)}",
         f"knowledge_value_labels: {json.dumps(embedding_labels, ensure_ascii=False)}",
         "---",
@@ -203,9 +208,7 @@ def render_case_markdown(
             if korean
             else ("verified" if item.verified else "reported")
         )
-        lines.append(
-            f"- **{state} · {item.evidence_type}**: {_one_line(item.claim)}"
-        )
+        lines.append(f"- **{state} · {item.evidence_type}**: {_one_line(item.claim)}")
         if item.locator:
             lines.append(f"  - locator: `{_one_line(item.locator)}`")
         if item.verified_value:
@@ -232,6 +235,169 @@ def render_case_markdown(
     return "\n".join(lines)
 
 
+def materialize_project_overview(
+    session: Session,
+    *,
+    project: str,
+    vault_dir: Path,
+    pipeline_version: str,
+    content_language: str = "ko",
+) -> Path | None:
+    project = project.strip()
+    if not project:
+        return None
+    cases = list(
+        session.scalars(
+            select(KnowledgeCase)
+            .where(
+                KnowledgeCase.status == "verified",
+                KnowledgeCase.metadata_json["project"].as_string() == project,
+            )
+            .order_by(KnowledgeCase.last_seen_at.desc(), KnowledgeCase.title)
+        )
+    )
+    if not cases:
+        return None
+    source_ids = [f"knowledge-case:{case.id}" for case in cases]
+    source_hashes = [
+        hashlib.sha256(
+            json.dumps(
+                {
+                    "id": str(case.id),
+                    "revision": str(case.current_revision_id),
+                    "last_seen_at": case.last_seen_at.isoformat(),
+                    "occurrences": case.occurrence_count,
+                    "tags": (case.metadata_json or {}).get("tags") or [],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        for case in cases
+    ]
+    overview_hash = hashlib.sha256("".join(source_hashes).encode()).hexdigest()
+    now = datetime.now(timezone.utc)
+    relative_path = Path("_generated") / "Projects" / _slug(project) / "overview.md"
+    target = (vault_dir / relative_path).resolve(strict=False)
+    managed_root = (vault_dir / "_generated" / "Projects").resolve(strict=False)
+    target.relative_to(managed_root)
+    relative_posix = relative_path.as_posix()
+    page = session.scalar(
+        select(GeneratedPage).where(GeneratedPage.relative_path == relative_posix)
+    )
+    if page is not None and page.source_hashes == [overview_hash] and target.exists():
+        return target
+    if target.exists():
+        header = target.read_text(encoding="utf-8", errors="strict")[:4096]
+        if "managed: true" not in header or "generator: local-knowledge-portal" not in header:
+            raise PermissionError(f"refusing to overwrite non-managed project page: {target}")
+    korean = content_language == "ko"
+    tags = [
+        f"project:{project.lower()}",
+        "page:project-overview",
+        "lifecycle:current",
+    ]
+    latest = max(case.last_seen_at for case in cases)
+    lines = [
+        "---",
+        "managed: true",
+        "generator: local-knowledge-portal",
+        f"project: {json.dumps(project, ensure_ascii=False)}",
+        f"tags: {json.dumps(tags, ensure_ascii=False)}",
+        f"source_ids: {json.dumps(source_ids)}",
+        f"source_hashes: {json.dumps(source_hashes)}",
+        f"pipeline_version: {json.dumps(pipeline_version)}",
+        f"generated_at: {json.dumps(now.isoformat())}",
+        'lifecycle_status: "current"',
+        f"last_verified_at: {json.dumps(latest.isoformat())}",
+        "---",
+        "",
+        f"# {project}",
+        "",
+        (
+            "> 검증된 지식 사례를 기준으로 자동 갱신되는 프로젝트 현황입니다. "
+            "사례 원문과 실행 근거가 정본이며, 이 페이지는 탐색용 색인입니다."
+            if korean
+            else "> Automatically refreshed project index of verified knowledge cases. "
+            "Canonical case pages and their evidence remain the source of truth."
+        ),
+        "",
+        "## 최근 검증 사례" if korean else "## Recently verified cases",
+        "",
+    ]
+    for case in cases:
+        case_path = str((case.metadata_json or {}).get("materialized_path") or "")
+        link = f"[[{Path(case_path).stem}|{case.title}]]" if case_path else case.title
+        lines.append(
+            f"- {link} · {case.last_seen_at.date().isoformat()} · "
+            f"{case.occurrence_count} occurrence"
+        )
+    lines.extend(
+        [
+            "",
+            "## 분류 태그" if korean else "## Classification tags",
+            "",
+            *[
+                f"- `{tag}`"
+                for tag in sorted(
+                    {
+                        tag
+                        for case in cases
+                        for tag in ((case.metadata_json or {}).get("tags") or [])
+                    }
+                )
+            ],
+            "",
+        ]
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=target.parent,
+            prefix=".overview.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write("\n".join(lines))
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary = Path(handle.name)
+        os.replace(temporary, target)
+    finally:
+        if temporary and temporary.exists():
+            temporary.unlink()
+    if page is None:
+        page = GeneratedPage(relative_path=relative_posix)
+        session.add(page)
+    page.source_hashes = [overview_hash]
+    page.pipeline_version = pipeline_version
+    page.generated_at = now
+    root = session.scalar(
+        select(SourceRoot).where(SourceRoot.canonical_path == str(vault_dir.resolve(strict=False)))
+    )
+    if root is not None:
+        info = target.stat()
+        enqueue(
+            session,
+            key=idempotency_key(str(root.id), str(target), info.st_size, info.st_mtime_ns),
+            source_root_id=root.id,
+            canonical_path=str(target),
+            job_type="index",
+            priority=20,
+            details={
+                "project": project,
+                "page_type": "project_overview",
+                "source_hash": overview_hash,
+            },
+        )
+    session.flush()
+    return target
+
+
 def materialize_case(
     session: Session,
     case: KnowledgeCase,
@@ -242,9 +408,7 @@ def materialize_case(
 ) -> Path:
     candidate_ids = list(
         session.scalars(
-            select(KnowledgeOccurrence.candidate_id).where(
-                KnowledgeOccurrence.case_id == case.id
-            )
+            select(KnowledgeOccurrence.candidate_id).where(KnowledgeOccurrence.case_id == case.id)
         )
     )
     evidence = (
@@ -282,13 +446,9 @@ def materialize_case(
         relative_path = Path(str(relative_value))
     else:
         relative_path = (
-            Path("_generated")
-            / "Knowledge-Cases"
-            / f"{_slug(case.title)}-{str(case.id)[:8]}.md"
+            Path("_generated") / "Knowledge-Cases" / f"{_slug(case.title)}-{str(case.id)[:8]}.md"
         )
-    managed_root = (vault_dir / "_generated" / "Knowledge-Cases").resolve(
-        strict=False
-    )
+    managed_root = (vault_dir / "_generated" / "Knowledge-Cases").resolve(strict=False)
     target = (vault_dir / relative_path).resolve(strict=False)
     try:
         target.relative_to(managed_root)
@@ -312,6 +472,14 @@ def materialize_case(
             }
         )
         case.metadata_json = metadata
+        project = str(revision.content_json.get("project") or metadata.get("project") or "")
+        materialize_project_overview(
+            session,
+            project=project,
+            vault_dir=vault_dir,
+            pipeline_version=pipeline_version,
+            content_language=content_language,
+        )
         session.flush()
         return target
 
@@ -362,11 +530,10 @@ def materialize_case(
         }
     )
     case.metadata_json = metadata
+    project = str(revision.content_json.get("project") or metadata.get("project") or "")
 
     root = session.scalar(
-        select(SourceRoot).where(
-            SourceRoot.canonical_path == str(vault_dir.resolve(strict=False))
-        )
+        select(SourceRoot).where(SourceRoot.canonical_path == str(vault_dir.resolve(strict=False)))
     )
     if root is not None:
         info = target.stat()
@@ -388,5 +555,12 @@ def materialize_case(
                 "source_hash": source_hash,
             },
         )
+    materialize_project_overview(
+        session,
+        project=project,
+        vault_dir=vault_dir,
+        pipeline_version=pipeline_version,
+        content_language=content_language,
+    )
     session.flush()
     return target
