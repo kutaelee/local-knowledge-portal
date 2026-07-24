@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from lkp.models import (
+    ActivityEvent,
     EvidenceRecord,
     KnowledgeCandidate,
     KnowledgeCase,
@@ -17,6 +18,21 @@ from lkp.models import (
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+_EXECUTION_TOOLS = {
+    "bash",
+    "exec_command",
+    "powershell",
+    "pwsh",
+    "shell_command",
+    "terminal",
+}
+_EXECUTION_EVIDENCE_TYPES = {
+    "build_pass",
+    "command_failure",
+    "command_success",
+    "test_pass",
+}
+
 
 def _normalize(value: str) -> str:
     return " ".join(re.findall(r"\w+", value.casefold(), flags=re.UNICODE))
@@ -24,6 +40,11 @@ def _normalize(value: str) -> str:
 
 def _hash(*values: str) -> str:
     return hashlib.sha256("\x1f".join(_normalize(item) for item in values).encode()).hexdigest()
+
+
+def is_execution_tool(tool_name: str | None) -> bool:
+    normalized = (tool_name or "").rsplit(".", 1)[-1].casefold()
+    return normalized in _EXECUTION_TOOLS
 
 
 def dedup_key(category: str, problem: str, root_cause: str, solution: str) -> str:
@@ -131,6 +152,66 @@ def evaluate_gate(session: Session, candidate: KnowledgeCandidate) -> str:
     candidate.status = "verified"
     candidate.updated_at = datetime.now(timezone.utc)
     return candidate.evidence_gate_status
+
+
+def invalidate_misclassified_execution_evidence(session: Session) -> dict[str, int]:
+    """Retract derived execution evidence that came from an edit tool.
+
+    The original activity event remains immutable. Only the derived evidence
+    assertion is marked unverified, and affected automatic candidates are
+    removed from the review/publication path without deleting their history.
+    """
+
+    rows = session.execute(
+        select(EvidenceRecord, ActivityEvent.tool_name)
+        .join(ActivityEvent, ActivityEvent.id == EvidenceRecord.activity_id)
+        .where(
+            EvidenceRecord.verified.is_(True),
+            EvidenceRecord.evidence_type.in_(_EXECUTION_EVIDENCE_TYPES),
+        )
+    )
+    now = datetime.now(timezone.utc)
+    affected_candidates: set[uuid.UUID] = set()
+    invalidated = 0
+    for evidence, tool_name in rows:
+        if is_execution_tool(tool_name):
+            continue
+        evidence.verified = False
+        evidence.metadata_json = {
+            **(evidence.metadata_json or {}),
+            "invalidated_at": now.isoformat(),
+            "invalidated_reason": "non_execution_tool_misclassified_as_command",
+            "source_tool_name": tool_name,
+        }
+        affected_candidates.add(evidence.candidate_id)
+        invalidated += 1
+    session.flush()
+
+    activity_only = 0
+    for candidate_id in affected_candidates:
+        candidate = session.get(KnowledgeCandidate, candidate_id)
+        if candidate is None:
+            continue
+        if evaluate_gate(session, candidate) == "VERIFIED":
+            continue
+        metadata = dict(candidate.metadata_json or {})
+        if metadata.get("auto_generated"):
+            candidate.status = "activity_only"
+            metadata["quality_gate_status"] = "ACTIVITY_ONLY"
+            metadata["quality_gate_reasons"] = [
+                "misclassified_edit_event_was_not_execution_evidence"
+            ]
+            metadata["evidence_repair"] = {
+                "repaired_at": now.isoformat(),
+                "reason": "non_execution_tool_misclassified_as_command",
+            }
+            candidate.metadata_json = metadata
+            activity_only += 1
+    return {
+        "invalidated_evidence": invalidated,
+        "affected_candidates": len(affected_candidates),
+        "reclassified_activity_only": activity_only,
+    }
 
 
 def evaluate_quality(candidate: KnowledgeCandidate) -> tuple[str, list[str]]:

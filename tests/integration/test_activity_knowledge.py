@@ -25,7 +25,11 @@ from lkp_indexer.case_pages import materialize_case
 from lkp_indexer.generation import CuratedKnowledgeArticle, EvidenceBoundClaim
 from lkp_indexer.hook_collector import collect_file, envelope_to_activity
 from lkp_indexer.hook_spool import spool
-from lkp_indexer.knowledge import create_candidate, publish_candidate
+from lkp_indexer.knowledge import (
+    create_candidate,
+    invalidate_misclassified_execution_evidence,
+    publish_candidate,
+)
 from lkp_indexer.knowledge_curator import curate_candidate
 from lkp_indexer.knowledge_quality import review_low_quality_auto_cases
 from lkp_indexer.paths import idempotency_key
@@ -387,6 +391,12 @@ def test_global_activity_turns_become_evidence_gated_cases(
             project_key="thread-folder",
             cwd=r"C:\Users\kutae\Documents\Codex\thread-folder",
             tool_name="apply_patch",
+            command=(
+                "*** Begin Patch\n"
+                "*** Update File: C:\\Dev\\Repos\\sample-project\\tests\\test_worker.py\n"
+                "+pytest -q tests/test_worker.py\n"
+                "*** End Patch"
+            ),
             exit_code=0,
             changed_files=[
                 r"C:\Dev\Repos\sample-project\services\worker.py",
@@ -477,11 +487,100 @@ def test_global_activity_turns_become_evidence_gated_cases(
             generated.metadata_json["quality_gate_reasons"]
         )
         assert "sample-project" in generated.title
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(EvidenceRecord)
+                .where(
+                    EvidenceRecord.candidate_id == generated.id,
+                    EvidenceRecord.evidence_type == "test_pass",
+                )
+            )
+            == 1
+        )
         assert session.scalar(
             select(KnowledgeCase).where(KnowledgeCase.dedup_key == generated.dedup_key)
         ) is None
 
         assert finalize_pending_stops(session, settings)["considered"] == 0
+        session.rollback()
+
+
+def test_legacy_patch_validation_evidence_is_retracted_without_deleting_history(
+    database_url: str,
+):
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        activity = ActivityEvent(
+            event_key=f"legacy-patch-{uuid.uuid4()}",
+            session_id=f"legacy-session-{uuid.uuid4()}",
+            turn_id="legacy-turn",
+            event_type="PostToolUse",
+            occurred_at=datetime.now(timezone.utc),
+            project_key="legacy-project",
+            cwd=r"C:\Dev\Repos\legacy-project",
+            tool_name="apply_patch",
+            command="*** Update File: tests/test_worker.py",
+            exit_code=0,
+            changed_files=[r"C:\Dev\Repos\legacy-project\tests\test_worker.py"],
+            document_version_ids=[],
+            verified_result="observed exit_code=0",
+            verification_status="VERIFIED",
+            metadata_json={},
+        )
+        session.add(activity)
+        session.flush()
+        candidate = create_candidate(
+            session,
+            category="implementation",
+            title="[legacy-project] worker test update",
+            problem="worker validation was recorded from an edit payload",
+            symptom="an edit payload looked like a test command",
+            root_cause="the event classifier matched text without checking the tool",
+            solution="accept validation only from command execution tools",
+            reported_result="tests passed",
+            verified_result="edit exit 0",
+            evidence=[
+                {
+                    "activity_id": activity.id,
+                    "evidence_type": "code_change",
+                    "claim": "file changed",
+                    "exit_code": 0,
+                    "verified": True,
+                },
+                {
+                    "activity_id": activity.id,
+                    "evidence_type": "test_pass",
+                    "claim": "test passed",
+                    "exit_code": 0,
+                    "verified": True,
+                },
+            ],
+            metadata={"auto_generated": True},
+        )
+        candidate.evidence_gate_status = "VERIFIED"
+        candidate.status = "needs_review"
+
+        report = invalidate_misclassified_execution_evidence(session)
+
+        assert report == {
+            "invalidated_evidence": 1,
+            "affected_candidates": 1,
+            "reclassified_activity_only": 1,
+        }
+        assert candidate.status == "activity_only"
+        assert candidate.evidence_gate_status == "NEEDS_EVIDENCE"
+        invalidated = session.scalar(
+            select(EvidenceRecord).where(
+                EvidenceRecord.candidate_id == candidate.id,
+                EvidenceRecord.evidence_type == "test_pass",
+            )
+        )
+        assert invalidated is not None and invalidated.verified is False
+        assert invalidated.metadata_json["invalidated_reason"] == (
+            "non_execution_tool_misclassified_as_command"
+        )
+        assert session.get(ActivityEvent, activity.id) is activity
         session.rollback()
 
 

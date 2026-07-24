@@ -28,12 +28,14 @@ from .generation import (
 from .knowledge import (
     evaluate_gate,
     evaluate_quality,
+    invalidate_misclassified_execution_evidence,
     publish_candidate,
 )
 from .service_runtime import assert_mount_guards, service_pid
 
 logger = structlog.get_logger()
 _SCHEDULER_KEY = "knowledge_curator.scheduler"
+_EVIDENCE_REPAIR_KEY = "knowledge.evidence_repair.non_execution_v1"
 _CITATION = re.compile(r"\[(E\d+)\]")
 _NUMBER = re.compile(r"(?<![A-Za-z])\d+(?:[.,]\d+)*(?:%|ms|MB|GB|초|분|시간)?")
 _HYPE = (
@@ -313,6 +315,17 @@ def _setting(session: Session) -> SystemSetting:
         session.add(row)
         session.flush()
     return row
+
+
+def _ensure_evidence_repair(session: Session, now: datetime) -> dict[str, Any]:
+    existing = session.get(SystemSetting, _EVIDENCE_REPAIR_KEY)
+    if existing is not None:
+        return dict(existing.value or {})
+    report = invalidate_misclassified_execution_evidence(session)
+    value = {**report, "completed_at": now.isoformat()}
+    session.add(SystemSetting(key=_EVIDENCE_REPAIR_KEY, value=value))
+    session.flush()
+    return value
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -691,12 +704,14 @@ def run_once(
     if not lock_acquired:
         return {"state": "standby_lock_held"}
     scheduler = _setting(session)
+    evidence_repair = _ensure_evidence_repair(session, now)
     state = dict(scheduler.value or {})
     due = _parse_time(state.get("next_attempt_at"))
     if due and due > now:
         return {
             "state": state.get("state", "scheduled"),
             "next_attempt_at": due.isoformat(),
+            "evidence_repair": evidence_repair,
         }
 
     try:

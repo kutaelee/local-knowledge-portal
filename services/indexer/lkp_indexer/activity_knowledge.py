@@ -15,6 +15,7 @@ from .knowledge import (
     create_candidate,
     evaluate_gate,
     evaluate_quality,
+    is_execution_tool,
     publish_candidate,
 )
 
@@ -83,8 +84,6 @@ _LABELED_APPROACH = re.compile(
 _LABELED_VERIFICATION = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:검증|확인\s*결과|verification|validated\s*result)\s*[:：]\s*(.+?)\s*$"
 )
-
-
 @dataclass(frozen=True)
 class TurnSummary:
     project: str
@@ -149,6 +148,17 @@ def _event_evidence_type(event: ActivityEvent) -> str:
     return "command_success"
 
 
+def _is_execution_event(event: ActivityEvent) -> bool:
+    """Accept test/build evidence only from a command execution tool.
+
+    Edit payloads can contain paths such as ``tests/test_worker.py`` or even
+    command examples. Matching their raw payload as if it were an executed
+    command would turn a successful file edit into false validation evidence.
+    """
+
+    return is_execution_tool(event.tool_name)
+
+
 def summarize_turn(session: Session, stop: ActivityEvent) -> TurnSummary:
     events = list(
         session.scalars(
@@ -184,6 +194,7 @@ def summarize_turn(session: Session, stop: ActivityEvent) -> TurnSummary:
         and item.verification_status == "VERIFIED"
         and item.exit_code is not None
         and item.exit_code != 0
+        and _is_execution_event(item)
     )
     successful_events = tuple(
         item
@@ -192,6 +203,7 @@ def summarize_turn(session: Session, stop: ActivityEvent) -> TurnSummary:
         and item.verification_status == "VERIFIED"
         and item.exit_code == 0
         and item.command
+        and _is_execution_event(item)
         and (_TEST_COMMAND.search(item.command) or _BUILD_COMMAND.search(item.command))
     )
     instruction = stop.instruction or next(
