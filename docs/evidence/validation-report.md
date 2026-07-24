@@ -1357,3 +1357,61 @@ generation service and curator are therefore included in the same restart path.
 - Gemma 4 E4B content-quality qualification for this exact digest: **PENDING_GPU_IDLE**.
 - Manual approval: not required for knowledge publication. Codex hook trust remains the separate,
   already user-confirmed trust boundary.
+
+## 2026-07-24 evidence-blog-v2 hardening
+
+The first live backoff window showed that the GPU could briefly become free between scheduled
+checks. The scheduler interval was intentionally not bypassed. Before allowing the first model
+run, the publication validator was audited again and strengthened:
+
+- every separate paragraph in context, problem, cause/decision, implementation, and verification
+  now needs its own valid evidence citation;
+- numbers in title, standfirst, limitations, and evidence claims must occur in verified evidence;
+- claim-level numeric values are checked against the claim's own cited evidence;
+- the configured rendered-article character range is sent to the model so a concise response is
+  not rejected for a requirement the prompt never stated;
+- PostgreSQL `pg_try_advisory_xact_lock` makes GPU probing and curation a singleton transaction
+  even if multiple curator containers are started;
+- the prompt revision changed from `evidence-blog-v1` to `evidence-blog-v2`, forcing a new
+  digest-plus-prompt qualification key rather than reusing any earlier result.
+
+An actual PostgreSQL transaction held the curator advisory lock for ten seconds while a second
+`knowledge_curator --once` process ran. The second process returned
+`{"state":"standby_lock_held"}` and did not probe the GPU or call Ollama.
+
+Updated verification:
+
+```text
+ruff check services tests scripts
+  PASS
+pytest tests/unit -q
+  PASS: 50
+dedicated PostgreSQL database lkp_test_curator_v2_20260724
+  PASS: 16 integration tests; database removed after the run
+Next.js TypeScript and production Docker build
+  PASS
+Playwright against the deployed portal
+  PASS: 4/4
+GET /health/ready
+  PASS
+generation prompt shown by status API
+  evidence-blog-v2
+generation Ollama loaded models while waiting
+  none
+```
+
+The post-hardening append-only backup is:
+
+```text
+D:\LocalBackup\LocalKnowledgePortal\database\2026-07-24T022518Z
+dump size: 34,213,873 bytes
+SHA-256: 37e4c8e4ad49d159b34dca8ffdd8b444b0c1df6e62de9e631de02d140f0f69b5
+manifest prompt: evidence-blog-v2
+manifest model: gemma4:e4b
+manifest curator state: waiting_for_gpu
+```
+
+The dump restored successfully into a separate tmpfs PostgreSQL 18 instance with schema
+`0006_chunk_content_trigram`, 4,389 document identities, 41,816 chunks, 483 vectors, and 1,321
+activities. The temporary restore container was removed. E4B qualification remains
+**PENDING_GPU_IDLE**; no article has been auto-published by an unqualified model.

@@ -48,6 +48,7 @@ const textByLocale = {
         qualification_error_cooldown: "모델 평가 오류 냉각 중",
         curation_error: "편집 오류 재시도 대기",
         curation_error_cooldown: "편집 오류 냉각 중",
+        standby_lock_held: "다른 편집기 인스턴스가 처리 중",
         idle: "대기 중", completed_batch: "최근 편집 완료", disabled: "비활성",
       },
       categoryLabels: {
@@ -108,6 +109,7 @@ const textByLocale = {
         qualification_error_cooldown: "qualification error cooldown",
         curation_error: "curation retry pending",
         curation_error_cooldown: "curation error cooldown",
+        standby_lock_held: "another editor instance is active",
         idle: "idle", completed_batch: "batch completed", disabled: "disabled",
       },
       categoryLabels: {

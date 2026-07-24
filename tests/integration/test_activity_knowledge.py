@@ -68,7 +68,7 @@ class FakeEvidenceEditor:
 
     def curate(self, _payload, *, language, prompt_version):
         assert language == "ko"
-        assert prompt_version == "evidence-blog-v1"
+        assert prompt_version == "evidence-blog-v2"
         section = (
             "검증된 코드 변경과 독립 실행 테스트를 함께 확인했다. 작업 보고의 표현은 "
             "근거로 사용하지 않았으며 관측 가능한 구현과 결과만 정리했다. [E1] [E2]"

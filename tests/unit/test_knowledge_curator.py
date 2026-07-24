@@ -4,6 +4,7 @@ from lkp_indexer.knowledge_curator import (
     GpuSnapshot,
     busy_retry_seconds,
     gpu_is_available,
+    run_once,
     validate_draft,
 )
 
@@ -51,6 +52,27 @@ def test_gpu_policy_and_bounded_backoff():
     assert busy_retry_seconds(99, settings) == 14_400
 
 
+def test_second_curator_stays_standby_when_database_lock_is_held():
+    class LockedResult:
+        @staticmethod
+        def scalar_one():
+            return False
+
+    class LockedSession:
+        @staticmethod
+        def execute(*_args, **_kwargs):
+            return LockedResult()
+
+    def unexpected_gpu_probe():
+        raise AssertionError("standby curator must not probe the GPU")
+
+    assert run_once(
+        LockedSession(),  # type: ignore[arg-type]
+        Settings(),
+        gpu_probe=unexpected_gpu_probe,
+    ) == {"state": "standby_lock_held"}
+
+
 def test_evidence_bound_article_passes_without_invention():
     settings = Settings(
         knowledge_curation_min_article_chars=300,
@@ -91,3 +113,52 @@ def test_article_with_unsupported_number_or_hype_is_held():
     assert status == "NEEDS_REVIEW"
     assert "verification_unsupported_number" in reasons
     assert "inflated_language" in reasons
+
+
+def test_every_article_paragraph_requires_its_own_evidence_citation():
+    settings = Settings(
+        knowledge_curation_min_article_chars=300,
+        knowledge_curation_max_article_chars=10_000,
+    )
+    draft = _article(
+        context=(
+            "첫 문단은 확인된 마운트 변경을 설명한다. [E1]\n\n"
+            "두 번째 문단은 별도 근거 인용 없이 새로운 설명을 추가한다."
+        )
+    )
+    status, reasons, _article_text = validate_draft(
+        draft,
+        {
+            "E1": "mount guard implementation changed",
+            "E2": "mount guard tests passed exit_code=0",
+        },
+        settings,
+    )
+    assert status == "NEEDS_REVIEW"
+    assert "context_paragraph_missing_citation" in reasons
+
+
+def test_summary_and_claim_numbers_must_exist_in_verified_evidence():
+    settings = Settings(
+        knowledge_curation_min_article_chars=300,
+        knowledge_curation_max_article_chars=10_000,
+    )
+    draft = _article(
+        standfirst="근거에는 없는 처리 시간 99ms를 요약에 추가했다.",
+        evidence_claims=[
+            EvidenceBoundClaim(
+                text="처리 시간이 99ms였다.", evidence_ids=["E1", "E2"]
+            )
+        ],
+    )
+    status, reasons, _article_text = validate_draft(
+        draft,
+        {
+            "E1": "mount guard implementation changed",
+            "E2": "mount guard tests passed exit_code=0",
+        },
+        settings,
+    )
+    assert status == "NEEDS_REVIEW"
+    assert "standfirst_unsupported_number" in reasons
+    assert "claim_unsupported_number" in reasons

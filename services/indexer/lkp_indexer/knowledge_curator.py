@@ -16,7 +16,7 @@ from lkp.db import SessionLocal
 from lkp.logging import configure_logging
 from lkp.models import EvidenceRecord, KnowledgeCandidate, SystemSetting
 from lkp.settings import Settings, get_settings
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from .case_pages import materialize_case
@@ -216,6 +216,21 @@ def validate_draft(
     if draft.unsupported_inferences:
         reasons.append("unsupported_inferences_present")
 
+    all_evidence_text = " ".join(evidence_map.values())
+    all_source_numbers = {
+        token.replace(",", "") for token in _NUMBER.findall(all_evidence_text)
+    }
+    for name, content in {
+        "title": draft.title,
+        "standfirst": draft.standfirst,
+        "limitations": draft.limitations,
+    }.items():
+        if any(
+            token.replace(",", "") not in all_source_numbers
+            for token in _NUMBER.findall(content)
+        ):
+            reasons.append(f"{name}_unsupported_number")
+
     sections = {
         "context": draft.context,
         "problem": draft.problem,
@@ -229,21 +244,29 @@ def validate_draft(
         cited_ids.update(citations)
         if len(content.strip()) < 80:
             reasons.append(f"{name}_too_short")
-        if not citations:
-            reasons.append(f"{name}_missing_citation")
-            continue
-        invalid = citations - evidence_map.keys()
-        if invalid:
-            reasons.append(f"{name}_invalid_citation")
-            continue
-        cited_text = " ".join(evidence_map[item] for item in citations)
-        source_numbers = {
-            token.replace(",", "") for token in _NUMBER.findall(cited_text)
-        }
-        for token in _NUMBER.findall(content):
-            if token.replace(",", "") not in source_numbers:
+        paragraphs = [
+            item.strip() for item in re.split(r"\n\s*\n", content) if item.strip()
+        ]
+        for paragraph in paragraphs or [content]:
+            paragraph_citations = set(_CITATION.findall(paragraph))
+            if not paragraph_citations:
+                reasons.append(f"{name}_paragraph_missing_citation")
+                continue
+            invalid = paragraph_citations - evidence_map.keys()
+            if invalid:
+                reasons.append(f"{name}_invalid_citation")
+                continue
+            cited_text = " ".join(
+                evidence_map[item] for item in paragraph_citations
+            )
+            source_numbers = {
+                token.replace(",", "") for token in _NUMBER.findall(cited_text)
+            }
+            if any(
+                token.replace(",", "") not in source_numbers
+                for token in _NUMBER.findall(paragraph)
+            ):
                 reasons.append(f"{name}_unsupported_number")
-                break
 
     if len(cited_ids) < 2:
         reasons.append("insufficient_evidence_coverage")
@@ -252,6 +275,16 @@ def validate_draft(
             item not in evidence_map for item in claim.evidence_ids
         ):
             reasons.append("claim_invalid_citation")
+            break
+        cited_text = " ".join(evidence_map[item] for item in claim.evidence_ids)
+        source_numbers = {
+            token.replace(",", "") for token in _NUMBER.findall(cited_text)
+        }
+        if any(
+            token.replace(",", "") not in source_numbers
+            for token in _NUMBER.findall(claim.text)
+        ):
+            reasons.append("claim_unsupported_number")
             break
     lowered = article.casefold()
     if any(term.casefold() in lowered for term in _HYPE):
@@ -619,6 +652,12 @@ def run_once(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
+    lock_acquired = session.execute(
+        text("select pg_try_advisory_xact_lock(hashtext(:key))"),
+        {"key": _SCHEDULER_KEY},
+    ).scalar_one()
+    if not lock_acquired:
+        return {"state": "standby_lock_held"}
     scheduler = _setting(session)
     state = dict(scheduler.value or {})
     due = _parse_time(state.get("next_attempt_at"))

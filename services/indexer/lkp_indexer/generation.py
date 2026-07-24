@@ -78,6 +78,8 @@ class OllamaGenerationProvider:
         configured_digest: str,
         timeout_seconds: int,
         *,
+        article_min_chars: int = 1_000,
+        article_max_chars: int = 10_000,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         if not model:
@@ -85,6 +87,8 @@ class OllamaGenerationProvider:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.configured_digest = configured_digest
+        self.article_min_chars = article_min_chars
+        self.article_max_chars = article_max_chars
         self.client = httpx.Client(timeout=timeout_seconds, transport=transport)
 
     def _model_digest(self) -> str:
@@ -172,7 +176,12 @@ class OllamaGenerationProvider:
             "result, infer intent, invent a root cause, or turn a reported claim into a verified "
             "fact. Every factual sentence in context, problem, cause_or_decision, implementation, "
             "and verification must cite one or more supplied verified evidence IDs in square "
-            "brackets, for example [E1]. If evidence cannot support a reusable article, choose "
+            "brackets, for example [E1]. Every separate paragraph in those fields must contain "
+            "at least one citation. Use a number or measurement only when the exact value appears "
+            "in the cited evidence; this also applies to title, standfirst, limitations, and "
+            "evidence_claims. For a publish decision, write enough useful context for the rendered "
+            f"article to contain {self.article_min_chars} to {self.article_max_chars} characters; "
+            "do not pad it with repetition. If evidence cannot support a reusable article, choose "
             "needs_review. Put uncertain statements only in unsupported_inferences and never cite "
             "them as facts. Do not repeat the same fact across sections. "
             f"Prompt version: {prompt_version}. Return exactly the supplied JSON schema."
@@ -220,5 +229,7 @@ def build_generation_provider(settings: Settings) -> GenerationProvider | None:
             settings.generation_model,
             settings.generation_model_digest,
             settings.generation_timeout_seconds,
+            article_min_chars=settings.knowledge_curation_min_article_chars,
+            article_max_chars=settings.knowledge_curation_max_article_chars,
         )
     raise ValueError(f"unsupported generation provider: {settings.generation_provider}")

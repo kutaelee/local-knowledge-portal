@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     generation_model_digest: str = "unresolved"
     generation_timeout_seconds: int = 120
     generation_max_input_chars: int = 40000
-    generation_prompt_version: str = "evidence-blog-v1"
+    generation_prompt_version: str = "evidence-blog-v2"
     knowledge_curation_enabled: bool = False
     knowledge_curation_auto_publish: bool = True
     knowledge_curation_poll_seconds: int = Field(default=60, ge=10, le=3600)

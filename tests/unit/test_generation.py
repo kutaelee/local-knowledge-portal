@@ -108,6 +108,7 @@ def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():
         system = payload["messages"][0]["content"]
         assert "untrusted data" in system
         assert "verified evidence IDs" in system
+        assert "1000 to 10000 characters" in system
         return httpx.Response(
             200,
             json={
