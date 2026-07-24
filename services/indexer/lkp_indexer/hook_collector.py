@@ -15,6 +15,7 @@ from lkp.settings import Settings, get_settings
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .activity_knowledge import finalize_pending_stops, project_from_paths
 from .service_runtime import service_pid
 
 _LOW_SIGNAL_PROMPTS = {
@@ -42,10 +43,13 @@ _EVIDENCE_COMMAND = re.compile(
     r")"
 )
 _REUSABLE_INSTRUCTION = re.compile(
-    r"(?i)(fix|bug|error|fail|implement|build|change|refactor|optim|performance|"
+    r"(?i)(fix|bug|error|fail|implement|develop|build|change|refactor|optim|performance|"
     r"load|incident|outage|recover|verify|test|benchmark|experiment|migrat|backup|"
+    r"case|knowledge|record|collect|capture|workflow|pipeline|config|deploy|"
     r"restore|root cause|decision|runbook|오류|실패|수정|구현|추가|변경|개선|최적화|"
-    r"성능|부하|장애|복구|검증|테스트|실험|마이그레이션|백업|복원|원인|재발|결정)"
+    r"성능|부하|장애|복구|검증|테스트|실험|마이그레이션|백업|복원|원인|재발|"
+    r"회귀|설계|배포|빌드|결정|런북|개발|사례|지식|기록|수집|저장|워크플로우|"
+    r"파이프라인|설정|운영)"
 )
 _MUTATING_TOOLS = {"apply_patch", "write_file", "edit_file"}
 
@@ -122,6 +126,66 @@ def _transcript_tool_output(
         output = record.get("output")
         return output[:1_000_000] if isinstance(output, str) else ""
     return ""
+
+
+def _transcript_turn_instruction(
+    payload: dict[str, Any],
+    sessions_root: Path | None,
+    turn_id: str | None,
+    max_bytes: int = 8_000_000,
+) -> str | None:
+    if sessions_root is None or not turn_id:
+        return None
+    transcript = payload.get("transcript_path")
+    if not isinstance(transcript, str):
+        return None
+    normalized = transcript.replace("\\", "/")
+    marker = "/.codex/sessions/"
+    marker_index = normalized.casefold().find(marker)
+    if marker_index < 0:
+        return None
+    relative = normalized[marker_index + len(marker) :].lstrip("/")
+    if not relative or ".." in Path(relative).parts:
+        return None
+    root = sessions_root.resolve(strict=False)
+    source = (root / relative).resolve(strict=False)
+    try:
+        source.relative_to(root)
+        with source.open("rb") as handle:
+            size = source.stat().st_size
+            handle.seek(max(0, size - max_bytes))
+            raw = handle.read(max_bytes)
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+    active_turn: str | None = None
+    messages: list[str] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict) or item.get("type") != "event_msg":
+            continue
+        record = item.get("payload")
+        if not isinstance(record, dict):
+            continue
+        event_type = record.get("type")
+        if event_type == "task_started":
+            active_turn = str(record.get("turn_id") or "")
+            continue
+        if event_type == "task_complete":
+            if str(record.get("turn_id") or "") == turn_id:
+                break
+            continue
+        if event_type != "user_message" or active_turn != turn_id:
+            continue
+        message = record.get("message")
+        if isinstance(message, str) and message.strip():
+            messages.append(message.strip())
+    if not messages:
+        return None
+    return "\n\n".join(messages)[:16000]
 
 
 def _exit_code(
@@ -256,6 +320,7 @@ def envelope_to_activity(
     session: Session,
     envelope: dict[str, Any],
     sessions_root: Path | None = None,
+    transcript_tail_bytes: int = 8_000_000,
 ) -> ActivityEvent:
     payload = envelope["payload"]
     event_name = str(envelope["event_name"])
@@ -267,6 +332,15 @@ def envelope_to_activity(
     exit_code = _exit_code(payload, sessions_root)
     changed_files = _changed_files(payload, tool_name)
     cwd = str(envelope.get("cwd") or payload.get("cwd") or "") or None
+    turn_id = envelope.get("turn_id")
+    instruction = _instruction(payload, event_name)
+    if event_name in {"Stop", "SubagentStop"} and instruction is None:
+        instruction = _transcript_turn_instruction(
+            payload,
+            sessions_root,
+            str(turn_id) if turn_id else None,
+            transcript_tail_bytes,
+        )
     verified_result = None
     verification_status = "UNVERIFIED"
     if event_name == "PostToolUse" and exit_code is not None:
@@ -290,12 +364,12 @@ def envelope_to_activity(
     activity = ActivityEvent(
         event_key=event_id,
         session_id=str(envelope.get("session_id") or ""),
-        turn_id=envelope.get("turn_id"),
+        turn_id=turn_id,
         event_type=event_name,
         occurred_at=_parse_time(payload.get("timestamp") or envelope.get("received_at")),
-        project_key=Path(cwd).name if cwd else None,
+        project_key=project_from_paths(changed_files, cwd),
         cwd=cwd,
-        instruction=_instruction(payload, event_name),
+        instruction=instruction,
         tool_name=tool_name,
         command=_command(payload),
         exit_code=exit_code,
@@ -319,19 +393,30 @@ def envelope_to_activity(
                 ActivityEvent.session_id == activity.session_id,
                 ActivityEvent.turn_id == activity.turn_id,
                 ActivityEvent.event_type.in_(["Stop", "SubagentStop"]),
-                ActivityEvent.verification_status == "UNVERIFIED",
             )
         ).all()
         for stop_event in completed:
-            stop_event.verified_result = (
-                f"{activity.tool_name or 'tool'} exit={activity.exit_code}"
-            )
-            stop_event.verification_status = "VERIFIED"
+            if stop_event.verification_status == "UNVERIFIED":
+                stop_event.verified_result = (
+                    f"{activity.tool_name or 'tool'} exit={activity.exit_code}"
+                )
+                stop_event.verification_status = "VERIFIED"
+            metadata = dict(stop_event.metadata_json or {})
+            pipeline = metadata.get("knowledge_pipeline") or {}
+            if pipeline.get("reason") in {
+                "no_meaningful_file_change",
+                "no_successful_validation",
+            }:
+                metadata.pop("knowledge_pipeline", None)
+                stop_event.metadata_json = metadata
     return activity
 
 
 def collect_file(
-    session: Session, path: Path, sessions_root: Path | None = None
+    session: Session,
+    path: Path,
+    sessions_root: Path | None = None,
+    transcript_tail_bytes: int = 8_000_000,
 ) -> bool:
     envelope = json.loads(path.read_text(encoding="utf-8"))
     event_id = str(envelope["event_id"])
@@ -370,7 +455,12 @@ def collect_file(
             processed_at=datetime.now(timezone.utc),
         )
     )
-    envelope_to_activity(session, envelope, sessions_root)
+    envelope_to_activity(
+        session,
+        envelope,
+        sessions_root,
+        transcript_tail_bytes,
+    )
     return True
 
 
@@ -422,7 +512,10 @@ def collect_once(settings: Settings) -> dict[str, int]:
             try:
                 with SessionLocal() as session:
                     changed = collect_file(
-                        session, claimed, settings.codex_sessions_dir
+                        session,
+                        claimed,
+                        settings.codex_sessions_dir,
+                        settings.knowledge_transcript_tail_bytes,
                     )
                     session.commit()
                 claimed.unlink(missing_ok=True)
@@ -432,6 +525,16 @@ def collect_once(settings: Settings) -> dict[str, int]:
                 retry = root / "pending" / claimed.name
                 retry.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(claimed, retry)
+    try:
+        with SessionLocal() as session:
+            knowledge_counts = finalize_pending_stops(session, settings)
+            session.commit()
+        counts.update(
+            {f"knowledge_{key}": value for key, value in knowledge_counts.items()}
+        )
+    except Exception:
+        counts["failed"] += 1
+        counts["knowledge_failed"] = 1
     return counts
 
 

@@ -33,7 +33,8 @@ Only active canonical pages participate in lexical, semantic, hybrid, and RAG re
 - Current retrieval cannot return both superseded and current operational advice.
 - Every result retains normal document/version/chunk/line provenance plus the case and revision
   identifiers in the managed page.
-- Activity history still does not automatically become a case. Category evidence gates and
-  explicit publication remain mandatory.
+- Activity history does not become a case by default. ADR 0010 permits deterministic automatic
+  publication only when a completed turn has observed file-change and validation evidence and
+  passes the same category gate.
 - A failed materialization fails the publish request instead of reporting a searchable case that
   was never projected.

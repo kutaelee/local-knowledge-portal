@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 
+from lkp_indexer.activity_knowledge import project_from_paths
 from lkp_indexer.hook_collector import (
     _changed_files,
     _exit_code,
+    _transcript_turn_instruction,
     activity_signal,
 )
 
@@ -72,3 +74,78 @@ def test_exit_code_can_be_resolved_from_read_only_transcript(tmp_path: Path):
         "tool_use_id": "call-123",
     }
     assert _exit_code(payload, sessions) == 0
+
+
+def test_korean_development_instruction_is_selected():
+    for prompt in (
+        "재부팅 복구 로직을 수정하고 회귀 테스트까지 검증해",
+        "현재 채팅 외의 개발 사례도 지식으로 수집해",
+    ):
+        envelope = {
+            "event_name": "UserPromptSubmit",
+            "payload": {"prompt": prompt},
+        }
+        promote, reasons = activity_signal(envelope)
+        assert promote is True
+        assert reasons == ["reusable_work_instruction"]
+
+
+def test_project_is_derived_from_changed_repository_path():
+    assert (
+        project_from_paths(
+            [r"C:\Dev\Repos\local-voice-agent\services\api.py"],
+            r"C:\Users\kutae\Documents\Codex\thread",
+        )
+        == "local-voice-agent"
+    )
+    assert (
+        project_from_paths(
+            ["/home/kutae/src/local-knowledge-portal/README.md"],
+            None,
+        )
+        == "local-knowledge-portal"
+    )
+
+
+def test_turn_instruction_is_read_from_bounded_transcript(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    transcript = sessions / "2026" / "07" / "24" / "rollout.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "turn_id": "turn-1"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "다른 개발 작업도 증거 기반으로 사례화해",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete", "turn_id": "turn-1"},
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    payload = {
+        "transcript_path": (
+            r"\\?\C:\Users\kutae\.codex\sessions\2026\07\24\rollout.jsonl"
+        )
+    }
+    assert (
+        _transcript_turn_instruction(payload, sessions, "turn-1")
+        == "다른 개발 작업도 증거 기반으로 사례화해"
+    )

@@ -226,11 +226,27 @@ claiming it. It promotes file mutations, failed commands, and explicit test/buil
 operations into activity history.
 
 The collector reads only `C:\Users\kutae\.codex\sessions` through a read-only container mount to
-resolve the tool call's recorded exit code. It does not mount the rest of `.codex`. Activities are
-not documents and are never chunked or embedded. A reported assistant result remains
-`UNVERIFIED` unless an independently captured exit code exists in the same turn. Knowledge cases
-still require the evidence gate and explicit candidate publication; ordinary activity is not
-automatically published as a wiki fact.
+resolve the tool call's recorded exit code and, when needed, the current turn's user instruction
+from a bounded transcript tail. It does not mount the rest of `.codex`.
+
+Activities are not documents and are never chunked or embedded. A reported assistant result
+remains narrative, not evidence. Across all Codex sessions, a completed turn becomes an automatic
+candidate only when the same turn contains both a successful meaningful file mutation and a
+successful test/lint/validation/build command with observed exit codes. Incomplete or partial
+reports stop at the review-candidate state. Only a candidate that passes the existing evidence
+gate may be published and projected into `_generated/Knowledge-Cases`.
+
+When auditing capture, compare these layers separately in the portal:
+
+- **Activity**: selected global work history, including reported and verified result columns.
+- **Candidate review**: evidence-backed but incomplete or ambiguous work.
+- **Knowledge cases**: verified canonical records only.
+- **Documents**: source files and managed case projections; activity rows do not inflate this
+  count.
+
+If a reported success has no observed command exit, leave it `UNVERIFIED`. Do not manually edit
+the managed Markdown page to work around the gate; attach evidence to a new candidate or rerun the
+validation.
 
 ## Logs
 

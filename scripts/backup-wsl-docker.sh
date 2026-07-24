@@ -36,9 +36,9 @@ cp -R /mnt/c/Docker/local-knowledge-portal/config/. "$config_dir/"
 if [[ -d /mnt/e/Data/LocalKnowledgePortal/vault/_generated ]]; then
   cp -R /mnt/e/Data/LocalKnowledgePortal/vault/_generated "$vault_dir/"
 fi
-if [[ -d /mnt/e/LocalKnowledgePortal/ingest/codex-spool ]]; then
+if [[ -d /mnt/e/Data/LocalKnowledgePortal/ingest/codex-spool ]]; then
   mkdir -p "$manifest_dir/events"
-  cp -R /mnt/e/LocalKnowledgePortal/ingest/codex-spool \
+  cp -R /mnt/e/Data/LocalKnowledgePortal/ingest/codex-spool \
     "$manifest_dir/events/codex-spool"
 fi
 
@@ -49,6 +49,12 @@ database_version=$(docker compose --env-file "$env_file" -f "$compose_file" exec
   psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "show server_version")
 model=$(docker compose --env-file "$env_file" -f "$compose_file" exec -T ollama \
   ollama list | awk 'NR==2 {print $1 " " $2 " " $3}')
+embedding_provider=$(sed -n 's/^LKP_EMBEDDING_PROVIDER=//p' "$env_file" | tr -d '\r')
+embedding_model=$(sed -n 's/^LKP_EMBEDDING_MODEL=//p' "$env_file" | tr -d '\r')
+embedding_model_digest=$(sed -n 's/^LKP_EMBEDDING_MODEL_DIGEST=//p' "$env_file" | tr -d '\r')
+embedding_dimension=$(sed -n 's/^LKP_EMBEDDING_DIMENSION=//p' "$env_file" | tr -d '\r')
+embedding_revision=$(sed -n 's/^LKP_EMBEDDING_REVISION=//p' "$env_file" | tr -d '\r')
+pipeline_version=$(sed -n 's/^LKP_PIPELINE_VERSION=//p' "$env_file" | tr -d '\r')
 dump_size=$(stat -c %s "$dump_path")
 dump_sha=$(awk '{print $1}' "$manifest_dir/database.sha256")
 source_hash=$(sha256sum \
@@ -70,6 +76,12 @@ manifest = {
     "sha256": ${dump_sha@Q},
     "source_configuration_hash": ${source_hash@Q},
     "model": ${model@Q},
+    "embedding_provider": ${embedding_provider@Q},
+    "embedding_model": ${embedding_model@Q},
+    "embedding_model_digest": ${embedding_model_digest@Q},
+    "embedding_dimension": int(${embedding_dimension@Q}),
+    "embedding_revision": ${embedding_revision@Q},
+    "pipeline_version": ${pipeline_version@Q},
     "compose_path": ${compose_file@Q},
     "data_path": "E:\\\\Data\\\\LocalKnowledgePortal",
     "managed_vault_files": int(${managed_vault_files@Q}),

@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     codex_sessions_dir: Path = Path("/codex-sessions")
     hook_collector_poll_seconds: float = 2.0
     hook_claim_stale_seconds: int = 60
+    knowledge_auto_publish: bool = True
+    knowledge_transcript_tail_bytes: int = Field(
+        default=8_000_000, ge=1_000_000, le=32_000_000
+    )
     pipeline_version: str = "1.2.0"
     parser_version: str = "markdown-it-py-4"
     chunker_version: str = "lkp-heading-symbol-v1"

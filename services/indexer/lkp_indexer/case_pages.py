@@ -16,9 +16,10 @@ from lkp.models import (
     KnowledgeOccurrence,
     SourceRoot,
 )
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .paths import idempotency_key
 from .queue import enqueue
 
 
@@ -31,7 +32,11 @@ def _one_line(value: str | None) -> str:
     return " ".join((value or "").split())
 
 
-def _source_hash(case: KnowledgeCase, evidence: list[EvidenceRecord]) -> str:
+def _source_hash(
+    case: KnowledgeCase,
+    evidence: list[EvidenceRecord],
+    revision_content: dict,
+) -> str:
     payload = {
         "id": str(case.id),
         "category": case.category,
@@ -41,6 +46,7 @@ def _source_hash(case: KnowledgeCase, evidence: list[EvidenceRecord]) -> str:
         "root_cause": case.root_cause,
         "solution": case.solution,
         "status": case.status,
+        "revision_content": revision_content,
         "evidence": [
             {
                 "type": item.evidence_type,
@@ -67,7 +73,19 @@ def render_case_markdown(
     source_hash: str,
     pipeline_version: str,
     generated_at: datetime,
+    revision_content: dict | None = None,
 ) -> str:
+    revision_content = revision_content or {}
+    if case.category in {"implementation", "custom_success"}:
+        problem_heading = "목표 / Goal"
+        symptom_heading = "작업 범위 / Scope"
+        cause_heading = "검증된 구현 범위 / Verified implementation scope"
+        solution_heading = "적용 조치 / Applied change"
+    else:
+        problem_heading = "문제 / Problem"
+        symptom_heading = "증상 / Symptom"
+        cause_heading = "확인된 원인 / Verified root cause"
+        solution_heading = "현재 조치 / Current resolution"
     lines = [
         "---",
         "managed: true",
@@ -89,21 +107,34 @@ def render_case_markdown(
             "이전 내용은 사례 이력에 보존됩니다."
         ),
         "",
-        "## 문제 / Problem",
+        f"## {problem_heading}",
         "",
         case.problem,
         "",
-        "## 증상 / Symptom",
+        f"## {symptom_heading}",
         "",
         case.symptom,
         "",
-        "## 확인된 원인 / Verified root cause",
+        f"## {cause_heading}",
         "",
         case.root_cause,
         "",
-        "## 현재 조치 / Current resolution",
+        f"## {solution_heading}",
         "",
         case.solution,
+        "",
+        "## 보고된 결과 / Reported outcome",
+        "",
+        (
+            "> 이 내용은 작업 종료 메시지에서 가져온 보고이며, 그 자체는 검증 근거가 "
+            "아닙니다. 아래 실행 증거와 구분해서 읽어야 합니다."
+        ),
+        "",
+        str(revision_content.get("reported_result") or "보고된 결과 없음"),
+        "",
+        "## 검증된 결과 / Verified result",
+        "",
+        str(revision_content.get("verified_result") or "검증된 결과 없음"),
         "",
         "## 검증 근거 / Evidence",
         "",
@@ -162,16 +193,17 @@ def materialize_case(
     )
     if not evidence or not all(item.verified for item in evidence):
         raise ValueError("refusing to materialize a case without verified evidence")
-    revision_number = session.scalar(
-        select(func.max(KnowledgeCaseRevision.revision_number)).where(
-            KnowledgeCaseRevision.case_id == case.id
-        )
+    revision = session.scalar(
+        select(KnowledgeCaseRevision)
+        .where(KnowledgeCaseRevision.case_id == case.id)
+        .order_by(KnowledgeCaseRevision.revision_number.desc())
     )
-    if not revision_number:
+    if revision is None:
         raise ValueError("refusing to materialize a case without a revision")
+    revision_number = revision.revision_number
 
     now = datetime.now(timezone.utc)
-    source_hash = _source_hash(case, evidence)
+    source_hash = _source_hash(case, evidence, revision.content_json)
     metadata = dict(case.metadata_json or {})
     relative_value = metadata.get("materialized_path")
     if relative_value:
@@ -218,6 +250,7 @@ def materialize_case(
         source_hash=source_hash,
         pipeline_version=pipeline_version,
         generated_at=now,
+        revision_content=revision.content_json,
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
@@ -263,9 +296,15 @@ def materialize_case(
         )
     )
     if root is not None:
+        info = target.stat()
         enqueue(
             session,
-            key=f"knowledge-case:{case.id}:revision:{revision_number}:{source_hash}",
+            key=idempotency_key(
+                str(root.id),
+                str(target),
+                info.st_size,
+                info.st_mtime_ns,
+            ),
             source_root_id=root.id,
             canonical_path=str(target),
             job_type="index",

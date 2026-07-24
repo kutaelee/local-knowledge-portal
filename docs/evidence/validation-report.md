@@ -875,3 +875,135 @@ final API/Web probes
 ```
 
 Verdict for reboot recovery and canonical case vector projection: **VERIFIED**.
+
+## 2026-07-24 global Codex activity-to-knowledge promotion
+
+### Finding
+
+The global hook transport was not limited to this chat. Production already contained activity
+from four Codex sessions, including the local voice agent and Interstellar Drift work. The missing
+component was an automatic activity-to-candidate finalizer: canonical cases remained at the three
+manually curated portal incidents even while hundreds of other tool exits and file changes were
+available.
+
+The audit also found three related defects:
+
+- retained Korean user instructions were too narrowly classified;
+- activity project names fell back to the chat workspace instead of the repository in changed
+  file paths;
+- canonical page writes and watcher notifications used different idempotency keys, creating two
+  effective index jobs for one new page.
+
+### Implemented boundary
+
+All Codex sessions now use the same deterministic finalizer. A turn remains activity-only unless
+it has a Stop report, a successful meaningful source/config/document mutation, and a successful
+test, lint, validation, or build command with an observed exit code. The repository is derived
+from `C:\Dev\Repos\<project>` or `/home/<user>/src/<project>`.
+
+The assistant Stop text is stored and rendered as **Reported outcome** but is explicitly not
+evidence. File mutations and command exits are separate verified evidence rows. Completed
+implementation work can publish after the existing gate passes; `partial`, `진행 중`, and
+`진행 상황` work remains a review candidate. Error-resolution work auto-publishes only when the
+report also contains explicit `원인:` and `조치:` (or English equivalents), preventing a generic
+summary from inventing or merging root causes.
+
+Delayed PostToolUse evidence reopens an activity-only Stop that was waiting for a change or
+validation event. Repeated processing uses `source_stop_activity_id`, and normal canonical dedup,
+occurrence, revision, same-symptom/different-cause relations, and `NEEDS_REVIEW` rules still apply.
+Canonical materialization and watcher enqueue now share the same file metadata idempotency key.
+
+The optional local generation adapter remains disabled. A future local LLM may improve candidate
+wording but cannot create evidence, change verification state, bypass deduplication, or publish a
+candidate rejected by the deterministic gate.
+
+### Live production result
+
+After deploying and backfilling eligible historical Stops:
+
+```text
+Codex sessions represented: 4
+activity rows / exit-code verified: 1,009 / 780
+automatic candidates: 7
+automatic canonical publications: 4
+automatic review candidates: 3
+canonical cases / distinct dedup keys / occurrences: 7 / 7 / 8
+canonical managed pages / production vectors: 7 / 91
+case index jobs: 14 succeeded, 0 active
+```
+
+The four new canonical cases came from the separate Interstellar Drift session. Two local voice
+agent turns and one partial Interstellar turn correctly stopped at review-candidate state. A live
+event after deployment also classified an absolute
+`C:\Dev\Repos\local-voice-agent\...` mutation as project `local-voice-agent`, independently of
+this chat workspace.
+
+The 14 historical jobs were the seven direct jobs plus seven watcher jobs created before the
+shared-key correction. All completed idempotently without duplicate document versions. The new
+integration assertion submits the watcher-equivalent key after materialization and confirms that
+the second enqueue returns no job and the database retains one job.
+
+Measured live hybrid retrieval:
+
+| Query | Top canonical page | Vector similarity | Confidence | First/cached latency |
+|---|---|---:|---|---:|
+| 로컬 전용 고품질 파이프라인 품질 보정과 검증 방법 | Interstellar Drift 고품질 파이프라인 | 0.7770 | high | 7,220 ms / 45 ms |
+| 모델별 전용 워크플로우와 VRAM 부하 게이트 | Interstellar Drift 모델별 부하 게이트 | 0.7452 | high | 2,127 ms |
+| MON_01 레이어드 몬스터 로컬 파이프라인 검증 | Interstellar Drift MON_01 파이프라인 | 0.6838 | high | 1,853 ms |
+| 용도별 로컬 워크플로우 GPU VRAM 부하 원인 | Interstellar Drift 용도별 워크플로우 | 0.6567 | high | 1,565 ms |
+
+Every result returned the managed relative path, document/version/chunk provenance, content hash,
+and source line range. The slower first query was local query embedding; the same revision-aware
+query cache returned the repeat in 45 ms.
+
+### Executed verification
+
+```text
+uv run ruff check .
+  PASS
+uv run pytest -q tests/unit
+  PASS: 40
+dedicated PostgreSQL test database with pre-created vector/pg_trgm extensions
+bash scripts/test-integration-container.sh /workspace
+  PASS: 13; one upstream Starlette deprecation warning
+Docker application image build and API/collector/worker/watcher recreation
+  PASS
+live PostgreSQL credential rotation, database restart, migration connection, service recovery
+  PASS: API 200, web 200, PostgreSQL healthy
+bash scripts/backup-wsl-docker.sh
+  PASS: D:\LocalBackup\LocalKnowledgePortal\database\2026-07-24T000649Z
+bash scripts/restore-test-wsl-docker.sh <backup>
+  PASS: revision 0006_chunk_content_trigram; 3,824 documents; 39,866 chunks;
+        377 vectors; 1,003 activities
+```
+
+The final backup manifest records PostgreSQL 18.4, SHA-256
+`755f449466975d63e0b57296ead6747079dcc8740cd1c2179e9cdff6f1414180`, the full
+Ollama digest
+`ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d`,
+dimension 1,024, production embedding revision, and pipeline version. The preceding immutable
+`2026-07-24T000618Z` backup has a valid dump and checksum but only the short Ollama list digest in
+its manifest; it was retained and superseded rather than overwritten or deleted.
+
+The first temporary-role integration attempt failed because a non-superuser cannot install the
+vector extension. The corrected isolated setup created `vector` and `pg_trgm` as the database
+administrator before running migrations as the disposable test owner. An earlier assertion also
+counted a committed collector fixture Stop from a preceding integration test; the expectation was
+corrected to isolate the new candidate counts without deleting the fixture history.
+
+An integration failure diagnostic could have exposed the then-current database URL, so the live
+database password and ignored operational `.env` were rotated together. Migrations and all
+services reconnected with the replacement credential; no secret is recorded here.
+
+Immediately after the final container recreation, one watcher sample was 35.39% during root
+registration. Four subsequent ten-second samples were 0.30%, 0.83%, 0.26%, and 0.26%. The watcher
+reported the intended hybrid mode: WSL repositories use native events, and only the managed vault
+uses 2-second polling. Final idle CPU was collector 0.27%, worker 0.23%, watcher 0.26%, Ollama
+0.00%, API 0.13%, and PostgreSQL below 0.5%. Raw spool pending and processing were both zero.
+
+No schema migration was required; live and restored schema remain
+`0006_chunk_content_trigram`. Hook trust was already approved by the user for all six configured
+events. Long-duration watcher endurance, sustained thermal load, and real Windows sleep remain the
+previously declared exclusions.
+
+Verdict for global multi-session knowledge promotion: **VERIFIED**.
