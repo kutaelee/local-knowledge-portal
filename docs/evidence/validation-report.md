@@ -587,3 +587,64 @@ live API probes
 locator 2건을 발견해 실패했다. Timeout/fallback 로직과 exact accessible locator를
 수정한 뒤 같은 전체 suite를 재실행해 5/5 통과했다. 장시간 endurance와 Windows
 절전 시험은 이번 변경 범위에서도 실행하지 않았다.
+
+## 2026-07-24 Docker 서비스 카탈로그·전체 프로젝트 지식 트리
+
+기존 우측 연결 상태는 Local Knowledge Portal 내부의 고정 10개 probe만 포함해
+실행 중인 `unjeong-mining-web` Compose 프로젝트를 발견하지 못했다. Docker
+socket을 API 컨테이너에 노출하지 않고 Windows 호스트의 읽기 전용 collector가
+`docker ps` 결과 중 비밀값을 제외한 상태·Compose label·port만 30초마다 E 드라이브
+runtime에 atomic snapshot으로 기록하도록 변경했다. 로그인 시 자동 시작하는
+`\LocalKnowledgePortal\CollectDockerHealth` 작업을 등록했다.
+
+API는 snapshot freshness를 fail-closed로 검사하고 서비스를 `포털 / 프로젝트 웹·API /
+공유 인프라` 및 Compose 프로젝트별로 분류한다. 실제 확인 결과는 7개 그룹,
+21개 논리 서비스였고 `미닝 운정점 웹사이트`의 app, PostgreSQL, Redis는 모두
+Docker healthcheck `healthy`였다. healthcheck가 없는 실행 컨테이너는 정상으로
+위장하지 않고 `running · no healthcheck`로 표시한다.
+
+프로젝트 지식은 검증 사례에만 있던 트리를 승격 후보와 프로젝트 개발일지에도
+적용했다. 세 탭 모두 `프로젝트 → 작업 특성 → 최신 기록`을 사용하며 project/category
+필터와 count/pagination이 서버에서 동일한 조건으로 계산된다. 실제 facet은 검증 사례
+1개 프로젝트 3건, 검토 후보 5개 프로젝트 24건, 개발일지 5개 프로젝트 26건이었다.
+
+Codex hook 토큰 영향 감사:
+
+```text
+PostToolUse sample hook: exit 0, stdout 0 bytes, spool 332 bytes
+current long-running session: 45,422,926 bytes
+cumulative input tokens: 564,634,562
+cached input tokens: 554,881,841 (98.27%)
+```
+
+Hook은 stdout이나 모델용 추가 context를 반환하지 않아 hook 자체가 모델 입력 토큰을
+추가하지 않는다. 큰 누적 토큰은 이 장기 작업의 매우 긴 대화·도구 결과 재사용에서
+발생했고 대부분 prompt cache에 적중했다. PostToolUse는 로컬 activity spool과
+저장량은 늘릴 수 있으나 모델 토큰을 소비하는 지식 주입 경로는 아니다.
+
+실행·검증:
+
+```text
+uv run ruff check services tests db
+  PASS
+uv run pytest tests/unit -q
+  PASS: 75 passed
+isolated PostgreSQL DB lkp_test_catalog_20260724_1809
+  PASS: 20 integration tests, 1 upstream Starlette deprecation warning
+corepack pnpm --dir apps/web build
+  PASS: Next.js 16.2.11 production build and TypeScript
+docker compose -f C:\Docker\local-knowledge-portal\compose.yaml build api web
+  PASS
+Playwright production E2E
+  PASS: 5/5 in 25.6s
+Docker inventory monitor
+  PASS: scheduled task running; snapshot healthy; age 24 seconds at probe
+  measured process CPU: 0.359375 CPU seconds after about 4 minutes
+```
+
+첫 통합 실행은 과거 fixture가 남아 있던 `lkp_test_navigation_20260724`를 재사용해
+9건이 unique constraint로 실패했다. 해당 DB를 삭제하거나 초기화하지 않고 새 전용
+DB `lkp_test_catalog_20260724_1809`를 생성해 clean migration과 전체 suite를
+재실행했으며 20/20 통과했다.
+
+최종 판정: **VERIFIED**.

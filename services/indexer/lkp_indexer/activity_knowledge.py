@@ -502,6 +502,18 @@ def finalize_project_journal(
     title = _first_line(summary.report, limit=260) or _first_line(
         summary.instruction, limit=260
     )
+    searchable = f"{summary.instruction} {summary.report}".casefold()
+    if failures:
+        work_type = "error_resolution"
+    elif any(
+        token in searchable
+        for token in ("cpu", "latency", "performance", "load", "성능", "부하", "지연")
+    ):
+        work_type = "performance"
+    elif "operational_or_configuration_change" in reasons:
+        work_type = "operations"
+    else:
+        work_type = "implementation"
     entry = ProjectJournalEntry(
         source_stop_activity_id=stop.id,
         project_key=summary.project,
@@ -522,6 +534,7 @@ def finalize_project_journal(
             "reported_result_is_evidence": False,
             "journal_policy": "significant-change-v1",
             "knowledge_reference_count": len(references),
+            "work_type": work_type,
         },
     )
     session.add(entry)

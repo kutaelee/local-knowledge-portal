@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     cors_origins: str = "http://127.0.0.1:3010,http://localhost:3010"
     gpu_scheduler_base_url: str = "http://host.docker.internal:8790"
     gpu_scheduler_timeout_seconds: float = Field(default=2.0, ge=0.2, le=10)
+    docker_inventory_path: Path = Path("/data/runtime/docker-services.json")
+    docker_inventory_stale_seconds: int = Field(default=90, ge=30, le=3600)
     ollama_base_url: str = "http://127.0.0.1:11434"
     embedding_provider: str = "ollama"
     embedding_model: str = "qwen3-embedding:0.6b"

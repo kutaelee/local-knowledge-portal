@@ -17,7 +17,7 @@ from lkp_indexer.knowledge import create_candidate, evaluate_gate, publish_candi
 from lkp_indexer.queue import retry_as_new
 from lkp_indexer.selection import CODE_EXTENSIONS
 from lkp_indexer.service_runtime import assert_mount_guards
-from sqlalchemy import and_, func, not_, or_, select, text
+from sqlalchemy import and_, case, func, not_, or_, select, text
 from sqlalchemy.orm import Session
 
 from .db import get_db
@@ -55,6 +55,7 @@ from .schemas import (
     SearchResponse,
 )
 from .search import search
+from .service_catalog import load_docker_groups
 from .settings import get_settings
 
 settings = get_settings()
@@ -288,10 +289,10 @@ def system_services(db: Session = Depends(get_db)) -> dict:
     gpu_state, gpu_error = _http_service_status(
         f"{settings.gpu_scheduler_base_url}/api/health"
     )
-    services = [
+    portal_services = [
         {
             "key": "web",
-            "label": "Web portal",
+            "label": "Knowledge portal UI",
             "state": web_state,
             "detail": web_error or "HTTP 200",
         },
@@ -354,10 +355,41 @@ def system_services(db: Session = Depends(get_db)) -> dict:
             "detail": gpu_error or "read-only health",
         },
     ]
-    overall = "healthy" if all(
-        item["state"] in {"healthy", "disabled"} for item in services
+    inventory, docker_groups = load_docker_groups(
+        settings.docker_inventory_path,
+        now=now,
+        stale_after_seconds=settings.docker_inventory_stale_seconds,
+    )
+    groups = [
+        {
+            "key": "portal:local-knowledge-portal",
+            "category": "portal",
+            "project": "local-knowledge-portal",
+            "state": "healthy"
+            if all(
+                item["state"] in {"healthy", "disabled"}
+                for item in portal_services
+            )
+            else "error",
+            "services": portal_services,
+        },
+        *docker_groups,
+    ]
+    services = [service for group in groups for service in group["services"]]
+    overall = "healthy" if (
+        inventory["state"] == "healthy"
+        and all(
+            item["state"] in {"healthy", "disabled", "running"}
+            for item in services
+        )
     ) else "attention"
-    return {"overall": overall, "checked_at": now, "services": services}
+    return {
+        "overall": overall,
+        "checked_at": now,
+        "inventory": inventory,
+        "groups": groups,
+        "services": services,
+    }
 
 
 def _gpu_scheduler_get(path: str) -> dict:
@@ -829,6 +861,7 @@ def _evidence_json(row: EvidenceRecord) -> dict:
 
 
 def _candidate_json(row: KnowledgeCandidate) -> dict:
+    metadata = row.metadata_json or {}
     return {
         "id": str(row.id),
         "category": row.category,
@@ -841,10 +874,64 @@ def _candidate_json(row: KnowledgeCandidate) -> dict:
         "evidence_gate_status": row.evidence_gate_status,
         "reported_result": row.reported_result,
         "verified_result": row.verified_result,
-        "metadata": row.metadata_json,
+        "project": metadata.get("project") or "unassigned",
+        "metadata": metadata,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
+
+
+def _journal_work_type(row: ProjectJournalEntry) -> str:
+    configured = (row.metadata_json or {}).get("work_type")
+    if configured in {
+        "error_resolution",
+        "implementation",
+        "performance",
+        "operations",
+        "custom_success",
+    }:
+        return configured
+    if row.failures_json:
+        return "error_resolution"
+    searchable = f"{row.title} {row.change_summary}".casefold()
+    if any(
+        token in searchable
+        for token in ("cpu", "latency", "performance", "load", "성능", "부하", "지연")
+    ):
+        return "performance"
+    if "operational_or_configuration_change" in row.significance_reasons:
+        return "operations"
+    return "implementation"
+
+
+def _journal_category_expression():
+    searchable = func.lower(
+        ProjectJournalEntry.title
+        + " "
+        + ProjectJournalEntry.change_summary
+    )
+    return func.coalesce(
+        ProjectJournalEntry.metadata_json["work_type"].astext,
+        case(
+            (
+                func.jsonb_array_length(ProjectJournalEntry.failures_json) > 0,
+                "error_resolution",
+            ),
+            (
+                searchable.op("~")(
+                    "cpu|latency|performance|load|성능|부하|지연"
+                ),
+                "performance",
+            ),
+            (
+                ProjectJournalEntry.significance_reasons.contains(
+                    ["operational_or_configuration_change"]
+                ),
+                "operations",
+            ),
+            else_="implementation",
+        ),
+    )
 
 
 def _journal_json(row: ProjectJournalEntry) -> dict:
@@ -852,6 +939,7 @@ def _journal_json(row: ProjectJournalEntry) -> dict:
         "id": str(row.id),
         "source_stop_activity_id": str(row.source_stop_activity_id),
         "project": row.project_key,
+        "category": _journal_work_type(row),
         "occurred_at": row.occurred_at,
         "title": row.title,
         "intent": row.intent,
@@ -872,6 +960,7 @@ def _journal_json(row: ProjectJournalEntry) -> dict:
 @app.get("/api/v1/project-journal")
 def project_journal(
     project: str | None = None,
+    category: str | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -881,6 +970,10 @@ def project_journal(
     if project:
         statement = statement.where(ProjectJournalEntry.project_key == project)
         count_statement = count_statement.where(ProjectJournalEntry.project_key == project)
+    if category:
+        category_expression = _journal_category_expression()
+        statement = statement.where(category_expression == category)
+        count_statement = count_statement.where(category_expression == category)
     rows = db.scalars(
         statement.order_by(
             ProjectJournalEntry.occurred_at.desc(),
@@ -911,6 +1004,9 @@ def project_journal_detail(
 @app.get("/api/v1/knowledge/candidates")
 def candidates(
     status: str | None = None,
+    project: str | None = None,
+    category: str | None = None,
+    review_only: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -920,6 +1016,17 @@ def candidates(
     if status:
         statement = statement.where(KnowledgeCandidate.status == status)
         count_statement = count_statement.where(KnowledgeCandidate.status == status)
+    if review_only:
+        visible = KnowledgeCandidate.status.not_in(["published", "activity_only"])
+        statement = statement.where(visible)
+        count_statement = count_statement.where(visible)
+    if project:
+        project_match = KnowledgeCandidate.metadata_json["project"].astext == project
+        statement = statement.where(project_match)
+        count_statement = count_statement.where(project_match)
+    if category:
+        statement = statement.where(KnowledgeCandidate.category == category)
+        count_statement = count_statement.where(KnowledgeCandidate.category == category)
     rows = db.scalars(
         statement.order_by(
             KnowledgeCandidate.created_at.desc(),
@@ -1110,10 +1217,14 @@ def knowledge_cases(
 
 
 @app.get("/api/v1/knowledge/facets")
-def knowledge_facets(db: Session = Depends(get_db)) -> dict:
-    category_rows = db.execute(
-        text(
-            """
+def knowledge_facets(
+    kind: str = Query("cases", pattern="^(cases|candidates|journal)$"),
+    db: Session = Depends(get_db),
+) -> dict:
+    if kind == "cases":
+        category_rows = db.execute(
+            text(
+                """
             SELECT
               COALESCE(metadata->>'project', 'unassigned') AS project,
               category,
@@ -1124,8 +1235,50 @@ def knowledge_facets(db: Session = Depends(get_db)) -> dict:
             GROUP BY COALESCE(metadata->>'project', 'unassigned'), category
             ORDER BY max(last_seen_at) DESC, project, category
             """
-        )
-    ).mappings()
+            )
+        ).mappings()
+    elif kind == "candidates":
+        category_rows = db.execute(
+            text(
+                """
+            SELECT
+              COALESCE(metadata->>'project', 'unassigned') AS project,
+              category,
+              count(*)::int AS count,
+              max(updated_at) AS latest_at
+            FROM knowledge_candidate
+            WHERE status NOT IN ('published', 'activity_only')
+            GROUP BY COALESCE(metadata->>'project', 'unassigned'), category
+            ORDER BY max(updated_at) DESC, project, category
+            """
+            )
+        ).mappings()
+    else:
+        category_rows = db.execute(
+            text(
+                """
+            SELECT project_key AS project,
+              COALESCE(
+                metadata->>'work_type',
+                CASE
+                  WHEN jsonb_array_length(failures) > 0 THEN 'error_resolution'
+                  WHEN lower(title || ' ' || change_summary)
+                    ~ 'cpu|latency|performance|load|성능|부하|지연'
+                    THEN 'performance'
+                  WHEN significance_reasons
+                    @> ARRAY['operational_or_configuration_change']::text[]
+                    THEN 'operations'
+                  ELSE 'implementation'
+                END
+              ) AS category,
+              count(*)::int AS count,
+              max(occurred_at) AS latest_at
+            FROM project_journal_entry
+            GROUP BY project_key, category
+            ORDER BY max(occurred_at) DESC, project, category
+            """
+            )
+        ).mappings()
     projects: dict[str, dict] = {}
     for row in category_rows:
         project = str(row["project"])
@@ -1146,9 +1299,11 @@ def knowledge_facets(db: Session = Depends(get_db)) -> dict:
                 "latest_at": row["latest_at"],
             }
         )
-    tag_rows = db.execute(
-        text(
-            """
+    tag_rows = []
+    if kind == "cases":
+        tag_rows = db.execute(
+            text(
+                """
             SELECT tag, count(*)::int AS count, max(last_seen_at) AS latest_at
             FROM knowledge_case
             CROSS JOIN LATERAL jsonb_array_elements_text(
@@ -1159,8 +1314,8 @@ def knowledge_facets(db: Session = Depends(get_db)) -> dict:
             ORDER BY max(last_seen_at) DESC, tag
             LIMIT 500
             """
-        )
-    ).mappings()
+            )
+        ).mappings()
     return {
         "projects": list(projects.values()),
         "tags": [

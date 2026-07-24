@@ -237,8 +237,15 @@ Implemented endpoints include keyword/hybrid/semantic search, RAG context, docum
 backlinks, projects, tree, jobs and auditable retry, workers, timeline, summary metrics, Prometheus
 text metrics, split live/readiness health, indexed knowledge facets, source/managed catalog
 boundaries, and `/api/v1/system/services`. The latter checks the persistent WSL/Docker services
-without exposing the Docker socket: web, API, PostgreSQL, both Ollama roles, indexer, watcher,
-reconciler, hook collector, and the read-only host GPU scheduler health endpoint.
+without exposing the Docker socket. A bounded Windows collector runs every 30 seconds and
+atomically writes `E:\Data\LocalKnowledgePortal\runtime\docker-services.json`; Compose projects
+added later appear automatically. The UI groups results as Local Knowledge Portal, project
+web/API stacks, and shared infrastructure. Install or repair the collector with
+`scripts/install-docker-health-monitor.ps1`.
+
+Project knowledge uses the same `project → work type → newest record` tree for verified cases,
+held candidates, and project journal entries. Filters are applied server-side so pagination totals
+remain accurate.
 
 The read-only GPU scheduler integration exposes only `GET /api/v1/gpu-queue/health`,
 `GET /api/v1/gpu-queue/status`, and `GET /api/v1/gpu-queue/jobs/{uuid}`. The upstream host URL is

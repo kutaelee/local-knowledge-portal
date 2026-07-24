@@ -27,6 +27,8 @@ test("localized overview explains freshness and persists language", async ({ pag
   await expect(page.getByText("WSL · Docker 연결 상태", { exact: true })).toBeVisible();
   await expect(page.getByText("Codex 훅 수집기", { exact: true })).toBeVisible();
   await expect(page.getByText("Ollama 지식 편집기", { exact: true })).toBeVisible();
+  await expect(page.getByText("프로젝트 웹·API", { exact: true })).toBeVisible();
+  await expect(page.getByText("미닝 운정점 웹사이트", { exact: true })).toBeVisible();
 
   await page.reload();
   await expect(page.getByRole("heading", {
@@ -111,6 +113,9 @@ test("activity, knowledge cases, and automatic evidence editor", async ({ page }
   await expect(page.getByText("Revisions & occurrences")).toBeVisible();
 
   await page.getByRole("button", { name: "Held candidates" }).click();
+  await expect(page.locator(".knowledge-tree")).toBeVisible();
+  await expect(page.locator(".knowledge-tree").getByText("All projects", { exact: true }))
+    .toBeVisible();
   await page.locator(".record-list > button").first().click();
   await expect(page.getByText("Reported / verified")).toBeVisible();
   await expect(page.getByText("Auto-publish after local LLM evidence validation"))
@@ -121,6 +126,9 @@ test("activity, knowledge cases, and automatic evidence editor", async ({ page }
     .toBeVisible();
 
   await page.getByRole("button", { name: "Project journal" }).click();
+  await expect(page.locator(".knowledge-tree")).toBeVisible();
+  await expect(page.locator(".knowledge-tree").getByText("All projects", { exact: true }))
+    .toBeVisible();
   await page.locator(".record-list > button").first().click();
   await expect(page.getByText("Execution verification", { exact: true })).toBeVisible();
   await expect(page.getByText("Knowledge references", { exact: true })).toBeVisible();

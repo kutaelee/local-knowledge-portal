@@ -38,6 +38,31 @@ type SystemService = {
   state: string;
   detail: string | null;
   last_seen_at?: string;
+  project?: string;
+  service?: string;
+  container?: string;
+  image?: string;
+  ports?: string;
+  verification?: "healthcheck" | "running_only";
+};
+type SystemServiceGroup = {
+  key: string;
+  category: "portal" | "projects" | "infrastructure";
+  project: string;
+  state: string;
+  services: SystemService[];
+};
+type SystemServicesPayload = {
+  overall: string;
+  checked_at: string;
+  inventory?: {
+    state: string;
+    checked_at: string | null;
+    age_seconds: number | null;
+    detail: string;
+  };
+  groups: SystemServiceGroup[];
+  services: SystemService[];
 };
 type Locale = "ko" | "en";
 
@@ -89,8 +114,29 @@ const translations = {
       services: "WSL · Docker 연결 상태", checkedAt: "확인",
       healthy: "정상", offline: "연결 안 됨", unavailable: "사용 불가",
       stale: "응답 지연", error: "오류", disabled: "비활성",
+      running: "실행 중 · 헬스체크 없음",
+      categories: {
+        portal: "로컬 지식 포털",
+        projects: "프로젝트 웹·API",
+        infrastructure: "공유 인프라",
+      },
+      projectLabels: {
+        "local-knowledge-portal": "로컬 지식 포털",
+        "unjeong-mining-web": "미닝 운정점 웹사이트",
+        "local-voice-agent": "통화비서",
+        "gpu-workload-scheduler": "GPU 작업 스케줄러",
+        "workstation-edge-ingress": "외부 연결 게이트웨이",
+        "workstation-databases": "공유 데이터베이스",
+        "interstellar-drift": "Interstellar Drift",
+        standalone: "독립 Docker 컨테이너",
+      },
+      dockerRoles: {
+        app: "웹 애플리케이션", web: "웹 UI", api: "API",
+        postgres: "PostgreSQL", redis: "Redis",
+        proxy: "리버스 프록시", cloudflared: "Cloudflare 터널",
+      },
       serviceLabels: {
-        web: "웹 포털", api: "FastAPI", postgres: "PostgreSQL",
+        web: "지식 포털 UI", api: "지식 API", postgres: "지식 DB",
         embedding: "Ollama 임베딩", generation: "Ollama 지식 편집기",
         worker: "인덱서 Worker", watcher: "파일 Watcher",
         reconciler: "전체 대조", "hook-collector": "Codex 훅 수집기",
@@ -287,8 +333,29 @@ const translations = {
       services: "WSL · Docker services", checkedAt: "Checked",
       healthy: "healthy", offline: "offline", unavailable: "unavailable",
       stale: "stale", error: "error", disabled: "disabled",
+      running: "running · no healthcheck",
+      categories: {
+        portal: "Local Knowledge Portal",
+        projects: "Project web & APIs",
+        infrastructure: "Shared infrastructure",
+      },
+      projectLabels: {
+        "local-knowledge-portal": "Local Knowledge Portal",
+        "unjeong-mining-web": "MINING Unjeong website",
+        "local-voice-agent": "Local Voice Agent",
+        "gpu-workload-scheduler": "GPU Workload Scheduler",
+        "workstation-edge-ingress": "Edge ingress",
+        "workstation-databases": "Shared databases",
+        "interstellar-drift": "Interstellar Drift",
+        standalone: "Standalone Docker containers",
+      },
+      dockerRoles: {
+        app: "Web application", web: "Web UI", api: "API",
+        postgres: "PostgreSQL", redis: "Redis",
+        proxy: "Reverse proxy", cloudflared: "Cloudflare tunnel",
+      },
       serviceLabels: {
-        web: "Web portal", api: "FastAPI", postgres: "PostgreSQL",
+        web: "Knowledge portal UI", api: "Knowledge API", postgres: "Knowledge DB",
         embedding: "Ollama embedding", generation: "Ollama knowledge editor",
         worker: "Indexer worker", watcher: "File watcher",
         reconciler: "Reconciler", "hook-collector": "Codex hook collector",
@@ -482,11 +549,7 @@ export function Portal() {
   });
   const services = useQuery({
     queryKey: ["system-services"],
-    queryFn: () => api<{
-      overall: string;
-      checked_at: string;
-      services: SystemService[];
-    }>("/api/v1/system/services"),
+    queryFn: () => api<SystemServicesPayload>("/api/v1/system/services"),
     refetchInterval: 10_000,
   });
   useGSAP(() => {
@@ -514,7 +577,7 @@ export function Portal() {
       <header className="topbar">
         <button className="brand" onClick={() => setView("overview")} aria-label={text.nav.overview}>
           <span className="brand-mark"><Blocks size={17} /></span>
-          <span>Local Knowledge</span>
+          <span>{locale === "ko" ? "로컬 지식 포털" : "Local Knowledge Portal"}</span>
           <span className="local-pill">LOCAL</span>
         </button>
         <form className="global-search" onSubmit={submitGlobal}>
@@ -1235,7 +1298,7 @@ function GraphNotice({ locale }: { locale: Locale }) {
 
 function ContextPanel({ selected, services, locale }: {
   selected: SearchResult | null;
-  services?: { checked_at: string; services: SystemService[] };
+  services?: SystemServicesPayload;
   locale: Locale;
 }) {
   const text = translations[locale].contextPanel;
@@ -1243,9 +1306,28 @@ function ContextPanel({ selected, services, locale }: {
     if (state === "healthy" || state === "busy" || state === "idle") return text.healthy;
     if (state === "stale") return text.stale;
     if (state === "disabled") return text.disabled;
+    if (state === "running") return text.running;
     if (state === "error") return text.error;
     return text.offline;
   };
+  const projectLabel = (project: string) => {
+    const labels = text.projectLabels as Record<string, string>;
+    return labels[project] ?? project.split("-").map((part) =>
+      part ? `${part[0].toUpperCase()}${part.slice(1)}` : part
+    ).join(" ");
+  };
+  const serviceLabel = (service: SystemService) => {
+    const fixedLabels = text.serviceLabels as Record<string, string>;
+    const dockerRoles = text.dockerRoles as Record<string, string>;
+    return service.service
+      ? dockerRoles[service.service] ?? service.label
+      : fixedLabels[service.key] ?? service.label;
+  };
+  const categoryOrder: SystemServiceGroup["category"][] = [
+    "portal",
+    "projects",
+    "infrastructure",
+  ];
   return <div><p className="nav-heading">{text.title}</p>
     {selected ? <><h2>{selected.title}</h2><p className="context-path">{selected.provenance.relative_path}</p>
       <dl className="context-list">
@@ -1259,17 +1341,30 @@ function ContextPanel({ selected, services, locale }: {
         `${selected.provenance.canonical_path}:L${selected.provenance.start_line}-L${selected.provenance.end_line}`
       )}>{text.copy}</button></> : <div className="context-empty"><BookOpen size={24} /><p>{text.empty}</p></div>}
     <div className="service-status"><p className="nav-heading">{text.services}</p>
-      {services?.services.map((service) => {
-        const Icon = service.key === "postgres"
-          ? Database
-          : service.key === "gpu-scheduler" ? Cpu : HeartPulse;
-        const label = text.serviceLabels[
-          service.key as keyof typeof text.serviceLabels
-        ] ?? service.label;
-        return <div key={service.key}><Icon size={15} /><span className="service-info">
-          <strong>{label}</strong><small title={service.detail ?? undefined}>
-            {service.detail ?? "—"}
-          </small></span><Status value={service.state} label={stateLabel(service.state)} /></div>;
+      {services && categoryOrder.map((category) => {
+        const groups = services.groups.filter((group) => group.category === category);
+        if (!groups.length) return null;
+        return <section className="service-category" key={category}>
+          <h3>{text.categories[category]}</h3>
+          {groups.map((group) => <details className="service-group" key={group.key}
+            open={category !== "infrastructure"}>
+            <summary>
+              <span>{projectLabel(group.project)}</span>
+              <Status value={group.state} label={stateLabel(group.state)} />
+            </summary>
+            <div className="service-group-items">
+              {group.services.map((service) => {
+                const Icon = service.service === "postgres" || service.key === "postgres"
+                  ? Database
+                  : service.key === "gpu-scheduler" ? Cpu : HeartPulse;
+                return <div key={service.key}><Icon size={15} /><span className="service-info">
+                  <strong>{serviceLabel(service)}</strong>
+                  <small title={service.detail ?? undefined}>{service.detail ?? "—"}</small>
+                </span><Status value={service.state} label={stateLabel(service.state)} /></div>;
+              })}
+            </div>
+          </details>)}
+        </section>;
       })}
       {!services && <div><AlertTriangle size={15} /> API
         <Status value="offline" label={text.offline} /></div>}
@@ -1281,7 +1376,7 @@ function ContextPanel({ selected, services, locale }: {
 
 function Status({ value, label }: { value: string; label?: string }) {
   const good = ["healthy", "succeeded", "active", "idle", "processing", "busy"].includes(value);
-  const waiting = ["pending", "stale", "disabled"].includes(value);
+  const waiting = ["pending", "stale", "disabled", "running"].includes(value);
   return <span className={`status ${good ? "good" : waiting ? "waiting" : "danger"}`}>
     {good ? <CircleCheck size={12} /> : waiting ? <Clock3 size={12} /> : <AlertTriangle size={12} />}{label ?? value}
   </span>;

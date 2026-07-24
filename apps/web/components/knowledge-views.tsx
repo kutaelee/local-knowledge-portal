@@ -222,6 +222,9 @@ type Candidate = {
   root_cause: string;
   solution: string;
   status: string;
+  project: string;
+  created_at: string;
+  updated_at: string;
   evidence_gate_status: string;
   reported_result: string | null;
   verified_result: string | null;
@@ -284,6 +287,7 @@ type JournalEntry = {
   id: string;
   source_stop_activity_id: string;
   project: string;
+  category: string;
   occurred_at: string;
   title: string;
   intent: string;
@@ -497,21 +501,31 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
     enabled: tab === "cases",
   });
   const facets = useQuery({
-    queryKey: ["knowledge-facets"],
-    queryFn: () => api<KnowledgeFacets>("/api/v1/knowledge/facets"),
-    enabled: tab === "cases",
+    queryKey: ["knowledge-facets", tab],
+    queryFn: () => api<KnowledgeFacets>(
+      `/api/v1/knowledge/facets?kind=${encodeURIComponent(tab)}`,
+    ),
   });
   const candidates = useQuery({
-    queryKey: ["knowledge-candidates", page],
+    queryKey: [
+      "knowledge-candidates",
+      page,
+      selectedProject,
+      selectedCategory,
+    ],
     queryFn: () => api<{ items: Candidate[]; total: number }>(
-      `/api/v1/knowledge/candidates?page=${page}&page_size=${pageSize}`,
+      `/api/v1/knowledge/candidates?page=${page}&page_size=${pageSize}&review_only=true`
+      + `${selectedProject ? `&project=${encodeURIComponent(selectedProject)}` : ""}`
+      + `${selectedCategory ? `&category=${encodeURIComponent(selectedCategory)}` : ""}`,
     ),
     enabled: tab === "candidates",
   });
   const journal = useQuery({
-    queryKey: ["project-journal", page],
+    queryKey: ["project-journal", page, selectedProject, selectedCategory],
     queryFn: () => api<{ items: JournalEntry[]; total: number }>(
-      `/api/v1/project-journal?page=${page}&page_size=${pageSize}`,
+      `/api/v1/project-journal?page=${page}&page_size=${pageSize}`
+      + `${selectedProject ? `&project=${encodeURIComponent(selectedProject)}` : ""}`
+      + `${selectedCategory ? `&category=${encodeURIComponent(selectedCategory)}` : ""}`,
     ),
     enabled: tab === "journal",
   });
@@ -535,9 +549,7 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
   const items: Array<Case | Candidate | JournalEntry> = tab === "cases"
     ? cases.data?.items ?? []
     : tab === "candidates"
-      ? candidates.data?.items.filter((candidate) =>
-        !["published", "activity_only"].includes(candidate.status)
-      ) ?? []
+      ? candidates.data?.items ?? []
       : journal.data?.items ?? [];
   const total = tab === "cases"
     ? cases.data?.total ?? 0
@@ -578,17 +590,20 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
     </div>
     <div className="tabs">
       <button className={tab === "cases" ? "active" : ""} onClick={() => {
-        setTab("cases"); setSelected(null); setPage(1);
+        setTab("cases"); setSelected(null); setSelectedProject("");
+        setSelectedCategory(""); setSelectedTag(""); setPage(1);
       }}>{text.cases}</button>
       <button className={tab === "candidates" ? "active" : ""} onClick={() => {
-        setTab("candidates"); setSelected(null); setPage(1);
+        setTab("candidates"); setSelected(null); setSelectedProject("");
+        setSelectedCategory(""); setSelectedTag(""); setPage(1);
       }}>{text.candidates}</button>
       <button className={tab === "journal" ? "active" : ""} onClick={() => {
-        setTab("journal"); setSelected(null); setPage(1);
+        setTab("journal"); setSelected(null); setSelectedProject("");
+        setSelectedCategory(""); setSelectedTag(""); setPage(1);
       }}>{text.journal}</button>
     </div>
-    <div className={tab === "cases" ? "knowledge-browser" : "master-detail"}>
-      {tab === "cases" && <aside className="panel knowledge-tree" role="tree"
+    <div className="knowledge-browser">
+      <aside className="panel knowledge-tree" role="tree"
         aria-label={text.hierarchy}>
         <div className="knowledge-tree-head"><FolderTree size={16} /><strong>{text.hierarchy}</strong></div>
         <button role="treeitem" aria-selected={!selectedProject}
@@ -632,7 +647,7 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
             </div>}
           </div>;
         })}
-        <div className="knowledge-tag-filter">
+        {tab === "cases" && <div className="knowledge-tag-filter">
           <label htmlFor="knowledge-tag"><Tag size={14} />{text.tags}</label>
           <select id="knowledge-tag" value={selectedTag} onChange={(event) => {
             setSelectedTag(event.target.value); setSelected(null); setPage(1);
@@ -642,21 +657,23 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
               {knowledgeTagLabel(item.key, locale)} ({item.count})
             </option>)}
           </select>
-        </div>
-      </aside>}
+        </div>}
+      </aside>
       <div className="panel record-list">
-        {tab === "cases" && <div className="record-sort">{text.latestFirst}</div>}
+        <div className="record-sort">{text.latestFirst}</div>
         {items.map((item) => <button key={item.id} onClick={() => setSelected(item.id)}
           className={selected === item.id ? "selected" : ""}>
           <BookCheck size={16} /><span><strong>{item.title}</strong>
             <small>{"source_stop_activity_id" in item
-              ? `${item.project} · ${new Date(item.occurred_at).toLocaleString(
+              ? `${item.project} · ${knowledgeCategoryLabel(item.category, locale)} · ${new Date(item.occurred_at).toLocaleString(
                 locale === "ko" ? "ko-KR" : "en-US",
               )}`
-              : `${knowledgeCategoryLabel(item.category, locale)}${!("evidence_gate_status" in item)
-                ? ` · ${item.project} · ${new Date(item.last_seen_at).toLocaleString(
+              : `${item.project} · ${knowledgeCategoryLabel(item.category, locale)}${!("evidence_gate_status" in item)
+                ? ` · ${new Date(item.last_seen_at).toLocaleString(
                   locale === "ko" ? "ko-KR" : "en-US",
-                )}` : ""}`
+                )}` : ` · ${new Date(item.updated_at).toLocaleString(
+                  locale === "ko" ? "ko-KR" : "en-US",
+                )}`}`
             }</small></span>
           <Badge value={"source_stop_activity_id" in item
             ? item.verification_status
