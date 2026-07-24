@@ -1343,6 +1343,11 @@ The custom dump restored into a separate tmpfs PostgreSQL instance and passed wi
 identities, 41,816 chunks, 483 vectors, and 1,272 activities. The temporary restore container was
 removed automatically.
 
+The existing `\LocalKnowledgePortal\StartAtLogon` scheduled task was then executed after the new
+services were deployed. It invoked Compose through Ubuntu WSL, reached API and web readiness,
+recorded `portal_ready`, and finished with `LastTaskResult=0` at 2026-07-24 11:13 KST. The
+generation service and curator are therefore included in the same restart path.
+
 ### Final status
 
 - Automatic evidence-editor implementation, GPU backoff, filesystem placement, API/UI, tests,
