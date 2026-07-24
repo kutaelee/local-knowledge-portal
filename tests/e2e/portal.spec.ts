@@ -108,6 +108,8 @@ test("activity, knowledge cases, and automatic evidence editor", async ({ page }
   await expect(page.getByText("Reported / verified")).toBeVisible();
   await expect(page.getByText("Auto-publish after local LLM evidence validation"))
     .toBeVisible();
+  await expect(page.getByText("Reuse value", { exact: true })).toBeVisible();
+  await expect(page.getByText("value evidence needed", { exact: true })).toBeVisible();
   await expect(page.getByText("The local editor is checking the evidence."))
     .toBeVisible();
 });

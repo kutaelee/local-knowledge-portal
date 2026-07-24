@@ -39,7 +39,7 @@ from .service_runtime import assert_mount_guards, service_pid
 logger = structlog.get_logger()
 _SCHEDULER_KEY = "knowledge_curator.scheduler"
 _EVIDENCE_REPAIR_KEY = "knowledge.evidence_repair.non_execution_v1"
-_VALUE_BACKFILL_KEY = "knowledge.value_backfill.v2"
+_VALUE_BACKFILL_KEY = "knowledge.value_backfill.v3"
 _INLINE_CITATION = re.compile(
     r"\[[^\]\r\n]{1,50}\]|\((?:\s*E\d+\s*,?)+\s*\)",
     re.IGNORECASE,

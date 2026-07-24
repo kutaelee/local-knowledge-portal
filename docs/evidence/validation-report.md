@@ -1448,3 +1448,93 @@ The regression fixture includes an `apply_patch` body that contains both a test
 path and a `pytest` example. It verifies that only the separate Bash execution
 creates `test_pass`. A second fixture verifies that legacy false evidence is
 retracted while its source `ActivityEvent` remains present.
+
+## 2026-07-24 지식 가치 하니스와 로컬 모델 재선정
+
+최소 글자 수를 지식 가치의 대리 지표로 사용하던 설계를 폐기했다. 모델에는 최대
+10,000자만 제한하며 최소 분량이나 문단별 최소 글자 수를 요구하지 않는다. 게시 전
+`knowledge-value-v1` 결정론적 하니스가 다음 provenance 조합을 판정한다.
+
+- 오류 해결: 실패 → 변경 → 성공 + 구조화된 원인·조치
+- 구현 방식: 검증된 변경 + 테스트·빌드·검증 + 재사용 가능한 구현 판단
+- 성능: before + after + load cause
+- 운영: incident failure + recovery success
+- 구조적 판단 없는 단순 CSS 변경: activity only
+
+판정 결과는 후보 metadata의 `knowledge_value`와 관리형 Markdown frontmatter의
+`knowledge_value_tier`, `knowledge_value_labels`에 기록된다. LLM은 `promote` 후보만
+편집할 수 있다. 본문과 evidence ID는 구조화된 별도 필드로 받고 `[E1]` 표기는
+결정론적 renderer가 생성한다. 잘못된 구조는 허용된 ID와 validation error만 돌려주는
+1회 한정 교정 후에도 실패하면 fail closed 처리한다.
+
+운영 DB에 대한 비파괴 backfill 결과:
+
+```text
+system setting: knowledge.value_backfill.v3
+assessed candidates: 21
+promote: 4
+needs_review: 10
+activity_only: 7
+deleted rows: 0
+```
+
+v1 backfill이 과거 근거 감사로 격리된 7건을 `needs_review`로 올리는 회귀를 보였고,
+즉시 v2/v3에서 `quality_gate_status=ACTIVITY_ONLY`를 절대 자동 상향하지 않는 규칙을
+추가했다. 최종 분포는 다시 `activity_only 7`로 복구됐다.
+
+실제 모델 시험:
+
+```text
+gemma4:e4b
+  digest c6eb396dbd5992bbe3f5cdb947e8bbc0ee413d7c17e2beaae69f5d569cf982eb
+  FAIL: 허위 citation label, 과장 표현, 근거 없는 추론
+gemma4:12b
+  digest 4eb23ef187e2c5462566d6a1d3bbbc2f1346d0b4327cbb66d58fffbcc9b2b05c
+  FAIL: 근거 없는 추론
+qwen3:14b
+  digest bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8
+  FAIL: citation 누락과 과도한 압축
+qwen3.5:9b-q4_K_M
+  digest 6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7
+  installed size 6,594,474,711 bytes
+  canonical store E:\AI\Models\Ollama\generation\models
+  evidence-blog-v7 qualification: PENDING_GPU_IDLE
+```
+
+Qwen3.5 이전 시험에서 길이 요구는 충족했지만 존재하지 않는 citation label을 만든
+문제가 발견됐다. 이 문제를 모델 크기로 해결하지 않고 구조화된 evidence ID와
+결정론적 citation renderer로 변경했다. 근거 없는 사례가 빈 문단 객체를 내는 문제는
+non-publish 정규화로, 게시 객체의 일회성 구조 오류는 bounded correction으로 처리한다.
+
+현재 generation qualification은 통화비서의 기존 vLLM/STT/TTS 작업이 GPU를 사용하고
+있어 실행하지 않았다. 확인 당시 vLLM은 Gemma 4 12B를 `gpu-memory-utilization=0.45`로
+실행 중이었고 포털에 남은 VRAM은 약 8.5 GB였다. 해당 프로세스를 종료하거나 우회하지
+않았으며 curator는 15분 bounded backoff로 전환했다.
+
+```text
+GPU total / used / free: 32,607 / 23,684 / 8,504 MB
+GPU utilization / temperature: 7% / 36°C
+curator state: waiting_for_gpu
+busy check: 1 of 6
+retry: 900 seconds
+generation Ollama loaded model: none
+```
+
+현재 검증:
+
+```text
+ruff check services tests: PASS
+pytest non-integration: 57 passed
+dedicated tmpfs PostgreSQL integration: 17 passed
+TypeScript strict check: PASS
+Next.js production Docker build: PASS
+Playwright: 4 passed
+API readiness: PASS, PostgreSQL 18.4, schema 0006_chunk_content_trigram
+watcher restart transient: 51.72% CPU
+watcher after 15 seconds: 0.20% CPU
+curator idle CPU: 0.00%
+```
+
+이 시점의 최종 판정은 모델 자격 검증이 남아 있으므로 `PARTIALLY_VERIFIED`다. GPU가
+정책 기준을 충족하면 동일 digest와 `evidence-blog-v7`로 qualification을 실행하고,
+그 결과와 최종 backup/restore를 아래 후속 절에 기록한다.
