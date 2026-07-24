@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     generation_timeout_seconds: int = 120
     generation_max_input_chars: int = 40000
     generation_prompt_version: str = "evidence-blog-v2"
+    generation_fallback_models: str = "gemma4:12b,qwen3:14b"
     generation_temperature: float = Field(default=0, ge=0, le=2)
     generation_context_window: int = Field(default=16_384, ge=2_048, le=262_144)
     generation_keep_alive: str = "2m"

@@ -571,6 +571,11 @@ def knowledge_curation_status(db: Session = Depends(get_db)) -> dict:
         "model": settings.generation_model,
         "configured_model_digest": settings.generation_model_digest,
         "prompt_version": settings.generation_prompt_version,
+        "fallback_models": [
+            item.strip()
+            for item in settings.generation_fallback_models.split(",")
+            if item.strip() and item.strip() != settings.generation_model
+        ],
         "generation_parameters": {
             "temperature": settings.generation_temperature,
             "context_window": settings.generation_context_window,

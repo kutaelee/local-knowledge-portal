@@ -211,6 +211,14 @@ def _generation_parameters(provider: GenerationProvider) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _fallback_models(settings: Settings) -> list[str]:
+    return [
+        item.strip()
+        for item in settings.generation_fallback_models.split(",")
+        if item.strip() and item.strip() != settings.generation_model
+    ]
+
+
 def validate_draft(
     draft: CuratedKnowledgeArticle,
     evidence_map: dict[str, str],
@@ -807,7 +815,7 @@ def run_once(
             "model": provider.model,
             "model_digest": model_digest,
             "qualification_key": qualification_key,
-            "fallback_recommended": "gemma4:12b",
+            "fallback_recommended": _fallback_models(settings),
             "last_checked_at": now.isoformat(),
             "last_gpu": asdict(snapshot),
         }
