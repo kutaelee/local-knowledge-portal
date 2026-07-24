@@ -41,9 +41,9 @@ if [[ -d /mnt/e/Data/LocalKnowledgePortal/ingest/codex-spool ]]; then
   cp -R /mnt/e/Data/LocalKnowledgePortal/ingest/codex-spool \
     "$manifest_dir/events/codex-spool"
 fi
-if [[ -f /mnt/e/Manifests/local-knowledge-portal-gemma4-e4b.json ]]; then
-  cp /mnt/e/Manifests/local-knowledge-portal-gemma4-e4b.json \
-    "$manifest_dir/generation-model.json"
+if compgen -G '/mnt/e/Manifests/local-knowledge-portal-*.json' >/dev/null; then
+  mkdir -p "$manifest_dir/models"
+  cp /mnt/e/Manifests/local-knowledge-portal-*.json "$manifest_dir/models/"
 fi
 
 revision=$(docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \

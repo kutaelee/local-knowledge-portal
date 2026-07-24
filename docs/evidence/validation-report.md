@@ -1538,3 +1538,25 @@ curator idle CPU: 0.00%
 이 시점의 최종 판정은 모델 자격 검증이 남아 있으므로 `PARTIALLY_VERIFIED`다. GPU가
 정책 기준을 충족하면 동일 digest와 `evidence-blog-v7`로 qualification을 실행하고,
 그 결과와 최종 backup/restore를 아래 후속 절에 기록한다.
+
+### 가치 하니스 배포 후 backup/restore
+
+선택된 generation model만이 아니라 시험한 모든 모델 manifest를 백업하도록 스크립트를
+수정했다. 기존 백업을 덮어쓰지 않는 새 UTC 디렉터리에 실제 dump를 생성하고 별도
+tmpfs PostgreSQL 18 컨테이너로 복원했다.
+
+```text
+backup: D:\LocalBackup\LocalKnowledgePortal\database\2026-07-24T035405Z
+dump size: 34,446,932 bytes
+SHA-256: 218c606ad5b610c52bb243aa0afb4d5de426f55fa82adadebf62acc9f2ced3a6
+schema: 0006_chunk_content_trigram
+generation model: qwen3.5:9b-q4_K_M
+generation prompt: evidence-blog-v7
+copied model manifests: 4
+restore documents: 4,389
+restore chunks: 41,830
+restore vectors: 495
+restore activities: 1,564
+restore result: PASS
+temporary restore container: removed by trap
+```
