@@ -41,6 +41,7 @@ from .models import (
     KnowledgeCaseRelation,
     KnowledgeCaseRevision,
     KnowledgeOccurrence,
+    ProjectJournalEntry,
     SourceRoot,
     SystemSetting,
     Tag,
@@ -371,7 +372,12 @@ def _document_json(row: Document) -> dict:
 
 
 @app.get("/api/v1/documents/{document_id}")
-def document_detail(document_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+def document_detail(
+    document_id: uuid.UUID,
+    chunk_page: int = Query(1, ge=1),
+    chunk_page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict:
     row = db.get(Document, document_id)
     if not row:
         raise HTTPException(404, "document not found")
@@ -379,9 +385,18 @@ def document_detail(document_id: uuid.UUID, db: Session = Depends(get_db)) -> di
         select(DocumentChunk)
         .where(DocumentChunk.document_version_id == row.current_version_id)
         .order_by(DocumentChunk.chunk_index)
+        .offset((chunk_page - 1) * chunk_page_size)
+        .limit(chunk_page_size)
     ).all()
     return {
         **_document_json(row),
+        "chunk_page": chunk_page,
+        "chunk_page_size": chunk_page_size,
+        "chunk_total": db.scalar(
+            select(func.count())
+            .select_from(DocumentChunk)
+            .where(DocumentChunk.document_version_id == row.current_version_id)
+        ),
         "chunks": [
             {
                 "id": str(chunk.id),
@@ -400,26 +415,42 @@ def document_detail(document_id: uuid.UUID, db: Session = Depends(get_db)) -> di
 
 
 @app.get("/api/v1/documents/{document_id}/versions")
-def versions(document_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dict]:
+def versions(
+    document_id: uuid.UUID,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=2, le=100),
+    db: Session = Depends(get_db),
+) -> dict:
     rows = db.scalars(
         select(DocumentVersion)
         .where(DocumentVersion.document_id == document_id)
         .order_by(DocumentVersion.detected_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
-    return [
-        {
-            "id": str(row.id),
-            "content_hash": row.content_hash,
-            "change_type": row.change_type,
-            "detected_at": row.detected_at,
-            "line_count": row.line_count,
-            "parser_version": row.parser_version,
-            "chunker_version": row.chunker_version,
-            "metadata": row.metadata_json,
-            "diff_summary": row.diff_summary,
-        }
-        for row in rows
-    ]
+    return {
+        "items": [
+            {
+                "id": str(row.id),
+                "content_hash": row.content_hash,
+                "change_type": row.change_type,
+                "detected_at": row.detected_at,
+                "line_count": row.line_count,
+                "parser_version": row.parser_version,
+                "chunker_version": row.chunker_version,
+                "metadata": row.metadata_json,
+                "diff_summary": row.diff_summary,
+            }
+            for row in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+        "total": db.scalar(
+            select(func.count())
+            .select_from(DocumentVersion)
+            .where(DocumentVersion.document_id == document_id)
+        ),
+    }
 
 
 def _version_text(db: Session, version_id: uuid.UUID) -> str:
@@ -488,18 +519,46 @@ def backlinks(document_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dic
 
 
 @app.get("/api/v1/projects")
-def projects(db: Session = Depends(get_db)) -> list[dict]:
-    rows = db.execute(
-        select(Document.project_key, func.count(Document.id))
+def projects(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict:
+    grouped = (
+        select(
+            Document.project_key,
+            func.count(Document.id).label("document_count"),
+        )
         .join(SourceRoot, SourceRoot.id == Document.source_root_id)
         .where(
             Document.state == DocumentState.active,
             SourceRoot.data_scope == "production",
         )
         .group_by(Document.project_key)
-        .order_by(func.count(Document.id).desc())
+        .subquery()
+    )
+    total, document_total = db.execute(
+        select(
+            func.count(),
+            func.coalesce(func.sum(grouped.c.document_count), 0),
+        ).select_from(grouped)
+    ).one()
+    rows = db.execute(
+        select(grouped.c.project_key, grouped.c.document_count)
+        .order_by(grouped.c.document_count.desc(), grouped.c.project_key)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
-    return [{"key": name, "document_count": count} for name, count in rows]
+    return {
+        "items": [
+            {"key": name, "document_count": int(count)}
+            for name, count in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+        "total": int(total),
+        "document_total": int(document_total),
+    }
 
 
 def _activity_json(row: ActivityEvent) -> dict:
@@ -552,7 +611,7 @@ def activities(
             ActivityEvent.verification_status == verification_status
         )
     rows = db.scalars(
-        statement.order_by(ActivityEvent.occurred_at.desc())
+        statement.order_by(ActivityEvent.occurred_at.desc(), ActivityEvent.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -615,6 +674,67 @@ def _candidate_json(row: KnowledgeCandidate) -> dict:
     }
 
 
+def _journal_json(row: ProjectJournalEntry) -> dict:
+    return {
+        "id": str(row.id),
+        "source_stop_activity_id": str(row.source_stop_activity_id),
+        "project": row.project_key,
+        "occurred_at": row.occurred_at,
+        "title": row.title,
+        "intent": row.intent,
+        "change_summary": row.change_summary,
+        "failures": row.failures_json,
+        "resolution": row.resolution,
+        "verification": row.verification_json,
+        "changed_files": row.changed_files,
+        "knowledge_references": row.knowledge_references_json,
+        "significance_reasons": row.significance_reasons,
+        "verification_status": row.verification_status,
+        "metadata": row.metadata_json,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+@app.get("/api/v1/project-journal")
+def project_journal(
+    project: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> dict:
+    statement = select(ProjectJournalEntry)
+    count_statement = select(func.count()).select_from(ProjectJournalEntry)
+    if project:
+        statement = statement.where(ProjectJournalEntry.project_key == project)
+        count_statement = count_statement.where(ProjectJournalEntry.project_key == project)
+    rows = db.scalars(
+        statement.order_by(
+            ProjectJournalEntry.occurred_at.desc(),
+            ProjectJournalEntry.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "items": [_journal_json(row) for row in rows],
+        "page": page,
+        "page_size": page_size,
+        "total": db.scalar(count_statement),
+    }
+
+
+@app.get("/api/v1/project-journal/{entry_id}")
+def project_journal_detail(
+    entry_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    row = db.get(ProjectJournalEntry, entry_id)
+    if not row:
+        raise HTTPException(404, "project journal entry not found")
+    return _journal_json(row)
+
+
 @app.get("/api/v1/knowledge/candidates")
 def candidates(
     status: str | None = None,
@@ -628,7 +748,10 @@ def candidates(
         statement = statement.where(KnowledgeCandidate.status == status)
         count_statement = count_statement.where(KnowledgeCandidate.status == status)
     rows = db.scalars(
-        statement.order_by(KnowledgeCandidate.created_at.desc())
+        statement.order_by(
+            KnowledgeCandidate.created_at.desc(),
+            KnowledgeCandidate.id.desc(),
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -799,7 +922,7 @@ def knowledge_cases(
         statement = statement.where(predicate)
         count_statement = count_statement.where(predicate)
     rows = db.scalars(
-        statement.order_by(KnowledgeCase.last_seen_at.desc())
+        statement.order_by(KnowledgeCase.last_seen_at.desc(), KnowledgeCase.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -887,7 +1010,10 @@ def materialize_knowledge_case(case_id: uuid.UUID, db: Session = Depends(get_db)
 
 @app.get("/api/v1/tree")
 def tree(
-    project: str | None = None, limit: int = Query(5000, le=20000), db: Session = Depends(get_db)
+    project: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(250, ge=1, le=1000),
+    db: Session = Depends(get_db),
 ) -> dict:
     statement = (
         select(Document)
@@ -899,8 +1025,15 @@ def tree(
     )
     if project:
         statement = statement.where(Document.project_key == project)
+    count_statement = select(func.count()).select_from(statement.order_by(None).subquery())
     rows = db.scalars(
-        statement.order_by(Document.project_key, Document.project_relative_path).limit(limit)
+        statement.order_by(
+            Document.project_key,
+            Document.project_relative_path,
+            Document.id,
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
     return {
         "items": [
@@ -914,7 +1047,9 @@ def tree(
             }
             for row in rows
         ],
-        "truncated": len(rows) == limit,
+        "page": page,
+        "page_size": page_size,
+        "total": db.scalar(count_statement),
     }
 
 
@@ -926,10 +1061,12 @@ def jobs(
     db: Session = Depends(get_db),
 ) -> dict:
     statement = select(IngestJob)
+    count_statement = select(func.count()).select_from(IngestJob)
     if status:
         statement = statement.where(IngestJob.status == status)
+        count_statement = count_statement.where(IngestJob.status == status)
     rows = db.scalars(
-        statement.order_by(IngestJob.created_at.desc())
+        statement.order_by(IngestJob.created_at.desc(), IngestJob.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -951,6 +1088,8 @@ def jobs(
             for row in rows
         ],
         "page": page,
+        "page_size": page_size,
+        "total": db.scalar(count_statement),
     }
 
 
@@ -998,42 +1137,77 @@ def _worker_payload(db: Session, *, include_retired: bool) -> list[dict]:
 @app.get("/api/v1/workers")
 def workers(
     include_retired: bool = Query(False),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
-) -> list[dict]:
-    return _worker_payload(db, include_retired=include_retired)
+) -> dict:
+    rows = _worker_payload(db, include_retired=include_retired)
+    start = (page - 1) * page_size
+    return {
+        "items": rows[start : start + page_size],
+        "page": page,
+        "page_size": page_size,
+        "total": len(rows),
+    }
 
 
 @app.get("/api/v1/backups")
-def backups(db: Session = Depends(get_db)) -> list[dict]:
-    rows = db.scalars(select(BackupRun).order_by(BackupRun.created_at.desc()).limit(100)).all()
-    return [
-        {
-            "id": str(row.id),
-            "path": row.backup_path,
-            "status": row.status,
-            "manifest": row.manifest,
-            "created_at": row.created_at,
-            "finished_at": row.finished_at,
-        }
-        for row in rows
-    ]
+def backups(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> dict:
+    rows = db.scalars(
+        select(BackupRun)
+        .order_by(BackupRun.created_at.desc(), BackupRun.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "items": [
+            {
+                "id": str(row.id),
+                "path": row.backup_path,
+                "status": row.status,
+                "manifest": row.manifest,
+                "created_at": row.created_at,
+                "finished_at": row.finished_at,
+            }
+            for row in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+        "total": db.scalar(select(func.count()).select_from(BackupRun)),
+    }
 
 
 @app.get("/api/v1/timeline")
-def timeline(limit: int = Query(100, le=500), db: Session = Depends(get_db)) -> list[dict]:
+def timeline(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict:
     rows = db.scalars(
-        select(IngestEvent).order_by(IngestEvent.created_at.desc()).limit(limit)
+        select(IngestEvent)
+        .order_by(IngestEvent.created_at.desc(), IngestEvent.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
-    return [
-        {
-            "id": row.id,
-            "event": row.event_type,
-            "path": row.path,
-            "details": row.details,
-            "created_at": row.created_at,
-        }
-        for row in rows
-    ]
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "event": row.event_type,
+                "path": row.path,
+                "details": row.details,
+                "created_at": row.created_at,
+            }
+            for row in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+        "total": db.scalar(select(func.count()).select_from(IngestEvent)),
+    }
 
 
 @app.get("/api/v1/metrics/summary")

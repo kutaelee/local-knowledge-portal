@@ -182,6 +182,7 @@ services:
       - ${LKP_DATA_ROOT}:/data
       - ${LKP_BACKUP_ROOT}:/backups
       - ${LKP_SOURCE_ROOT:?set LKP_SOURCE_ROOT}:${LKP_SOURCE_ROOT}:ro
+      - ${LKP_WINDOWS_REPOSITORY_ROOT:-/mnt/c/Dev/Repos}:/sources/windows-repositories:ro
       - ${LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
     depends_on:
       migrate:
@@ -200,6 +201,7 @@ services:
       - ${LKP_DATA_ROOT}:/data
       - ${LKP_BACKUP_ROOT}:/backups
       - ${LKP_SOURCE_ROOT}:${LKP_SOURCE_ROOT}:ro
+      - ${LKP_WINDOWS_REPOSITORY_ROOT:-/mnt/c/Dev/Repos}:/sources/windows-repositories:ro
       - ${LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
     depends_on:
       migrate:

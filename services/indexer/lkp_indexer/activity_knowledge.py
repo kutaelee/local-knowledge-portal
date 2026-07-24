@@ -5,7 +5,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from lkp.models import ActivityEvent, KnowledgeCandidate
+from lkp.models import ActivityEvent, KnowledgeCandidate, ProjectJournalEntry
 from lkp.settings import Settings
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,6 +19,7 @@ from .knowledge import (
     is_execution_tool,
     publish_candidate,
 )
+from .project_journal import materialize_project_journal
 
 _PROJECT_PATH = re.compile(r"(?ix)(?:[a-z]:/dev/repos|/home/[^/]+/src)/(?P<project>[^/\\]+)")
 _MEANINGFUL_SUFFIXES = {
@@ -77,6 +78,34 @@ _LABELED_APPROACH = re.compile(
 _LABELED_VERIFICATION = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:검증|확인\s*결과|verification|validated\s*result)\s*[:：]\s*(.+?)\s*$"
 )
+_JOURNAL_OPERATIONAL_PATH = re.compile(
+    r"(?ix)(?:^|/)(?:"
+    r"config|infra|scripts|db/migrations|docs/(?:adr|runbooks|architecture)|"
+    r"AGENTS\.md$|README\.md$|compose(?:\.[^/]+)?\.ya?ml$|\.env\.example$"
+    r")"
+)
+_PRESENTATION_ONLY_SUFFIXES = {".css", ".scss", ".sass", ".less"}
+_REFERENCE_KEYS = {
+    "knowledge_references",
+    "knowledge_refs",
+    "rag_context",
+    "citations",
+    "provenance",
+}
+_REFERENCE_FIELDS = {
+    "document_id",
+    "document_version_id",
+    "chunk_id",
+    "source_root",
+    "canonical_path",
+    "relative_path",
+    "start_line",
+    "end_line",
+    "content_hash",
+    "indexed_at",
+    "retrieval_score",
+    "score",
+}
 
 
 @dataclass(frozen=True)
@@ -355,6 +384,159 @@ def _candidate_fields(summary: TurnSummary, content_language: str = "ko") -> dic
     }
 
 
+def _journal_significance(summary: TurnSummary) -> list[str]:
+    """Return explicit reasons a change belongs in the project journal.
+
+    This gate intentionally answers a different question from reusable knowledge:
+    whether a verified change materially updates a project's development history.
+    """
+
+    if not summary.report.strip() or not summary.changed_files or not summary.successful_events:
+        return []
+    normalized = [path.replace("\\", "/") for path in summary.changed_files]
+    suffixes = {PurePosixPath(path).suffix.casefold() for path in normalized}
+    reasons: list[str] = []
+    if any(_JOURNAL_OPERATIONAL_PATH.search(path) for path in normalized):
+        reasons.append("operational_or_configuration_change")
+    if summary.failed_events:
+        reasons.append("verified_failure_and_recovery")
+    if len(normalized) >= 2:
+        reasons.append("multi_artifact_change")
+    if _COMPLETION.search(summary.report) and not _PROGRESS_LEAD.search(summary.report):
+        reasons.append("reported_completion_with_execution_evidence")
+    if len(normalized) == 1 and suffixes <= _PRESENTATION_ONLY_SUFFIXES and not reasons[:2]:
+        return []
+    return list(dict.fromkeys(reasons))
+
+
+def _extract_knowledge_references(events: tuple[ActivityEvent, ...]) -> list[dict]:
+    references: list[dict] = []
+    seen: set[str] = set()
+
+    def visit(value: object, *, enabled: bool = False) -> None:
+        if isinstance(value, list):
+            for item in value[:100]:
+                visit(item, enabled=enabled)
+            return
+        if not isinstance(value, dict):
+            return
+        reference = {
+            key: value[key]
+            for key in _REFERENCE_FIELDS
+            if key in value and isinstance(value[key], (str, int, float))
+        }
+        if enabled and any(
+            key in reference for key in ("document_id", "chunk_id", "canonical_path")
+        ):
+            if "retrieval_score" not in reference and "score" in reference:
+                reference["retrieval_score"] = reference.pop("score")
+            fingerprint = repr(sorted(reference.items()))
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                references.append(reference)
+        for key, child in value.items():
+            visit(child, enabled=enabled or str(key).casefold() in _REFERENCE_KEYS)
+
+    for event in events:
+        visit(event.metadata_json or {})
+    return references[:50]
+
+
+def finalize_project_journal(
+    session: Session,
+    stop: ActivityEvent,
+    summary: TurnSummary,
+    settings: Settings,
+) -> ProjectJournalEntry | None:
+    existing = session.scalar(
+        select(ProjectJournalEntry).where(
+            ProjectJournalEntry.source_stop_activity_id == stop.id
+        )
+    )
+    if existing is not None:
+        return existing
+    metadata = dict(stop.metadata_json or {})
+    reasons = _journal_significance(summary)
+    if not reasons:
+        metadata["project_journal"] = {
+            "state": "activity_only",
+            "reason": "not_a_significant_verified_project_change",
+        }
+        stop.metadata_json = metadata
+        return None
+    all_events = (
+        summary.change_events + summary.failed_events + summary.successful_events
+    )
+    references = _extract_knowledge_references(all_events)
+    failures = [
+        {
+            "activity_id": str(event.id),
+            "command_family": _safe_command_family(event.command),
+            "exit_code": event.exit_code,
+        }
+        for event in summary.failed_events[:20]
+    ]
+    verification = [
+        {
+            "activity_id": str(event.id),
+            "command_family": _safe_command_family(event.command),
+            "evidence_type": _event_evidence_type(event),
+            "exit_code": event.exit_code,
+        }
+        for event in summary.successful_events[:20]
+    ]
+    labeled_resolution = (
+        _LABELED_SOLUTION.search(summary.report)
+        or _LABELED_APPROACH.search(summary.report)
+        or _LABELED_CAUSE.search(summary.report)
+    )
+    resolution = (
+        labeled_resolution.group(1)[:4000]
+        if labeled_resolution
+        else (
+            "변경 후 테스트·빌드·검증 명령의 성공 종료가 관측되었습니다."
+            if settings.knowledge_content_language == "ko"
+            else "Successful test, build, or validation execution was observed after the change."
+        )
+    )
+    title = _first_line(summary.report, limit=260) or _first_line(
+        summary.instruction, limit=260
+    )
+    entry = ProjectJournalEntry(
+        source_stop_activity_id=stop.id,
+        project_key=summary.project,
+        occurred_at=stop.occurred_at,
+        title=(f"[{summary.project}] {title}" if title else summary.project)[:500],
+        intent=(summary.instruction or "명시된 사용자 지시 없음")[:8000],
+        change_summary=summary.report[:16000],
+        failures_json=failures,
+        resolution=resolution,
+        verification_json=verification,
+        changed_files=list(summary.changed_files[:200]),
+        knowledge_references_json=references,
+        significance_reasons=reasons,
+        verification_status="VERIFIED",
+        metadata_json={
+            "source_session_id": stop.session_id,
+            "source_turn_id": stop.turn_id,
+            "reported_result_is_evidence": False,
+            "journal_policy": "significant-change-v1",
+            "knowledge_reference_count": len(references),
+        },
+    )
+    session.add(entry)
+    session.flush()
+    metadata["project_journal"] = {
+        "state": "recorded",
+        "entry_id": str(entry.id),
+        "verification_status": entry.verification_status,
+        "significance_reasons": reasons,
+        "materialization": "batched_by_project",
+    }
+    stop.metadata_json = metadata
+    return entry
+
+
 def finalize_stop(
     session: Session,
     stop: ActivityEvent,
@@ -499,22 +681,36 @@ def finalize_pending_stops(session: Session, settings: Settings) -> dict[str, in
         "candidates": 0,
         "published": 0,
         "needs_review": 0,
+        "journal_recorded": 0,
+        "journal_activity_only": 0,
+        "journal_materialized": 0,
     }
+    journal_projects: set[str] = set()
     stops = list(
         session.scalars(
             select(ActivityEvent)
             .where(
                 ActivityEvent.event_type.in_(["Stop", "SubagentStop"]),
-                ActivityEvent.metadata_json["knowledge_pipeline"].astext.is_(None),
+                (
+                    ActivityEvent.metadata_json["knowledge_pipeline"].astext.is_(None)
+                    | ActivityEvent.metadata_json["project_journal"].astext.is_(None)
+                ),
             )
             .order_by(ActivityEvent.occurred_at)
         )
     )
     for stop in stops:
         pipeline_state = (stop.metadata_json or {}).get("knowledge_pipeline")
+        counts["considered"] += 1
+        summary = summarize_turn(session, stop)
+        journal = finalize_project_journal(session, stop, summary, settings)
+        if journal is None:
+            counts["journal_activity_only"] += 1
+        else:
+            counts["journal_recorded"] += 1
+            journal_projects.add(journal.project_key)
         if pipeline_state:
             continue
-        counts["considered"] += 1
         candidate, outcome = finalize_stop(session, stop, settings)
         if candidate is None:
             counts["activity_only"] += 1
@@ -524,4 +720,13 @@ def finalize_pending_stops(session: Session, settings: Settings) -> dict[str, in
                 counts["published"] += 1
             elif candidate.status in {"needs_review", "verified"}:
                 counts["needs_review"] += 1
+    for project in sorted(journal_projects):
+        path = materialize_project_journal(
+            session,
+            project=project,
+            vault_dir=settings.vault_dir,
+            pipeline_version=settings.pipeline_version,
+            content_language=settings.knowledge_content_language,
+        )
+        counts["journal_materialized"] += int(path is not None)
     return counts

@@ -3,7 +3,7 @@ param(
     [ValidateRange(2048, 65536)]
     [int]$VramMiB = 8192,
     [ValidateRange(1, 86400)]
-    [int]$EstimatedSeconds = 45,
+    [int]$EstimatedSeconds = 1800,
     [ValidateRange(0, 100)]
     [int]$Priority = 40
 )
@@ -23,6 +23,7 @@ $command = @(
     "run",
     "--vram", [string]$VramMiB,
     "--eta", [string]$EstimatedSeconds,
+    "--max-runtime", "21600",
     "--priority", [string]$Priority,
     "--agent", "local-knowledge-portal",
     "--workload", $workload,

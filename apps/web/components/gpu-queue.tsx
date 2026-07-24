@@ -210,6 +210,13 @@ function JobTable({
   onSelect: (id: string) => void;
 }) {
   const text = copy[locale];
+  const [page, setPage] = useState(1);
+  const pageSize = 25;
+  const pages = Math.max(1, Math.ceil(jobs.length / pageSize));
+  const visibleJobs = jobs.slice((page - 1) * pageSize, page * pageSize);
+  useEffect(() => {
+    if (page > pages) setPage(pages);
+  }, [page, pages]);
   return (
     <article className="panel gpu-job-panel">
       <div className="panel-head">
@@ -225,7 +232,7 @@ function JobTable({
               <th>{text.note}</th>
             </tr></thead>
             <tbody>
-              {jobs.map((job) => (
+              {visibleJobs.map((job) => (
                 <tr
                   key={job.id}
                   className={selected === job.id ? "selected-row" : ""}
@@ -242,6 +249,15 @@ function JobTable({
               ))}
             </tbody>
           </table>
+          <nav className="page-controls" aria-label={locale === "ko" ? "페이지" : "Page"}>
+            <button disabled={page <= 1} onClick={() => setPage(page - 1)}>
+              {locale === "ko" ? "이전" : "Previous"}
+            </button>
+            <span>{locale === "ko" ? "페이지" : "Page"} {page} / {pages} · {jobs.length}</span>
+            <button disabled={page >= pages} onClick={() => setPage(page + 1)}>
+              {locale === "ko" ? "다음" : "Next"}
+            </button>
+          </nav>
         </div>
       )}
     </article>
@@ -356,7 +372,7 @@ export function GpuQueue() {
           <JobTable title={text.queued} jobs={data?.jobs.queued ?? []} locale={locale}
             selected={selectedJobId} onSelect={setSelectedJobId} />
         </section>
-        <JobTable title={text.completed} jobs={(data?.jobs.completed ?? []).slice(0, 25)}
+        <JobTable title={text.completed} jobs={data?.jobs.completed ?? []}
           locale={locale} selected={selectedJobId} onSelect={setSelectedJobId} />
 
         <article className="panel gpu-detail">

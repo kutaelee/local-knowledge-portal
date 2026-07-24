@@ -303,6 +303,51 @@ class ActivityEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ProjectJournalEntry(Base):
+    """Verified project change log, independent from reusable knowledge promotion."""
+
+    __tablename__ = "project_journal_entry"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_stop_activity_id",
+            name="uq_project_journal_source_stop",
+        ),
+        Index(
+            "ix_project_journal_project_occurred",
+            "project_key",
+            "occurred_at",
+            "id",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    source_stop_activity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("activity_event.id")
+    )
+    project_key: Mapped[str] = mapped_column(String(200))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    title: Mapped[str] = mapped_column(Text)
+    intent: Mapped[str] = mapped_column(Text)
+    change_summary: Mapped[str] = mapped_column(Text)
+    failures_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        "failures", JSONB, default=list
+    )
+    resolution: Mapped[str] = mapped_column(Text)
+    verification_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        "verification", JSONB, default=list
+    )
+    changed_files: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    knowledge_references_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        "knowledge_references", JSONB, default=list
+    )
+    significance_reasons: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    verification_status: Mapped[str] = mapped_column(String(32), default="UNVERIFIED")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class KnowledgeCandidate(Base):
     __tablename__ = "knowledge_candidate"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -771,49 +771,95 @@ function Overview({ onNavigate, locale }: {
   );
 }
 
+function Pager({
+  page,
+  pageSize,
+  total,
+  locale,
+  onChange,
+}: {
+  page: number;
+  pageSize: number;
+  total: number;
+  locale: Locale;
+  onChange: (page: number) => void;
+}) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  return <nav className="page-controls" aria-label={locale === "ko" ? "페이지" : "Page"}>
+    <button disabled={page <= 1} onClick={() => onChange(page - 1)}>
+      {locale === "ko" ? "이전" : "Previous"}
+    </button>
+    <span>{locale === "ko" ? "페이지" : "Page"} {page} / {pages} · {total}</span>
+    <button disabled={page >= pages} onClick={() => onChange(page + 1)}>
+      {locale === "ko" ? "다음" : "Next"}
+    </button>
+  </nav>;
+}
+
 function Explorer({ onOpen, locale }: {
   onOpen: (item: TreeItem) => void;
   locale: Locale;
 }) {
   const text = translations[locale].explorer;
-  const tree = useQuery({ queryKey: ["tree"], queryFn: () => api<{ items: TreeItem[]; truncated: boolean }>("/api/v1/tree?limit=20000") });
-  const [open, setOpen] = useState<Set<string>>(new Set());
-  const grouped = useMemo(() => {
-    const map = new Map<string, TreeItem[]>();
-    for (const item of tree.data?.items ?? []) {
-      const group = map.get(item.project) ?? [];
-      group.push(item); map.set(item.project, group);
-    }
-    return map;
-  }, [tree.data]);
-  if (tree.isLoading) return <SkeletonRows />;
-  if (tree.isError) return <ErrorState message={text.loadError} />;
+  const [openProject, setOpenProject] = useState<string | null>(null);
+  const [projectPage, setProjectPage] = useState(1);
+  const projectPageSize = 50;
+  const [page, setPage] = useState(1);
+  const pageSize = 250;
+  const projects = useQuery({
+    queryKey: ["explorer-projects", projectPage],
+    queryFn: () => api<{
+      items: Array<{ key: string; document_count: number }>;
+      total: number;
+      document_total: number;
+    }>(`/api/v1/projects?page=${projectPage}&page_size=${projectPageSize}`),
+  });
+  const tree = useQuery({
+    queryKey: ["tree", openProject, page],
+    queryFn: () => api<{ items: TreeItem[]; total: number }>(
+      `/api/v1/tree?project=${encodeURIComponent(openProject!)}&page=${page}&page_size=${pageSize}`,
+    ),
+    enabled: Boolean(openProject),
+  });
+  if (projects.isLoading) return <SkeletonRows />;
+  if (projects.isError) return <ErrorState message={text.loadError} />;
   return (
     <section>
       <div className="page-title compact"><div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
-        <p>{tree.data?.items.length ?? 0} {text.visible}{tree.data?.truncated ? ` · ${text.limited}` : ""}</p></div></div>
+        <p>{projects.data?.document_total ?? 0} {text.visible}</p></div></div>
       <div className="panel tree-panel" role="tree" aria-label={text.treeLabel}>
-        {[...grouped.entries()].map(([project, items]) => {
-          const expanded = open.has(project);
-          return <div key={project}>
+        {projects.data?.items.map((project) => {
+          const expanded = openProject === project.key;
+          return <div key={project.key}>
             <button className="tree-project" role="treeitem" aria-expanded={expanded}
-              onClick={() => setOpen((previous) => {
-                const next = new Set(previous); next.has(project) ? next.delete(project) : next.add(project); return next;
-              })}>
-              {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}<Folder size={16} />{project}
-              <span>{items.length}</span>
+              onClick={() => {
+                setOpenProject(expanded ? null : project.key);
+                setPage(1);
+              }}>
+              {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+              <Folder size={16} />{project.key}
+              <span>{project.document_count}</span>
             </button>
             {expanded && <div role="group" className="tree-children">
-              {items.slice(0, 250).map((item) => <button key={item.id} role="treeitem" onClick={() => onOpen(item)}>
+              {tree.isLoading && <SkeletonRows />}
+              {tree.data?.items.map((item) => <button key={item.id} role="treeitem" onClick={() => onOpen(item)}>
                 <FileCode2 size={15} /><span>{item.path}</span>
                 <em>{translations[locale].statusLabels[
                   item.state as keyof typeof translations.ko.statusLabels
                 ] ?? item.state}</em>
               </button>)}
+              <Pager page={page} pageSize={pageSize} total={tree.data?.total ?? 0}
+                locale={locale} onChange={setPage} />
             </div>}
           </div>;
         })}
-        {!grouped.size && <EmptyState title={text.emptyTitle} detail={text.emptyDetail} />}
+        <Pager page={projectPage} pageSize={projectPageSize} total={projects.data?.total ?? 0}
+          locale={locale} onChange={(nextPage) => {
+            setProjectPage(nextPage);
+            setOpenProject(null);
+            setPage(1);
+          }} />
+        {!projects.data?.items.length && <EmptyState title={text.emptyTitle} detail={text.emptyDetail} />}
       </div>
     </section>
   );
@@ -831,6 +877,9 @@ function SearchView({ initialQuery, onSelect, locale }: {
   const [project, setProject] = useState("");
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<"all" | "any">("all");
+  const [page, setPage] = useState(1);
+  const pageSize = 25;
+  useEffect(() => setPage(1), [mode, project, selectedTags, tagMode]);
   const parent = useRef<HTMLDivElement>(null);
   const facets = useQuery({
     queryKey: ["search-facets"],
@@ -843,21 +892,27 @@ function SearchView({ initialQuery, onSelect, locale }: {
     queryKey: ["search", submitted, mode, project, selectedTags, tagMode],
     queryFn: () => api<{ confidence: string; results: SearchResult[]; total: number }>("/api/v1/search/hybrid", {
       method: "POST", body: JSON.stringify({
-        query: submitted, mode, top_k: 50,
+        query: submitted, mode, top_k: 100,
         project: project || null, tags: selectedTags, tag_mode: tagMode,
       }),
     }),
     enabled: submitted.trim().length > 0,
   });
+  const pagedResults = results.data?.results.slice(
+    (page - 1) * pageSize,
+    page * pageSize,
+  ) ?? [];
   const virtual = useVirtualizer({
-    count: results.data?.results.length ?? 0, getScrollElement: () => parent.current,
+    count: pagedResults.length, getScrollElement: () => parent.current,
     estimateSize: () => 190, overscan: 4, useFlushSync: false,
   });
   return (
     <section>
       <div className="page-title compact"><div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
         <p>{text.subtitle}</p></div></div>
-      <form className="search-box" onSubmit={(event) => { event.preventDefault(); setSubmitted(value); }}>
+      <form className="search-box" onSubmit={(event) => {
+        event.preventDefault(); setPage(1); setSubmitted(value);
+      }}>
         <Search size={18} /><input value={value} onChange={(e) => setValue(e.target.value)} placeholder={text.placeholder} />
         <select value={mode} onChange={(e) => setMode(e.target.value)} aria-label={text.mode}>
           {Object.entries(text.modes).map(([value, label]) =>
@@ -901,7 +956,7 @@ function SearchView({ initialQuery, onSelect, locale }: {
       <div ref={parent} className="result-scroll">
         <div style={{ height: virtual.getTotalSize(), position: "relative" }}>
           {virtual.getVirtualItems().map((row) => {
-            const result = results.data!.results[row.index];
+            const result = pagedResults[row.index];
             return <button key={result.provenance.chunk_id} className="result-card"
               ref={virtual.measureElement} data-index={row.index} onClick={() => onSelect(result)}
               style={{ transform: `translateY(${row.start}px)` }}>
@@ -923,6 +978,8 @@ function SearchView({ initialQuery, onSelect, locale }: {
           })}
         </div>
       </div>
+      <Pager page={page} pageSize={pageSize} total={results.data?.total ?? 0}
+        locale={locale} onChange={setPage} />
       {!results.isLoading && submitted && !results.data?.results.length &&
         <EmptyState title={text.emptyTitle} detail={text.emptyDetail} />}
     </section>
@@ -934,23 +991,27 @@ function Operations({ locale }: { locale: Locale }) {
   const statusLabels = translations[locale].statusLabels;
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<"jobs" | "workers" | "backups">("jobs");
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
   const jobs = useQuery({
-    queryKey: ["jobs"],
+    queryKey: ["jobs", page],
     queryFn: async () => {
       const [recent, failed, dead] = await Promise.all([
-        api<{ items: Job[] }>("/api/v1/jobs?page_size=80"),
+        api<{ items: Job[]; total: number }>(
+          `/api/v1/jobs?page=${page}&page_size=${pageSize}`,
+        ),
         api<{ items: Job[] }>("/api/v1/jobs?status=failed&page_size=20"),
         api<{ items: Job[] }>("/api/v1/jobs?status=dead_letter&page_size=20"),
       ]);
       const unique = new Map<string, Job>();
       for (const item of [...failed.items, ...dead.items, ...recent.items]) unique.set(item.id, item);
-      return { items: [...unique.values()] };
+      return { items: [...unique.values()], total: recent.total };
     },
     refetchInterval: 5000,
   });
   const workers = useQuery({
-    queryKey: ["workers"],
-    queryFn: () => api<Array<{
+    queryKey: ["workers", page],
+    queryFn: () => api<{ items: Array<{
       worker_id: string; hostname: string; state: string; last_seen_at: string;
       current_job_id: string | null; processed_count: number; failed_count: number;
       metadata: {
@@ -959,15 +1020,15 @@ function Operations({ locale }: { locale: Locale }) {
         resource_guard_enabled?: boolean; pause_requested?: boolean;
         embedding_batch_size?: number; burst_jobs?: number;
       };
-    }>>("/api/v1/workers"),
+    }>; total: number }>(`/api/v1/workers?page=${page}&page_size=${pageSize}`),
     refetchInterval: 5000,
   });
   const backups = useQuery({
-    queryKey: ["backups"],
-    queryFn: () => api<Array<{
+    queryKey: ["backups", page],
+    queryFn: () => api<{ items: Array<{
       id: string; path: string; status: string; created_at: string;
       manifest: { sha256?: string; file_size?: number; schema_revision?: string };
-    }>>("/api/v1/backups"),
+    }>; total: number }>(`/api/v1/backups?page=${page}&page_size=${pageSize}`),
   });
   const retry = useMutation({
     mutationFn: (id: string) => api(`/api/v1/jobs/${id}/retry`, { method: "POST" }),
@@ -994,11 +1055,11 @@ function Operations({ locale }: { locale: Locale }) {
         <p>{text.subtitle}</p></div>
         <button className="secondary" onClick={() => jobs.refetch()}><RefreshCcw size={15} /> {text.refresh}</button></div>
       <div className="tabs"><button className={tab === "jobs" ? "active" : ""}
-        onClick={() => setTab("jobs")}>{text.tabs.jobs}</button><button
+        onClick={() => { setTab("jobs"); setPage(1); }}>{text.tabs.jobs}</button><button
         className={tab === "workers" ? "active" : ""}
-        onClick={() => setTab("workers")}>{text.tabs.workers}</button><button
+        onClick={() => { setTab("workers"); setPage(1); }}>{text.tabs.workers}</button><button
         className={tab === "backups" ? "active" : ""}
-        onClick={() => setTab("backups")}>{text.tabs.backups}</button></div>
+        onClick={() => { setTab("backups"); setPage(1); }}>{text.tabs.backups}</button></div>
       {tab === "jobs" && <div className="panel table-wrap">
         <table>
           <thead>{table.getHeaderGroups().map((group) => <tr key={group.id}>{group.headers.map((header) =>
@@ -1008,6 +1069,8 @@ function Operations({ locale }: { locale: Locale }) {
         </table>
         {!jobs.isLoading && !jobs.data?.items.length &&
           <EmptyState title={text.queueEmpty} detail={text.queueEmptyDetail} />}
+        <Pager page={page} pageSize={pageSize} total={jobs.data?.total ?? 0}
+          locale={locale} onChange={setPage} />
       </div>}
       {tab === "workers" && <div className="panel table-wrap">
         <table><thead><tr><th>{text.headers.worker}</th><th>{text.headers.host}</th>
@@ -1015,7 +1078,7 @@ function Operations({ locale }: { locale: Locale }) {
           <th>{text.headers.guard}</th><th>{text.headers.cpu}</th>
           <th>{text.headers.heartbeat}</th><th>{text.headers.processed}</th>
           <th>{text.headers.failed}</th></tr></thead>
-          <tbody>{workers.data?.map((worker) => <tr key={worker.worker_id}>
+          <tbody>{workers.data?.items.map((worker) => <tr key={worker.worker_id}>
             <td className="mono">{worker.worker_id}</td><td>{worker.hostname}</td>
             <td><Status value={worker.state} label={
               statusLabels[worker.state as keyof typeof statusLabels] ?? worker.state
@@ -1040,14 +1103,16 @@ function Operations({ locale }: { locale: Locale }) {
             )}</td>
             <td>{worker.processed_count}</td><td>{worker.failed_count}</td>
           </tr>)}</tbody></table>
-        {!workers.isLoading && !workers.data?.length &&
+        {!workers.isLoading && !workers.data?.items.length &&
           <EmptyState title={text.noHeartbeat} detail={text.noHeartbeatDetail} />}
+        <Pager page={page} pageSize={pageSize} total={workers.data?.total ?? 0}
+          locale={locale} onChange={setPage} />
       </div>}
       {tab === "backups" && <div className="panel table-wrap">
         <table><thead><tr><th>{text.headers.status}</th><th>{text.headers.created}</th>
           <th>{text.headers.path}</th><th>{text.headers.revision}</th>
           <th>{text.headers.checksum}</th></tr></thead>
-          <tbody>{backups.data?.map((backup) => <tr key={backup.id}>
+          <tbody>{backups.data?.items.map((backup) => <tr key={backup.id}>
             <td><Status value={backup.status} label={
               statusLabels[backup.status as keyof typeof statusLabels] ?? backup.status
             } /></td>
@@ -1058,8 +1123,10 @@ function Operations({ locale }: { locale: Locale }) {
             <td className="mono">{backup.manifest.schema_revision ?? "—"}</td>
             <td className="mono">{backup.manifest.sha256?.slice(0, 12) ?? "—"}</td>
           </tr>)}</tbody></table>
-        {!backups.isLoading && !backups.data?.length &&
+        {!backups.isLoading && !backups.data?.items.length &&
           <EmptyState title={text.noBackup} detail={text.noBackupDetail} />}
+        <Pager page={page} pageSize={pageSize} total={backups.data?.total ?? 0}
+          locale={locale} onChange={setPage} />
       </div>}
     </section>
   );
@@ -1067,16 +1134,25 @@ function Operations({ locale }: { locale: Locale }) {
 
 function Timeline({ locale }: { locale: Locale }) {
   const text = translations[locale].timelineView;
-  const events = useQuery({ queryKey: ["timeline"], queryFn: () => api<Array<{ id: number; event: string; path: string; details: object; created_at: string }>>("/api/v1/timeline") });
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
+  const events = useQuery({
+    queryKey: ["timeline", page],
+    queryFn: () => api<{ items: Array<{
+      id: number; event: string; path: string; details: object; created_at: string;
+    }>; total: number }>(`/api/v1/timeline?page=${page}&page_size=${pageSize}`),
+  });
   return <section><div className="page-title compact"><div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
     <p>{text.subtitle}</p></div></div><div className="timeline">
-      {events.data?.map((item) => <article key={item.id}><span className="timeline-dot" /><div>
+      {events.data?.items.map((item) => <article key={item.id}><span className="timeline-dot" /><div>
         <strong>{text.events[item.event as keyof typeof text.events] ?? item.event}</strong>
         <p>{item.path ?? text.system}</p><small>{new Date(item.created_at).toLocaleString(
           locale === "ko" ? "ko-KR" : "en-US"
         )}</small></div></article>)}
-      {!events.isLoading && !events.data?.length &&
+      {!events.isLoading && !events.data?.items.length &&
         <EmptyState title={text.emptyTitle} detail={text.emptyDetail} />}
+      <Pager page={page} pageSize={pageSize} total={events.data?.total ?? 0}
+        locale={locale} onChange={setPage} />
     </div></section>;
 }
 

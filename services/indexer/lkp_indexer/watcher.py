@@ -172,12 +172,12 @@ async def reconciliation_loop(
     source_root: SourceRoot,
     settings: Settings,
     stop_event: asyncio.Event,
+    interval_seconds: int | None = None,
 ) -> None:
+    interval = max(5, interval_seconds or settings.reconciliation_seconds)
     while not stop_event.is_set():
         try:
-            await asyncio.wait_for(
-                stop_event.wait(), timeout=max(5, settings.reconciliation_seconds)
-            )
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
         except TimeoutError:
             with session_factory() as session:
                 current_root = session.get(SourceRoot, source_root.id)

@@ -106,6 +106,23 @@ quality gate all pass. A Codex success report and model output are never evidenc
 Managed case text follows `LKP_KNOWLEDGE_CONTENT_LANGUAGE=ko`, while paths, commands, variables,
 and model identifiers remain unchanged.
 
+Significant verified implementation, configuration, migration, runbook, and operating changes use
+a separate project-development journal. They do not need to be reusable enough for a canonical
+case. Each entry records the user intent, completion report, changed files, observed failed and
+successful command families, and structured RAG provenance when the task actually used the
+knowledge base. Single presentation-only changes remain activity history. The database retains the
+full paginated journal. Each durable entry is written once below
+`_generated/Projects/<project>/Journal/`, while the small
+`_generated/Projects/<project>/development-journal.md` file is only a current index. This prevents
+one new entry from re-embedding the project's entire history.
+
+For a Windows repository collection, mount `C:\Dev\Repos` read-only at
+`/sources/windows-repositories` and use `type: repository_collection`. Reconciliation scans only
+direct child directories that are Git repositories; unrelated directories and nested dependency
+repositories are not roots. `watch_mode: disabled` plus a bounded interval discovers future
+repositories without one polling watcher per repository. The example remains disabled until it is
+copied into the active source-root configuration intentionally.
+
 Low-signal hook envelopes are discarded after collection. Successful tool detail that is not
 linked to evidence is logically rolled up after 30 days and hidden from the default activity list;
 user instructions, turn outcomes, failures, and evidence remain visible. The hourly retention
@@ -149,6 +166,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\curate.ps1
 
 The script submits a one-shot Compose curator through `gpuq run`, deduplicates an already active or
 queued portal curation workload, and never exposes the scheduler mutation token to the portal.
+Each run freezes the eligible candidate IDs at its start and attempts that complete snapshot.
+Candidates created or made eligible while the run is active are deferred to the next hourly run.
+One candidate failure is recorded without preventing the remaining snapshot from being attempted.
 `/gpu-queue` is a read-only Korean/English view of GPU capacity, active/queued/completed jobs,
 effective priority, and scheduling notes. See
 [ADR 0013](docs/adr/0013-local-llm-evidence-editor.md).
@@ -171,8 +191,10 @@ mixed. Tests use a separate deterministic revision.
 
 The WSL2 runtime keeps embedding thermally bounded: Ollama has a half-CPU Docker quota; worker and
 API have one CPU; watcher, hook collector, and web each have half a CPU. Model concurrency is one,
-and requests use one-chunk batches. Query embeddings use a bounded revision-aware cache, the model is prewarmed and
-kept loaded, and search SQL has a bounded execution time. Semantic and lexical
+and requests use bounded small batches. Query embeddings use a bounded revision-aware cache, the
+model is prewarmed and kept loaded, and search SQL has a bounded execution time. Multi-term keyword
+fallback stays on the GIN-backed text vector and requires at least two matching terms; expensive
+trigram fuzzy matching is bounded to short single-term typo recovery. Semantic and lexical
 jobs have separate cooldown/burst policies, so an initial code catalog scan drains without calling
 the model while semantic work remains conservative. Operators can create
 `E:\Data\LocalKnowledgePortal\runtime\embedding.pause` to stop new leases while keeping the portal

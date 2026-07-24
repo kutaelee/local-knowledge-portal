@@ -66,7 +66,6 @@ class Settings(BaseSettings):
     knowledge_curation_exhausted_cooldown_seconds: int = Field(
         default=86_400, ge=3_600, le=2_592_000
     )
-    knowledge_curation_batch_size: int = Field(default=1, ge=1, le=10)
     knowledge_curation_min_article_chars: int = Field(default=0, ge=0, le=5000)
     knowledge_curation_max_article_chars: int = Field(default=10_000, ge=1_000, le=50_000)
     hook_spool_dir: Path = Path("runtime/ingest/codex-spool")

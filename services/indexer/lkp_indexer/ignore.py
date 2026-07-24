@@ -23,6 +23,14 @@ DEFAULT_IGNORES = [
     ".idea/",
     ".vscode/",
     "vendor/",
+    # Vendored source and generated documentation search bundles overwhelm
+    # retrieval without representing project decisions or operating knowledge.
+    "**/third_party/",
+    "**/docs/search/",
+    "**/docs/searchindex.js",
+    "**/docs/jquery.js",
+    "**/cutlass/test/unit/data/hashes/",
+    "**/old/review_imgs_debug.json",
     "tmp/",
     "temp/",
     # Playwright/Chromium profiles contain LevelDB and browser caches, not logs

@@ -8,6 +8,7 @@ from lkp_indexer.ignore import IgnoreRules
 from lkp_indexer.paths import UnsafePathError, canonicalize, content_hash, idempotency_key
 from lkp_indexer.projects import project_identity
 from lkp_indexer.queue import retry_delay
+from lkp_indexer.scanner import scan_bases, scan_root
 from lkp_indexer.selection import semantic_policy
 from lkp_indexer.worker import embedding_cost_decision
 from lkp_indexer.worker_service import workload_policy
@@ -70,6 +71,44 @@ def test_markdown_retrieval_metadata_carries_project_and_value_tags():
         "knowledge_value_tier": "promote",
         "knowledge_value_labels": ["knowledge-value:promote"],
     }
+
+
+def test_single_oversized_line_is_bounded_without_losing_line_provenance():
+    chunks, _ = chunk_markdown("# Generated\n" + ("x" * 15_001), max_chars=6000)
+    oversized = [item for item in chunks if item.metadata.get("oversized_line_segment")]
+    assert [len(item.content) for item in oversized] == [6000, 6000, 3001]
+    assert all(item.start_line == 2 and item.end_line == 2 for item in oversized)
+    assert [item.metadata["start_char"] for item in oversized] == [0, 6000, 12000]
+
+
+def test_repository_collection_discovers_only_direct_git_repositories(tmp_path: Path):
+    repository = tmp_path / "project-a"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    worktree = tmp_path / "project-b"
+    worktree.mkdir()
+    (worktree / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
+    unrelated = tmp_path / "downloads"
+    unrelated.mkdir()
+    assert scan_bases(tmp_path, "repository_collection") == [repository, worktree]
+    assert scan_bases(tmp_path, "repositories") == [tmp_path]
+
+
+def test_unavailable_repository_collection_is_a_bounded_scan_error(tmp_path: Path):
+    root = SourceRoot(
+        name="offline repositories",
+        canonical_path=str(tmp_path / "offline"),
+        source_type="repository_collection",
+        data_scope="validation",
+        read_only=True,
+        enabled=True,
+        include_patterns=["**/*"],
+        exclude_patterns=[],
+    )
+    stats = scan_root(SimpleNamespace(), root, max_file_bytes=1024)
+    assert stats.errors == 1
+    assert stats.visited == 0
+    assert stats.queued == 0
 
 
 def test_code_symbols():
@@ -148,6 +187,11 @@ def test_repository_semantic_policy_separates_code_from_docs(tmp_path: Path):
     assert semantic_policy(nested_dependency / "README.md", root, repository_mode="docs_only") == (
         False,
         "nested_repository_dependency",
+    )
+    root.source_type = "repository_collection"
+    assert semantic_policy(tmp_path / "model.py", root, repository_mode="docs_only") == (
+        False,
+        "repository_docs_only",
     )
 
 

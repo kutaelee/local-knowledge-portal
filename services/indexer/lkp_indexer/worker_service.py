@@ -17,7 +17,7 @@ from lkp.settings import get_settings
 from sqlalchemy import select, update
 
 from .cli import get_embedder
-from .queue import lease
+from .queue import cancel_if_superseded, lease
 from .selection import semantic_policy
 from .service_runtime import assert_mount_guards, service_pid
 from .worker import heartbeat, process_job
@@ -195,6 +195,21 @@ def run(deterministic: bool = False, once: bool = False) -> int:
                 break
             stopping.wait(1)
             continue
+        with SessionLocal() as session:
+            current = session.get(IngestJob, job.id)
+            if current and cancel_if_superseded(session, current):
+                heartbeat(
+                    session,
+                    worker_id,
+                    "idle",
+                    success=True,
+                    metadata={
+                        **policy,
+                        "last_skip_reason": "superseded_source_snapshot",
+                    },
+                )
+                session.commit()
+                continue
         with SessionLocal() as session:
             heartbeat(
                 session,

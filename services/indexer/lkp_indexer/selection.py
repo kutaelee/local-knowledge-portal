@@ -26,6 +26,7 @@ CODE_EXTENSIONS = {
     ".tsx",
 }
 SEMANTIC_DOCUMENT_EXTENSIONS = {".md", ".mdx"}
+REPOSITORY_SOURCE_TYPES = {"repositories", "repository_collection"}
 
 
 def semantic_policy(
@@ -41,7 +42,7 @@ def semantic_policy(
             if extension in SEMANTIC_DOCUMENT_EXTENSIONS
             else "obsidian_non_markdown"
         )
-    if source_root.source_type != "repositories":
+    if source_root.source_type not in REPOSITORY_SOURCE_TYPES:
         return True, None
     if repository_mode == "code_and_docs":
         return True, None

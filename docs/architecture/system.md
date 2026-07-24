@@ -5,6 +5,9 @@ flowchart LR
   FS[Read-only repositories and Markdown] --> SELECT[Deterministic knowledge-value filter]
   SELECT --> SCAN[Scanner]
   CODEX[Read-only Codex transcripts] --> CAPTURE[Filtered managed-page capture]
+  CAPTURE --> ACTIVITY[Activity history]
+  ACTIVITY --> JOURNAL[Significant project change journal]
+  ACTIVITY --> CASES[Reusable evidence-gated cases]
   CAPTURE --> VAULT[Managed Vault pages]
   CAPTURE -. optional .-> LOCAL_LLM[Local generation provider]
   LOCAL_LLM --> SUMMARY[Separate managed summaries]
@@ -44,8 +47,10 @@ temperature zero, and explicit model digest validation. Its output is a separate
 whose frontmatter records provider, model, digest, source hash, and pipeline revision. An LLM
 failure leaves raw capture and lexical search healthy.
 
-Raw hook transport, activity history, searchable files, semantic vectors, and canonical knowledge
-cases are separate promotion levels. The collector filters lifecycle/read-only noise before
+Raw hook transport, activity history, project development journals, searchable files, semantic
+vectors, and canonical knowledge cases are separate levels. A significant verified project change
+can update the journal even when it is not reusable enough to become a case. The collector filters
+lifecycle/read-only noise before
 creating an activity row. Generated tokenizer payloads are excluded; code, nested Git dependencies,
 lockfiles, and oversized/high-chunk documents remain lexical-only by default with an explicit skip
 reason. Project identity uses the top-level Git repository below the source root, while provenance
@@ -57,6 +62,17 @@ The durable unit remains one file, but execution policy is workload-aware. Seman
 use conservative model cooldowns; lexical code/dependency jobs use a larger burst under a one-CPU
 worker limit and never call Ollama. This preserves per-file recovery while preventing an initial
 catalog scan from becoming a model workload.
+
+Source roots also carry runtime policy in YAML. Native event watching is suitable for WSL ext4;
+Docker Desktop bind mounts containing dozens of Windows repositories should use
+`watch_mode: disabled` with a bounded reconciliation interval. One read-only collection mount then
+discovers newly added direct-child Git repositories without traversing unrelated sibling
+directories or creating a polling watcher per repository. Each journal event is an immutable
+managed Markdown document; a small per-project index links those events so one new entry does not
+force whole-history parsing and embedding. Per-root
+intervals are published in the watcher heartbeat. The watcher container is limited to 0.5 CPU, and
+generated rolling pages coalesce superseded pending snapshots while retaining cancelled queue
+history.
 
 References: [Ollama chat API](https://docs.ollama.com/api/chat) and
 [structured outputs](https://docs.ollama.com/capabilities/structured-outputs).

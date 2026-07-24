@@ -60,11 +60,35 @@ def register_roots(session: Session, config_path: Path) -> list[SourceRoot]:
     return roots
 
 
+def scan_bases(root: Path, source_type: str) -> list[Path]:
+    if source_type != "repository_collection":
+        return [root]
+    return sorted(
+        (
+            child
+            for child in root.iterdir()
+            if child.is_dir()
+            and not is_reparse_point(child)
+            and ((child / ".git").is_dir() or (child / ".git").is_file())
+        ),
+        key=lambda item: item.name.casefold(),
+    )
+
+
 def scan_root(session: Session, source_root: SourceRoot, max_file_bytes: int) -> ScanStats:
     root = Path(source_root.canonical_path)
     rules = IgnoreRules(root, source_root.exclude_patterns)
     stats = ScanStats()
-    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+    try:
+        bases = scan_bases(root, source_root.source_type)
+    except OSError:
+        stats.errors += 1
+        return stats
+    for current, directories, files in (
+        item
+        for scan_base in bases
+        for item in os.walk(scan_base, topdown=True, followlinks=False)
+    ):
         current_path = Path(current)
         safe_directories = []
         for name in directories:

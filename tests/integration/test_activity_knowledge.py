@@ -16,6 +16,7 @@ from lkp.models import (
     KnowledgeCaseRelation,
     KnowledgeCaseRevision,
     KnowledgeOccurrence,
+    ProjectJournalEntry,
     SourceRoot,
 )
 from lkp.settings import Settings
@@ -27,10 +28,11 @@ from lkp_indexer.hook_collector import collect_file, envelope_to_activity
 from lkp_indexer.hook_spool import spool
 from lkp_indexer.knowledge import (
     create_candidate,
+    evaluate_gate,
     invalidate_misclassified_execution_evidence,
     publish_candidate,
 )
-from lkp_indexer.knowledge_curator import curate_candidate
+from lkp_indexer.knowledge_curator import GpuSnapshot, curate_candidate, run_once
 from lkp_indexer.knowledge_quality import review_low_quality_auto_cases
 from lkp_indexer.paths import idempotency_key
 from lkp_indexer.queue import enqueue
@@ -183,6 +185,83 @@ def test_local_editor_publishes_only_after_deterministic_validation(
         )
         assert overview.exists()
         assert "## 최근 검증 사례" in overview.read_text(encoding="utf-8")
+        session.rollback()
+
+
+def test_scheduled_curator_drains_the_start_snapshot_and_defers_new_candidates(
+    database_url: str, tmp_path: Path
+):
+    engine = create_engine(database_url)
+    cutoff = datetime.now(timezone.utc)
+    settings = Settings(
+        database_url=database_url,
+        vault_dir=tmp_path / "vault",
+        knowledge_content_language="ko",
+        knowledge_curation_auto_publish=False,
+        knowledge_curation_poll_seconds=60,
+    )
+    with Session(engine) as session:
+        pending = []
+        for index in range(3):
+            row = create_candidate(
+                session,
+                category="implementation",
+                title=f"예약 시작 전 후보 {index}",
+                problem="예약 실행 시점의 전체 대기열을 처리해야 한다.",
+                symptom="한 실행에서 후보 한 건만 처리되고 있었다.",
+                root_cause="후보 처리 루프에 고정된 배치 크기 제한이 있었다.",
+                solution=f"시작 시점 스냅샷을 모두 처리하도록 제한을 제거했다 {index}.",
+                reported_result="수정했다고 보고됐다.",
+                verified_result="코드 변경과 테스트 성공",
+                evidence=evidence(("code_change", None), ("test_pass", 0)),
+                metadata={
+                    "auto_generated": True,
+                    "structured_knowledge": True,
+                    "project": "local-knowledge-portal",
+                },
+            )
+            row.updated_at = cutoff - timedelta(minutes=1)
+            assert evaluate_gate(session, row) == "VERIFIED"
+            row.updated_at = cutoff - timedelta(minutes=1)
+            pending.append(row)
+
+        arrived_during_run = create_candidate(
+            session,
+            category="implementation",
+            title="예약 시작 후 유입 후보",
+            problem="실행 도중 생성된 후보는 다음 예약으로 넘겨야 한다.",
+            symptom="스냅샷 경계 뒤에 후보가 유입됐다.",
+            root_cause="현재 실행의 작업 집합을 고정해야 한다.",
+            solution="updated_at 기준으로 다음 실행에 포함한다.",
+            reported_result="후보가 추가됐다.",
+            verified_result="코드 변경과 테스트 성공",
+            evidence=evidence(("code_change", None), ("test_pass", 0)),
+            metadata={
+                "auto_generated": True,
+                "structured_knowledge": True,
+                "project": "local-knowledge-portal",
+            },
+        )
+        assert evaluate_gate(session, arrived_during_run) == "VERIFIED"
+        arrived_during_run.updated_at = cutoff + timedelta(seconds=1)
+        session.flush()
+
+        result = run_once(
+            session,
+            settings,
+            provider=FakeEvidenceEditor(),
+            gpu_probe=lambda: GpuSnapshot(32_000, 4_000, 28_000, 5, 45),
+            now=cutoff,
+        )
+
+        assert result["state"] == "completed_batch"
+        assert result["snapshot_cutoff_at"] == cutoff.isoformat()
+        assert result["snapshot_candidate_count"] == 3
+        assert result["processed_candidate_count"] == 3
+        assert result["failed_candidate_count"] == 0
+        assert len(result["last_outcomes"]) == 3
+        assert all(row.status == "verified" for row in pending)
+        assert "curation" not in arrived_during_run.metadata_json
         session.rollback()
 
 
@@ -484,6 +563,7 @@ def test_global_activity_turns_become_evidence_gated_cases(database_url: str, tm
         assert counts["candidates"] == 1
         assert counts["published"] == 0
         assert counts["needs_review"] == 1
+        assert counts["journal_recorded"] == 1
         generated = session.scalar(
             select(KnowledgeCandidate).where(
                 KnowledgeCandidate.metadata_json["source_session_id"].astext == session_id
@@ -514,6 +594,32 @@ def test_global_activity_turns_become_evidence_gated_cases(database_url: str, tm
             )
             is None
         )
+        journal = session.scalar(
+            select(ProjectJournalEntry).where(
+                ProjectJournalEntry.source_stop_activity_id == complete.id
+            )
+        )
+        assert journal is not None
+        assert journal.project_key == "sample-project"
+        assert journal.verification_status == "VERIFIED"
+        assert journal.metadata_json["reported_result_is_evidence"] is False
+        assert "multi_artifact_change" in journal.significance_reasons
+        journal_page = (
+            tmp_path
+            / "vault"
+            / "_generated"
+            / "Projects"
+            / "sample-project"
+            / "development-journal.md"
+        )
+        assert journal_page.exists()
+        journal_content = journal_page.read_text(encoding="utf-8")
+        assert "[[Journal/" in journal_content
+        entry_pages = list((journal_page.parent / "Journal").glob("*.md"))
+        assert len(entry_pages) == 1
+        entry_content = entry_pages[0].read_text(encoding="utf-8")
+        assert "## [sample-project] 구현 완료" in entry_content
+        assert "지식베이스 참조" in entry_content
 
         assert finalize_pending_stops(session, settings)["considered"] == 0
         session.rollback()

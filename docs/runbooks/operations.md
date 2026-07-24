@@ -11,7 +11,16 @@
 
 ## Add a source root
 
-Add an explicit existing directory to `config/source-roots.yaml`, keep `read_only: true`, and review excludes. Never register an entire drive. Run `scripts/scan.ps1`; inspect queue counts before starting many workers.
+Add an explicit existing directory to `config/source-roots.yaml`, keep `read_only: true`, and review
+excludes. Never register an entire drive. Run `scripts/scan.ps1`; inspect queue counts before
+starting many workers.
+
+For many Windows repositories under `C:\Dev\Repos`, use the existing read-only
+`/sources/windows-repositories` mount and `type: repository_collection`. This mode accepts only
+direct child Git repositories and discovers new ones on the next bounded reconciliation. Keep
+`watch_mode: disabled` for this Docker bind mount so repository count does not multiply polling
+watchers. Copy the example entry into the active configuration only after reviewing which direct
+children are safe to index; the mount alone does not activate collection.
 
 ## Codex activity capture
 
@@ -86,7 +95,9 @@ GPU-queued editor subsection below. The `ollama-generation` service stores model
 `E:\AI\Models\Ollama\generation\models`, separately from the CPU embedding model. It remains
 unloaded until the scheduler observes at least 12,288 MB free VRAM, at most 15% utilization, and
 at most 70°C. Busy checks back off from 15 minutes to 4 hours; after six checks the scheduler
-waits 24 hours. A batch contains one candidate and the model unloads after two minutes.
+waits 24 hours. A scheduled run processes every eligible candidate present at its start; candidates
+arriving during that run wait for the next schedule. The editor is sequential and the model unloads
+after two minutes.
 
 Inspect status without triggering inference:
 
@@ -122,10 +133,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 ```
 
 `curate.ps1` checks for an existing `local-knowledge-portal-curation` workload, then calls
-`gpuq run --vram 8192 --eta 45 --priority 40`. It does not run the model directly or queue a
-duplicate workload while an equivalent job is active or waiting. The command starts a one-shot
+`gpuq run --vram 8192 --eta 1800 --max-runtime 21600 --priority 40`. It does not run the model
+directly or queue a duplicate workload while an equivalent job is active or waiting. The command
+starts a one-shot
 `knowledge-curator` container with the `manual-curation` profile. Host scheduling owns GPU
 admission, fairness, safety VRAM, bounded waiting, and job logs.
+
+The curator freezes eligible candidate IDs immediately after acquiring its PostgreSQL advisory
+lock. It attempts the complete frozen set, records processed/unchanged/failed counts, and isolates
+each candidate with a savepoint so one malformed model response cannot block later candidates.
+Candidates created or updated after the cutoff are intentionally handled by the next run.
+The external one-shot schedule is the retry clock, so each invocation probes the GPU again even
+when the previous run recorded an internal backoff timestamp. Only the optional persistent loop
+honors `next_attempt_at` between its own polls.
 
 Register the hourly, non-overlapping submission task:
 

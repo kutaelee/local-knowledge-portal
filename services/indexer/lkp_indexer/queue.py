@@ -18,7 +18,29 @@ def enqueue(
     max_attempts: int = 5,
     details: dict | None = None,
     priority: int = 100,
+    coalesce_pending: bool = False,
 ) -> IngestJob | None:
+    if coalesce_pending:
+        now = datetime.now(timezone.utc)
+        superseded = list(
+            session.scalars(
+                select(IngestJob).where(
+                    IngestJob.source_root_id == source_root_id,
+                    IngestJob.canonical_path == canonical_path,
+                    IngestJob.job_type == job_type,
+                    IngestJob.status == JobStatus.pending,
+                )
+            )
+        )
+        for existing in superseded:
+            existing.status = JobStatus.cancelled
+            existing.finished_at = now
+            existing.updated_at = now
+            existing.error_details = {
+                **(existing.error_details or {}),
+                "cancel_reason": "superseded_by_newer_source_snapshot",
+                "superseded_by_idempotency_key": key,
+            }
     statement = (
         insert(IngestJob)
         .values(
@@ -88,6 +110,45 @@ def finish(session: Session, job: IngestJob) -> None:
     job.finished_at = datetime.now(timezone.utc)
     job.lease_expires_at = None
     job.updated_at = job.finished_at
+
+
+def cancel_if_superseded(session: Session, job: IngestJob) -> bool:
+    """Cancel an obsolete path snapshot while retaining its queue history."""
+
+    if job.job_type != "index":
+        return False
+    newer_id = session.scalar(
+        select(IngestJob.id)
+        .where(
+            IngestJob.source_root_id == job.source_root_id,
+            IngestJob.canonical_path == job.canonical_path,
+            IngestJob.job_type == job.job_type,
+            IngestJob.created_at > job.created_at,
+            IngestJob.status.in_(
+                [
+                    JobStatus.pending,
+                    JobStatus.leased,
+                    JobStatus.processing,
+                    JobStatus.succeeded,
+                ]
+            ),
+        )
+        .order_by(IngestJob.created_at.desc())
+        .limit(1)
+    )
+    if newer_id is None:
+        return False
+    now = datetime.now(timezone.utc)
+    job.status = JobStatus.cancelled
+    job.finished_at = now
+    job.lease_expires_at = None
+    job.updated_at = now
+    job.error_details = {
+        **(job.error_details or {}),
+        "cancel_reason": "superseded_by_newer_source_snapshot",
+        "superseded_by_job_id": str(newer_id),
+    }
+    return True
 
 
 def retry_as_new(session: Session, job_id: uuid.UUID) -> IngestJob:

@@ -17,7 +17,7 @@ from lkp.models import WorkerHeartbeat
 from lkp.settings import get_settings
 
 from .reconcile import reconcile_root
-from .scanner import register_roots
+from .scanner import load_roots, register_roots
 from .service_runtime import assert_mount_guards, service_pid
 from .watcher import reconciliation_loop, watch_root
 
@@ -127,6 +127,7 @@ async def _monitor_service(
     warning_samples: int,
     grace_seconds: float,
     root_watch_modes: dict[str, str],
+    root_reconcile_intervals: dict[str, int],
     watch_poll_delay_ms: int,
     reconciliation_seconds: int,
     source_root_count: int,
@@ -142,6 +143,7 @@ async def _monitor_service(
         "watcher_mode_selected",
         watch_mode=mode,
         root_watch_modes=root_watch_modes,
+        root_reconcile_intervals=root_reconcile_intervals,
         poll_delay_ms=watch_poll_delay_ms,
         reconciliation_seconds=reconciliation_seconds,
         source_root_count=source_root_count,
@@ -152,6 +154,7 @@ async def _monitor_service(
         metadata = {
             "watch_mode": mode,
             "root_watch_modes": root_watch_modes,
+            "root_reconcile_intervals": root_reconcile_intervals,
             "poll_delay_ms": watch_poll_delay_ms,
             "reconciliation_seconds": reconciliation_seconds,
             "source_root_count": source_root_count,
@@ -213,10 +216,16 @@ async def _supervise(
 async def run(once: bool = False) -> int:
     settings = get_settings()
     assert_mount_guards(settings)
+    configured_roots = load_roots(settings.source_roots_config)
+    runtime_policies = {
+        str(os.path.realpath(item["path"])): item for item in configured_roots
+    }
     with SessionLocal() as session:
         roots = register_roots(session, settings.source_roots_config)
         for root in roots:
-            reconcile_root(session, root, settings)
+            policy = runtime_policies.get(root.canonical_path, {})
+            if policy.get("startup_reconcile", True):
+                reconcile_root(session, root, settings)
         session.commit()
         for root in roots:
             session.expunge(root)
@@ -229,14 +238,26 @@ async def run(once: bool = False) -> int:
             loop.add_signal_handler(sig, stopping.set)
         except NotImplementedError:
             signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stopping.set))
-    root_watch_modes = {
-        root.canonical_path: select_watch_mode(
-            root.canonical_path,
-            force_polling=settings.watch_force_polling,
-            polling_roots=settings.watch_polling_root_set,
+    root_watch_modes: dict[str, str] = {}
+    root_reconcile_intervals: dict[str, int] = {}
+    for root in roots:
+        policy = runtime_policies.get(root.canonical_path, {})
+        configured_mode = str(policy.get("watch_mode", "auto")).casefold()
+        if configured_mode not in {"auto", "native", "polling", "disabled"}:
+            raise ValueError(f"invalid watch_mode for {root.canonical_path}: {configured_mode}")
+        root_watch_modes[root.canonical_path] = (
+            select_watch_mode(
+                root.canonical_path,
+                force_polling=settings.watch_force_polling,
+                polling_roots=settings.watch_polling_root_set,
+            )
+            if configured_mode == "auto"
+            else configured_mode
         )
-        for root in roots
-    }
+        root_reconcile_intervals[root.canonical_path] = max(
+            60,
+            int(policy.get("reconcile_interval_seconds", settings.reconciliation_seconds)),
+        )
     tasks = []
     tasks.append(
         asyncio.create_task(
@@ -248,6 +269,7 @@ async def run(once: bool = False) -> int:
                 warning_samples=settings.watch_cpu_warning_samples,
                 grace_seconds=settings.watch_cpu_grace_seconds,
                 root_watch_modes=root_watch_modes,
+                root_reconcile_intervals=root_reconcile_intervals,
                 watch_poll_delay_ms=settings.watch_poll_delay_ms,
                 reconciliation_seconds=settings.reconciliation_seconds,
                 source_root_count=len(roots),
@@ -257,30 +279,37 @@ async def run(once: bool = False) -> int:
     for root in roots:
         watch_id = f"watcher:{root.id}"
         reconcile_id = f"reconciler:{root.id}"
-        tasks.append(
-            asyncio.create_task(
-                _supervise(
-                    watch_id,
-                    lambda root=root: watch_root(
-                        SessionLocal,
-                        root,
-                        debounce_ms=settings.watch_debounce_ms,
-                        force_polling=root_watch_modes[root.canonical_path] == "polling",
-                        poll_delay_ms=settings.watch_poll_delay_ms,
-                        stability_seconds=settings.file_stability_seconds,
-                        max_file_bytes=settings.max_file_bytes,
-                        stop_event=stopping,
-                    ),
-                    stopping,
-                    settings.heartbeat_seconds,
+        if root_watch_modes[root.canonical_path] != "disabled":
+            tasks.append(
+                asyncio.create_task(
+                    _supervise(
+                        watch_id,
+                        lambda root=root: watch_root(
+                            SessionLocal,
+                            root,
+                            debounce_ms=settings.watch_debounce_ms,
+                            force_polling=root_watch_modes[root.canonical_path] == "polling",
+                            poll_delay_ms=settings.watch_poll_delay_ms,
+                            stability_seconds=settings.file_stability_seconds,
+                            max_file_bytes=settings.max_file_bytes,
+                            stop_event=stopping,
+                        ),
+                        stopping,
+                        settings.heartbeat_seconds,
+                    )
                 )
             )
-        )
         tasks.append(
             asyncio.create_task(
                 _supervise(
                     reconcile_id,
-                    lambda root=root: reconciliation_loop(SessionLocal, root, settings, stopping),
+                    lambda root=root: reconciliation_loop(
+                        SessionLocal,
+                        root,
+                        settings,
+                        stopping,
+                        root_reconcile_intervals[root.canonical_path],
+                    ),
                     stopping,
                     settings.heartbeat_seconds,
                 )

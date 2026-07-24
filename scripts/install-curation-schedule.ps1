@@ -54,7 +54,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Principal $principal `
     -Settings $settings `
-    -Description "Submit one evidence-gated portal curation batch through gpuq every $IntervalMinutes minutes." `
+    -Description "Process the full evidence-gated candidate snapshot through gpuq every $IntervalMinutes minutes." `
     -Force | Out-Null
 
 $registered = Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName

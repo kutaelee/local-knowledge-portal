@@ -26,7 +26,7 @@ from lkp.settings import Settings
 from lkp_indexer.hook_collector import collect_file
 from lkp_indexer.paths import idempotency_key
 from lkp_indexer.purpose_migration import migrate_purpose_scope
-from lkp_indexer.queue import enqueue, lease
+from lkp_indexer.queue import cancel_if_superseded, enqueue, lease
 from lkp_indexer.reconcile import reconcile_root
 from lkp_indexer.watcher import watch_root
 from lkp_indexer.worker_service import retire_legacy_worker_rows
@@ -83,6 +83,47 @@ def test_expired_lease_is_recovered(database_url: str, tmp_path: Path):
         assert recovered.leased_by == "recovery-worker"
         recovered.status = JobStatus.cancelled
         session.commit()
+
+
+def test_older_path_snapshot_is_cancelled_when_newer_job_exists(
+    database_url: str, tmp_path: Path
+):
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        root = SourceRoot(
+            name=f"coalesce-{uuid.uuid4()}",
+            canonical_path=str(tmp_path / str(uuid.uuid4())),
+            source_type="validation",
+            data_scope="validation",
+            read_only=True,
+            enabled=True,
+            include_patterns=["**/*"],
+            exclude_patterns=[],
+        )
+        session.add(root)
+        session.flush()
+        path = str(tmp_path / "development-journal.md")
+        older = enqueue(
+            session,
+            key=f"older:{uuid.uuid4()}",
+            source_root_id=root.id,
+            canonical_path=path,
+        )
+        session.flush()
+        assert older is not None
+        older.created_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        newer = enqueue(
+            session,
+            key=f"newer:{uuid.uuid4()}",
+            source_root_id=root.id,
+            canonical_path=path,
+        )
+        session.flush()
+        assert newer is not None
+        assert cancel_if_superseded(session, older) is True
+        assert older.status == JobStatus.cancelled
+        assert older.error_details["superseded_by_job_id"] == str(newer.id)
+        session.rollback()
 
 
 def test_legacy_ephemeral_workers_are_retired_without_deleting_history(database_url: str):

@@ -1,5 +1,7 @@
 import hashlib
+import re
 import time
+from itertools import combinations
 
 from lkp_indexer.embedding import Embedder
 from sqlalchemy import text
@@ -16,7 +18,7 @@ INDEXED_LEXICAL_SQL = text(
       SELECT c.id chunk_id,
         ts_rank_cd(
           c.lexical_search_vector,
-          websearch_to_tsquery('simple', :query)
+          websearch_to_tsquery('simple', :fts_query)
         ) lexical_rank,
         0 path_match,
         0 symbol_match,
@@ -24,7 +26,7 @@ INDEXED_LEXICAL_SQL = text(
       FROM document_chunk c
       WHERE :allow_text
         AND c.lexical_search_vector
-          @@ websearch_to_tsquery('simple', :query)
+          @@ websearch_to_tsquery('simple', :fts_query)
 
       UNION ALL
 
@@ -93,12 +95,19 @@ INDEXED_LEXICAL_SQL = text(
       )
       AND (CAST(:path_prefix AS text) IS NULL
            OR lower(d.relative_path) LIKE lower(:path_filter))
+      AND (
+        ranked.lexical_rank >= :minimum_lexical_rank
+        OR ranked.path_match > 0
+        OR ranked.symbol_match > 0
+      )
     ORDER BY ranked.symbol_match DESC, ranked.path_match DESC,
       ranked.fuzzy_match DESC,
       ranked.lexical_rank DESC, d.relative_path, c.chunk_index
     LIMIT :limit
     """
 )
+
+LEXICAL_TERMS = re.compile(r"\w{2,}", re.UNICODE)
 
 FUZZY_FALLBACK_SQL = text(
     """
@@ -242,6 +251,8 @@ def classify_confidence(
 def _params(request: SearchRequest) -> dict:
     return {
         "query": request.query,
+        "fts_query": request.query,
+        "minimum_lexical_rank": 0.0,
         "contains": "%" + request.query + "%",
         "limit": request.top_k * 3,
         "allow_text": request.mode in {"keyword", "hybrid"},
@@ -256,6 +267,16 @@ def _params(request: SearchRequest) -> dict:
     }
 
 
+def relaxed_lexical_query(query: str) -> str | None:
+    terms = list(dict.fromkeys(LEXICAL_TERMS.findall(query.casefold())))[:8]
+    if len(terms) < 2:
+        return None
+    return " OR ".join(
+        f'"{left}" "{right}"'
+        for left, right in combinations(terms, 2)
+    )
+
+
 def search(
     session: Session, request: SearchRequest, settings: Settings, embedder: Embedder | None = None
 ) -> SearchResponse:
@@ -267,16 +288,35 @@ def search(
     lexical_rows = []
     vector_rows = []
     if request.mode in {"keyword", "hybrid", "path", "symbol"}:
-        lexical_rows = list(session.execute(INDEXED_LEXICAL_SQL, _params(request)).mappings())
+        params = _params(request)
+        relaxed = relaxed_lexical_query(request.query)
+        lexical_rows = list(session.execute(INDEXED_LEXICAL_SQL, params).mappings())
         if request.mode == "keyword" and not lexical_rows:
-            session.execute(text("SET LOCAL pg_trgm.word_similarity_threshold = 0.15"))
-            fallback_rows = list(session.execute(FUZZY_FALLBACK_SQL, _params(request)).mappings())
+            if relaxed:
+                lexical_rows = list(
+                    session.execute(
+                        INDEXED_LEXICAL_SQL,
+                        {
+                            **params,
+                            "fts_query": relaxed,
+                            "minimum_lexical_rank": 0.11,
+                        },
+                    ).mappings()
+                )
+        if request.mode == "keyword" and not lexical_rows and relaxed is None:
+            fallback_rows = list(session.execute(CONTENT_FALLBACK_SQL, params).mappings())
             indexed_chunk_ids = {row["chunk_id"] for row in lexical_rows}
             lexical_rows.extend(
                 row for row in fallback_rows if row["chunk_id"] not in indexed_chunk_ids
             )
-        if request.mode == "keyword" and not lexical_rows:
-            fallback_rows = list(session.execute(CONTENT_FALLBACK_SQL, _params(request)).mappings())
+        if (
+            request.mode == "keyword"
+            and not lexical_rows
+            and relaxed is None
+            and len(request.query) <= 80
+        ):
+            session.execute(text("SET LOCAL pg_trgm.word_similarity_threshold = 0.15"))
+            fallback_rows = list(session.execute(FUZZY_FALLBACK_SQL, params).mappings())
             indexed_chunk_ids = {row["chunk_id"] for row in lexical_rows}
             lexical_rows.extend(
                 row for row in fallback_rows if row["chunk_id"] not in indexed_chunk_ids

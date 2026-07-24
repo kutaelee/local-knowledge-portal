@@ -52,21 +52,23 @@ test("overview, explorer, document versions, and provenance", async ({ page, req
   await page.getByRole("button", { name: "Repository explorer" }).click();
   await expect(page.getByRole("heading", { name: "Repositories & files" })).toBeVisible();
 
-  const tree = await (
-    await request.get(`${apiURL}/api/v1/tree?limit=20000`)
-  ).json();
   let target: { id: string; project: string; path: string } | null = null;
   const visiblePerProject = new Map<string, number>();
-  for (const item of tree.items) {
-    const visibleIndex = visiblePerProject.get(item.project) ?? 0;
-    visiblePerProject.set(item.project, visibleIndex + 1);
-    if (visibleIndex >= 250) continue;
-    const versions = await (
-      await request.get(`${apiURL}/api/v1/documents/${item.id}/versions`)
+  for (let treePage = 1; treePage <= 20 && !target; treePage += 1) {
+    const tree = await (
+      await request.get(`${apiURL}/api/v1/tree?page=${treePage}&page_size=250`)
     ).json();
-    if (versions.length > 1) {
-      target = item;
-      break;
+    for (const item of tree.items) {
+      const visibleIndex = visiblePerProject.get(item.project) ?? 0;
+      visiblePerProject.set(item.project, visibleIndex + 1);
+      if (visibleIndex >= 250) continue;
+      const versions = await (
+        await request.get(`${apiURL}/api/v1/documents/${item.id}/versions?page_size=25`)
+      ).json();
+      if (versions.items.length > 1) {
+        target = item;
+        break;
+      }
     }
   }
   expect(target).not.toBeNull();
@@ -103,15 +105,21 @@ test("activity, knowledge cases, and automatic evidence editor", async ({ page }
   await expect(page.getByText("Root cause", { exact: true })).toBeVisible();
   await expect(page.getByText("Revisions & occurrences")).toBeVisible();
 
-  await page.getByRole("button", { name: "Candidate review" }).click();
+  await page.getByRole("button", { name: "Held candidates" }).click();
   await page.locator(".record-list > button").first().click();
   await expect(page.getByText("Reported / verified")).toBeVisible();
   await expect(page.getByText("Auto-publish after local LLM evidence validation"))
     .toBeVisible();
   await expect(page.getByText("Reuse value", { exact: true })).toBeVisible();
   await expect(page.getByText("value evidence needed", { exact: true })).toBeVisible();
-  await expect(page.getByText("The local editor is checking the evidence."))
+  await expect(page.getByText(/Pending automatic selection|Automatic selection completed/))
     .toBeVisible();
+
+  await page.getByRole("button", { name: "Project journal" }).click();
+  await page.locator(".record-list > button").first().click();
+  await expect(page.getByText("Execution verification", { exact: true })).toBeVisible();
+  await expect(page.getByText("Knowledge references", { exact: true })).toBeVisible();
+  await expect(page.locator(".page-controls").first()).toBeVisible();
 });
 
 test("keyword, semantic, hybrid, operations, and worker heartbeat", async ({ page }) => {

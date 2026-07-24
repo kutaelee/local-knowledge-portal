@@ -911,6 +911,7 @@ def run_once(
     provider: GenerationProvider | None = None,
     gpu_probe=probe_gpu,
     now: datetime | None = None,
+    respect_next_attempt: bool = True,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     lock_acquired = session.execute(
@@ -919,6 +920,17 @@ def run_once(
     ).scalar_one()
     if not lock_acquired:
         return {"state": "standby_lock_held"}
+    snapshot_candidate_ids = list(
+        session.scalars(
+            select(KnowledgeCandidate.id)
+            .where(
+                KnowledgeCandidate.status.in_(["candidate", "verified", "needs_review"]),
+                KnowledgeCandidate.evidence_gate_status == "VERIFIED",
+                KnowledgeCandidate.updated_at <= now,
+            )
+            .order_by(KnowledgeCandidate.updated_at)
+        )
+    )
     scheduler = _setting(session)
     evidence_repair = _ensure_evidence_repair(session, now)
     value_backfill = _ensure_value_backfill(session, now)
@@ -935,7 +947,7 @@ def run_once(
         scheduler.updated_at = now
         session.flush()
     due = _parse_time(state.get("next_attempt_at"))
-    if due and due > now:
+    if respect_next_attempt and due and due > now:
         return {
             "state": state.get("state", "scheduled"),
             "next_attempt_at": due.isoformat(),
@@ -1039,10 +1051,15 @@ def run_once(
         scheduler.updated_at = now
         return scheduler.value
 
+    # Candidate IDs were frozen immediately after taking the scheduler lock.
+    # Rows created while qualification or curation is running are therefore
+    # deferred to the next tick. Maintenance may make a frozen candidate
+    # ineligible, so the current state is still checked before processing.
     candidates = list(
         session.scalars(
             select(KnowledgeCandidate)
             .where(
+                KnowledgeCandidate.id.in_(snapshot_candidate_ids),
                 KnowledgeCandidate.status.in_(["candidate", "verified", "needs_review"]),
                 KnowledgeCandidate.evidence_gate_status == "VERIFIED",
             )
@@ -1050,23 +1067,32 @@ def run_once(
         )
     )
     outcomes: list[dict[str, str | None]] = []
+    unchanged_count = 0
+    failed_count = 0
     for candidate in candidates:
-        if len(outcomes) >= settings.knowledge_curation_batch_size:
-            break
         try:
             with session.begin_nested():
                 outcome, case_id = curate_candidate(
                     session, candidate, provider, settings, model_digest
                 )
         except Exception as exc:
-            return _record_failure(
-                scheduler,
-                state_name="curation_error",
-                error=exc,
-                snapshot=snapshot,
-                settings=settings,
-                now=now,
+            failed_count += 1
+            outcomes.append(
+                {
+                    "candidate_id": str(candidate.id),
+                    "outcome": "ERROR",
+                    "case_id": None,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:500],
+                }
             )
+            logger.exception(
+                "knowledge_candidate_curation_failed",
+                candidate_id=str(candidate.id),
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+            )
+            continue
         if outcome != "UNCHANGED":
             outcomes.append(
                 {
@@ -1075,23 +1101,41 @@ def run_once(
                     "case_id": case_id,
                 }
             )
+        else:
+            unchanged_count += 1
+    completed_at = datetime.now(timezone.utc)
     scheduler.value = {
         **state,
-        "state": "idle" if not outcomes else "completed_batch",
+        "state": (
+            "completed_batch_with_errors"
+            if failed_count
+            else ("idle" if not outcomes else "completed_batch")
+        ),
         "busy_check_count": 0,
         "failure_count": 0,
-        "last_error": None,
+        "last_error": (
+            f"{failed_count} candidate(s) failed; remaining snapshot candidates were attempted"
+            if failed_count
+            else None
+        ),
         "retry_seconds": None,
         "last_checked_at": now.isoformat(),
-        "last_completed_at": now.isoformat(),
+        "last_completed_at": completed_at.isoformat(),
         "next_attempt_at": (
-            now + timedelta(seconds=settings.knowledge_curation_poll_seconds)
+            completed_at + timedelta(seconds=settings.knowledge_curation_poll_seconds)
         ).isoformat(),
         "last_gpu": asdict(snapshot),
         "provider": provider.provider,
         "model": provider.model,
         "model_digest": model_digest,
         "qualification_key": qualification_key,
+        "snapshot_cutoff_at": now.isoformat(),
+        "snapshot_candidate_count": len(snapshot_candidate_ids),
+        "eligible_after_maintenance_count": len(candidates),
+        "processed_candidate_count": len(candidates),
+        "changed_candidate_count": len(outcomes) - failed_count,
+        "unchanged_candidate_count": unchanged_count,
+        "failed_candidate_count": failed_count,
         "last_outcomes": outcomes,
         "hostname": socket.gethostname(),
     }
@@ -1141,7 +1185,10 @@ def main() -> int:
     with service_pid():
         if args.once:
             with SessionLocal() as session:
-                result = run_once(session, settings)
+                # An external one-shot schedule is already the retry clock.
+                # Re-probe GPU state on every invocation instead of allowing a
+                # stale internal backoff timestamp to skip the whole hour.
+                result = run_once(session, settings, respect_next_attempt=False)
                 session.commit()
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0

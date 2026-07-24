@@ -157,7 +157,7 @@ activity는 임베딩 문서가 아니며 evidence gate를 통과하기 전에�
 
 docker build -f infra/docker/Dockerfile.test ...
 docker run ... pytest -q tests/integration
-  PASS: 18 passed, 1 Starlette dependency deprecation warning
+  PASS: 19 passed, 1 Starlette dependency deprecation warning
 
 docker compose ... build api web
   PASS: API image, Next.js 16.2.11 production build, TypeScript
@@ -263,6 +263,70 @@ dashboard의 production active 수치와 다르다. checksum과 restore가 성�
 - 장시간 watcher endurance, 장시간 지속 부하, 실제 Windows 장시간 절전/복귀는
   이번 범위에서 실행하지 않았다.
 
+## 2026-07-24 자동 선별 전체 스냅샷 교정
+
+기존 curator는 후보 목록을 조회한 뒤에도 `knowledge_curation_batch_size=1`에서 루프를
+중단했다. 이 제한을 제거하고 advisory lock 획득 직후의 eligible candidate ID를
+스냅샷으로 고정했다. 실행 도중 생성되거나 새로 eligible이 된 후보는 다음 예약으로
+넘기며, 시작 시점 스냅샷은 전부 시도한다. 각 후보는 savepoint로 격리하여 한 후보의
+모델 출력 오류가 뒤 후보 처리를 막지 않게 했다. scheduler state에는
+`snapshot_candidate_count`, `processed_candidate_count`, `changed_candidate_count`,
+`unchanged_candidate_count`, `failed_candidate_count`를 남긴다.
+
+one-shot 예약 작업이 상주형 curator의 `next_attempt_at`까지 존중해 한 시간 전체를
+건너뛸 수 있던 충돌도 교정했다. 외부 예약 실행은 매번 GPU를 새로 검사하고,
+내부 backoff 시각은 선택적 persistent loop에서만 poll 억제에 사용한다.
+
+실제 실행과 결과:
+
+```text
+uv run ruff check services tests
+  PASS: All checks passed
+
+uv run pytest -q tests/unit
+  PASS: 66 passed
+
+dedicated lkp_test_curator_snapshot_20260724_03
+  PASS: 19 integration tests
+  포함: 시작 전 후보 3건 전체 처리, 시작 경계 뒤 후보 1건 다음 실행으로 보류
+
+docker compose ... build api
+  PASS: local-knowledge-portal-app:wsl
+
+docker compose ... build web
+  PASS: Next.js production build and TypeScript
+
+Scheduled Task \LocalKnowledgePortal\CurateKnowledge
+  installed: hourly, IgnoreNew
+  gpuq reservation: 8192 MiB, ETA 1800 seconds, max runtime 21600 seconds
+
+operational gpuq job 878c1bb9-3acb-4ac4-b820-a24295d0645a
+  PASS: exit code 0
+  snapshot candidates: 13
+  processed candidates: 13
+  changed decisions: 10
+  unchanged decisions: 3
+  failed candidates: 0
+
+automatic scheduled gpuq job c4961f03-2017-4b28-9e74-2e6e22f2bb8f
+  PASS: 2026-07-24 14:38:38 KST trigger, exit code 0
+  snapshot/processed: 13/13
+  unchanged: 13
+  failed: 0
+  next scheduled run: 2026-07-24 15:38:38 KST
+```
+
+첫 운영 재실행 job `b52b435c-36d3-4877-bc59-34b7d696a828`은 admission 직후
+순간 GPU utilization 50%를 관측하여 내부 안전장치가 `waiting_for_gpu`로 보류했다.
+후보를 처리했다고 거짓 보고하지 않고, one-shot/backoff 충돌을 교정한 뒤 GPU 2%에서
+다시 실행하여 위 13/13 결과를 확인했다.
+
+웹의 기존 `자동 선별 대기·보류` 문구는 처리 전후를 구분하지 못했다. 이를
+`승격 보류·근거 보완`으로 바꾸고 최근 스냅샷 처리/전체/실패 수를 표시한다. 후보
+상세도 curation metadata가 없을 때만 대기로, 자동 판정이 있으면 근거 부족에 따른
+승격 보류로 설명한다. 현재 `needs_review` 13건은 미처리 대기열이 아니라 자동 선별을
+마쳤으나 게시 근거가 부족한 보존 기록이다.
+
 ## Rollback
 
 `./scripts/docker-stack.sh stop`으로 서비스를 중지한다. named volume과 E: data는
@@ -278,3 +342,168 @@ qualification, GPU 예약, 한/영 웹 UX, 운영 복구, 검색 평가, backup/
 증거가 모두 검증됐다.
 
 **최종 판정: VERIFIED**
+
+## 2026-07-24 프로젝트 개발 일지·장기 운영 보강
+
+재사용 지식 가치 게이트가 주요 프로젝트 변경까지 `activity_only`로 숨기던 경계를
+분리했다. `project_journal_entry`는 정식 지식 사례와 독립적으로 사용자 의도, 주요
+변경 보고, 변경 파일, 실패/성공 실행 근거, 해결 설명, 실제로 관측된 RAG provenance를
+저장한다. 단일 presentation-only 변경은 계속 활동 이력에만 남는다. 프로젝트별
+각 항목은 `_generated/Projects/<project>/Journal/` 아래 불변 문서로 한 번만 기록하고,
+`_generated/Projects/<project>/development-journal.md`는 현재 항목을 연결하는 소형
+index로만 atomic write 및 indexing한다.
+
+실제 backfill 결과:
+
+- journal entries: 17
+- projects with managed journals: 5
+- 요청에서 지적한 `[local-knowledge-portal] 수정·운영 검증 완료했습니다.`:
+  `VERIFIED` journal로 backfill됨
+- generated page:
+  `/data/vault/_generated/Projects/local-knowledge-portal/development-journal.md`
+- schema revision: `0007_project_journal_pagination`
+- 사람 검토로 오해되던 `NEEDS_REVIEW` 한국어 label:
+  `자동 승격 보류`로 변경
+
+목록 조회에는 정렬 tie-breaker와 복합 index를 추가했고 Activity, Knowledge Case,
+Candidate, Project Journal 화면에 서버 페이지 번호·총건수·이전/다음 제어를 연결했다.
+새로운 Windows repository collection 예시는 `watch_mode: disabled`,
+`reconcile_interval_seconds: 3600`으로 두어 Docker bind mount를 재귀 polling하지
+않으면서 새 repository를 주기적으로 발견한다. 운영 WSL source와 Vault는 각각
+native/polling, 900초 reconciliation으로 실행 중이다.
+
+노이즈 격리 전후 production current 수치:
+
+| 지표 | 전 | 후 |
+|---|---:|---:|
+| active documents | 4,015 | 2,297 |
+| current search chunks | 40,709 | 25,317 이하 |
+| ignored documents | 375 수준 | 2,093 |
+| active chunks over 10,000 chars | 124 관측 | 0 |
+
+`third_party`, generated documentation search bundle, CUTLASS test hash cache, legacy debug JSON을
+삭제하지 않고 `ignored`로 전환했다. 한 physical line이 6,000자를 넘을 때 line provenance와
+character offset을 보존해 분할한다. 프로젝트 journal backfill 중 생성된 superseded pending
+index job 15건은 행을 삭제하지 않고 `cancelled`와 원인을 기록했다. 이후 enqueue는 같은
+path의 pending snapshot을 coalesce하고, lease가 남은 오래된 job도 더 최신 snapshot이 있으면
+처리 전에 cancelled로 보존한다.
+
+실행 검증:
+
+```text
+uv run ruff check .
+  PASS: All checks passed
+
+uv run pytest tests/unit -q
+  PASS: 70 passed
+
+dedicated lkp_test_project_journal_20260724_04
+  PASS: 20 integration tests
+  포함: clean migration, journal materialization, lease recovery,
+        superseded snapshot cancellation
+
+pnpm --filter web build
+  PASS: Next.js 16.2.11 production build and TypeScript
+
+docker compose ... build api web
+  PASS
+
+GET /health/ready
+  PASS: ready, schema 0007_project_journal_pagination, Ollama true
+
+watcher after reconciliation
+  Docker CPU 0.14-0.15%, memory about 92 MiB
+  internal process_cpu_percent 0.4%, cpu_alert=false
+
+server-paged API probes
+  tree 2/2297, jobs 2/4511, workers 2/6, backups 2/16,
+  timeline 2/7074, document chunks 2/12, versions 1/1
+
+Playwright 1.61.1, loopback production services
+  PASS: 5/5 in 7.0s
+  포함: project journal detail, pagination controls, search modes,
+        explorer/document diff, operations/worker, provenance
+
+backup 2026-07-24T061546Z
+  PASS: dump 35,043,457 bytes
+  SHA-256 f786a937f2acbe311dcb8e005d7cb217a928e32013f15afd4ecfa79dfd6aa54d
+  schema 0007_project_journal_pagination, managed Vault files 34
+
+restore-test 2026-07-24T061546Z
+  PASS: separate temporary DB
+  documents 4,390, chunks 41,864, vectors 529, activities 1,955
+```
+
+장시간 endurance와 실제 Windows 절전 장시간 시험은 기존 명시적 제외 범위 그대로다.
+
+개발 일지는 장기 재임베딩 비용을 줄이기 위해 17개 불변 entry 문서와 프로젝트별
+소형 current index로 최종 분리했다. `local-knowledge-portal` index는 16,792 bytes의
+전체 본문 누적형에서 5,345 bytes 링크형으로 감소했다. 이후 신규 주요 작업은 entry
+한 건과 index 한 건만 갱신하며, 과거 entry를 다시 작성하지 않는다.
+
+`C:\Dev\Repos`는 직접 하위 directory 30개 중 Git repository 17개로 inventory했다.
+Watcher container의 `/sources/windows-repositories` mount는 `RW=false`로 검증했다.
+아직 active source root에는 추가하지 않아 미승인 저장소를 대량 색인하지 않는다.
+활성화할 때 `repository_collection`은 direct-child Git repository만 scan하고,
+unrelated directory와 nested dependency repository를 root로 취급하지 않는다. 이
+source type도 기존 `docs_only` semantic policy를 적용하도록 회귀 결함을 수정했다.
+따라서 향후 저장소 수가 늘어도 code 전체가 production embedding 대상으로 바뀌지
+않는다.
+
+```text
+repository_collection regression
+  PASS: direct-child Git repositories only
+  PASS: .git directory and Git worktree .git file
+  PASS: repository code remains repository_docs_only
+  PASS: inaccessible collection root returns a bounded scan error
+
+runtime resource snapshot during one-time journal embedding
+  worker: 1 CPU hard limit, 0.00-0.27% observed
+  watcher: 0.5 CPU hard limit, 0.65-0.79% observed
+  Ollama embedding: 0.5 CPU hard limit, 43.70-49.80% container quota observed
+  RTX 5090: 38 C, 3% utilization, 24,858 MiB used, 7,330 MiB free
+```
+
+Ollama의 약 50% 표시는 호스트 전체 CPU 50%가 아니라 `0.5 CPU` quota 안에서의
+container 수치다. 저장소가 추가돼도 worker 수를 자동 증식하지 않는다. 초기 backlog는
+coalescing, workload별 cooldown, model concurrency 1, container CPU/memory limit로
+제어하고 queue latency와 oldest pending age를 근거로만 명시적으로 확장한다.
+
+최종 배포 후 일회성 journal backlog는 모두 소진됐다. 현재 queue는
+`succeeded=4,499`, `cancelled=34`, pending/processing/failed/dead-letter `0`이다.
+운영 production은 active document `2,319`, current lexical/search chunk `25,424`,
+현재 embedding revision vector `468`이다. 문서 상태 기준으로 semantic embedding
+완료 문서는 `47`, 정책상 lexical-only 문서는 `2,272`이며 후자는 code catalog를
+semantic knowledge로 부풀리지 않는다.
+
+프로젝트 목록도 server pagination을 적용했다. 실제 응답은 page size `2`, project
+total `10`, production document total `2,319`였고 document total은 JSON integer로
+확인했다. 프로젝트 페이지와 각 프로젝트의 document 페이지는 독립적으로 이동한다.
+Search는 exhaustive catalog list가 아니라 의도적으로 bounded top-k retrieval이고,
+그 top-k 결과 안에서 virtualized page를 제공한다.
+
+최종 Playwright 재실행은 `5 passed (8.5s)`였다. 첫 직접 재실행은 기존 root-owned
+generated `apps/web/test-results/.last-run.json`에 쓸 수 없어 `EACCES`로 실패했다.
+파일을 삭제하지 않고 generated test-results directory의 소유권만 repository user로
+복구한 뒤 같은 명령을 두 번 성공시켰다. 최종 API readiness는
+`ready`, schema `0007_project_journal_pagination`, web root는 HTTP `200`이다.
+
+키워드 검색은 실제 반복 측정에서 다중어 exact FTS가 0건일 때
+`word_similarity` 후보 전체 정렬로 내려가 `4.45-4.70초`가 걸리는 병목을 확인했다.
+최종 순서는 exact indexed FTS → 두 단어 이상 일치하는 bounded pair FTS → 짧은 단일어
+exact phrase/fuzzy로 제한했다. `websearch_to_tsquery`가 `AND` 문자열을 연산자가
+아닌 검색어로 파싱하는 문제를 제거하도록 pair는 인접 term 문법으로 생성하고 unit
+test로 고정했다.
+
+최종 운영 측정:
+
+```text
+keyword "Ollama CPU 안전": 100 ms cold, 3 results
+keyword "PostgreSQL queue": 12 ms warm, 3 results
+keyword no-answer Korean multi-term: 14 ms, 0 results, confidence none
+semantic "Ollama CPU 안전": 1,678 ms cold embedding, 3 results, confidence high
+hybrid same query: 26 ms cached, 3 results, confidence high
+```
+
+검색 결과에는 계속 source path, document/version/chunk id, line range, content hash,
+indexed timestamp와 match reason이 포함된다.
