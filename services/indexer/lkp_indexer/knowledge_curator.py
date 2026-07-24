@@ -16,6 +16,7 @@ from lkp.db import SessionLocal
 from lkp.logging import configure_logging
 from lkp.models import EvidenceRecord, KnowledgeCandidate, SystemSetting
 from lkp.settings import Settings, get_settings
+from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
@@ -495,11 +496,24 @@ def qualify_provider(
 ) -> dict[str, Any]:
     results = []
     for name, payload, expected in _qualification_payloads():
-        draft, _digest = provider.curate(
-            payload,
-            language=settings.knowledge_content_language,
-            prompt_version=settings.generation_prompt_version,
-        )
+        try:
+            draft, _digest = provider.curate(
+                payload,
+                language=settings.knowledge_content_language,
+                prompt_version=settings.generation_prompt_version,
+            )
+        except ValidationError as exc:
+            results.append(
+                {
+                    "name": name,
+                    "expected": expected,
+                    "actual": "invalid_structured_output",
+                    "passed": False,
+                    "reasons": ["pydantic_validation_failed"],
+                    "validation_error_count": exc.error_count(),
+                }
+            )
+            continue
         evidence_map = {
             item["id"]: " ".join(
                 str(value)

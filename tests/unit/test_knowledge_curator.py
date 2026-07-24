@@ -4,6 +4,7 @@ from lkp_indexer.knowledge_curator import (
     GpuSnapshot,
     busy_retry_seconds,
     gpu_is_available,
+    qualify_provider,
     run_once,
     validate_draft,
 )
@@ -162,3 +163,32 @@ def test_summary_and_claim_numbers_must_exist_in_verified_evidence():
     assert status == "NEEDS_REVIEW"
     assert "standfirst_unsupported_number" in reasons
     assert "claim_unsupported_number" in reasons
+
+
+def test_invalid_structured_output_rejects_model_instead_of_retrying_forever():
+    class InvalidProvider:
+        provider = "ollama"
+        model = "gemma4:e4b"
+
+        @staticmethod
+        def curate(*_args, **_kwargs):
+            CuratedKnowledgeArticle.model_validate(
+                {
+                    "decision": "publish",
+                    "category": "implementation",
+                    "decision_reason": "",
+                }
+            )
+            raise AssertionError("validation must fail first")
+
+    report = qualify_provider(
+        InvalidProvider(),  # type: ignore[arg-type]
+        Settings(knowledge_content_language="ko"),
+    )
+    assert report["status"] == "FAIL"
+    assert len(report["results"]) == 3
+    assert all(
+        item["actual"] == "invalid_structured_output"
+        and item["reasons"] == ["pydantic_validation_failed"]
+        for item in report["results"]
+    )
