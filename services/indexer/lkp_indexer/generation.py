@@ -8,6 +8,27 @@ import httpx
 from lkp.settings import Settings
 from pydantic import BaseModel, Field
 
+_OLLAMA_GRAMMAR_BOUNDS = {"maxItems", "maxLength", "minItems", "minLength"}
+
+
+def _ollama_format_schema(value):
+    """Remove bounds that Ollama expands into unsupported grammar repeats.
+
+    Field types, object shape, required fields, and enums remain constrained by
+    Ollama. The original Pydantic model still enforces every length and item
+    bound after generation.
+    """
+
+    if isinstance(value, dict):
+        return {
+            key: _ollama_format_schema(item)
+            for key, item in value.items()
+            if key not in _OLLAMA_GRAMMAR_BOUNDS
+        }
+    if isinstance(value, list):
+        return [_ollama_format_schema(item) for item in value]
+    return value
+
 
 class KnowledgeEnrichment(BaseModel):
     summary: str = Field(min_length=1)
@@ -149,7 +170,7 @@ class OllamaGenerationProvider:
                 ],
                 "stream": False,
                 "think": False,
-                "format": schema,
+                "format": _ollama_format_schema(schema),
                 "options": {"temperature": 0},
             },
         )
@@ -212,7 +233,7 @@ class OllamaGenerationProvider:
                 ],
                 "stream": False,
                 "think": False,
-                "format": schema,
+                "format": _ollama_format_schema(schema),
                 "options": {
                     "temperature": self.generation_parameters["temperature"],
                     "num_ctx": self.generation_parameters["context_window"],

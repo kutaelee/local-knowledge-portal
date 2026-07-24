@@ -105,6 +105,11 @@ def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():
         assert payload["model"] == "gemma4:e4b"
         assert payload["options"]["temperature"] == 0
         assert payload["keep_alive"] == "2m"
+        grammar_schema = json.dumps(payload["format"])
+        assert "maxLength" not in grammar_schema
+        assert "minLength" not in grammar_schema
+        assert "maxItems" not in grammar_schema
+        assert "minItems" not in grammar_schema
         system = payload["messages"][0]["content"]
         assert "untrusted data" in system
         assert "verified evidence IDs" in system

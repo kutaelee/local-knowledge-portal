@@ -1415,3 +1415,36 @@ The dump restored successfully into a separate tmpfs PostgreSQL 18 instance with
 `0006_chunk_content_trigram`, 4,389 document identities, 41,816 chunks, 483 vectors, and 1,321
 activities. The temporary restore container was removed. E4B qualification remains
 **PENDING_GPU_IDLE**; no article has been auto-published by an unqualified model.
+
+## 2026-07-24 execution-evidence provenance repair
+
+Before the scheduled E4B qualification, an audit of the 12 automatic review
+candidates found that an `apply_patch` payload containing `tests/...` text could
+match the test-command regular expression. The same edit was consequently
+represented as both `code_change` and `test_pass`, despite no test command being
+executed. This was a derived-evidence classification defect, not a missing model
+capability.
+
+The classifier now accepts test, build, command-success, and command-failure
+evidence only from an allowlisted command-execution tool. A one-time,
+transactional repair retained every original activity and candidate, changed
+the affected derived evidence to unverified with an invalidation reason, and
+reclassified candidates that no longer passed the gate as `activity_only`.
+
+```text
+repair key: knowledge.evidence_repair.non_execution_v1
+affected candidates: 12
+invalidated derived evidence: 79
+reclassified activity_only: 7
+remaining evidence-gated candidates: 5
+deleted activity/candidate rows: 0
+ruff: PASS
+unit: 50 passed
+dedicated PostgreSQL integration: 17 passed, one upstream Starlette warning
+temporary integration container and tmpfs database: removed
+```
+
+The regression fixture includes an `apply_patch` body that contains both a test
+path and a `pytest` example. It verifies that only the separate Bash execution
+creates `test_pass`. A second fixture verifies that legacy false evidence is
+retracted while its source `ActivityEvent` remains present.
