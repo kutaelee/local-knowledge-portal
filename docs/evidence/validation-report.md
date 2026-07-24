@@ -1278,16 +1278,18 @@ The installed E4B model was not loaded for inference because another GPU workloa
 GPU total / used / free: 32,607 / 27,464 / 4,723 MB
 utilization / temperature: 0% / 35°C
 scheduler state: waiting_for_gpu
-busy check: 1 of 6
-retry delay: 900 seconds
-next attempt: 2026-07-24T02:16:59.354723+00:00
+first busy check: 1 of 6, retry delay 900 seconds
+second busy check: 2 of 6, retry delay 1,800 seconds
+second observed free VRAM / temperature: 5,851 MB / 35°C
+next attempt: 2026-07-24T02:46:59.467926+00:00
 curator CPU after check: 0.00%
 generation Ollama model loaded: no
 ```
 
 An immediate manual `--once` call returned the same next-attempt timestamp without increasing the
-check counter, proving that the due-time guard prevents polling pressure. E4B editorial sufficiency
-is therefore **PENDING_GPU_IDLE**, not reported as a pass. When the GPU becomes eligible, the
+check counter, proving that the due-time guard prevents polling pressure. At the first due time,
+the GPU was still busy and the live scheduler doubled the delay from 900 to 1,800 seconds.
+E4B editorial sufficiency is therefore **PENDING_GPU_IDLE**, not reported as a pass. When the GPU becomes eligible, the
 service first evaluates supported implementation, reported-only success, and unmeasured
 performance cases. Failure records `model_rejected` and recommends the explicit `gemma4:12b`
 fallback; it does not publish any candidate.
