@@ -41,6 +41,7 @@ from .models import (
     KnowledgeCaseRevision,
     KnowledgeOccurrence,
     SourceRoot,
+    SystemSetting,
     WorkerHeartbeat,
 )
 from .schemas import (
@@ -553,6 +554,39 @@ def candidates(
     }
 
 
+@app.get("/api/v1/knowledge/curation/status")
+def knowledge_curation_status(db: Session = Depends(get_db)) -> dict:
+    scheduler = db.get(SystemSetting, "knowledge_curator.scheduler")
+    state = dict(scheduler.value or {}) if scheduler else {"state": "not_started"}
+    qualification = None
+    qualification_key = state.get("qualification_key")
+    if isinstance(qualification_key, str):
+        row = db.get(SystemSetting, qualification_key)
+        qualification = dict(row.value or {}) if row else None
+    return {
+        "enabled": settings.knowledge_curation_enabled,
+        "auto_publish": settings.knowledge_curation_auto_publish,
+        "content_language": settings.knowledge_content_language,
+        "provider": settings.generation_provider,
+        "model": settings.generation_model,
+        "configured_model_digest": settings.generation_model_digest,
+        "prompt_version": settings.generation_prompt_version,
+        "gpu_policy": {
+            "minimum_free_mb": settings.knowledge_curation_gpu_min_free_mb,
+            "maximum_utilization_percent": (
+                settings.knowledge_curation_gpu_max_utilization
+            ),
+            "maximum_temperature_c": settings.knowledge_curation_gpu_max_temperature,
+            "maximum_checks_per_cycle": settings.knowledge_curation_busy_max_checks,
+            "exhausted_cooldown_seconds": (
+                settings.knowledge_curation_exhausted_cooldown_seconds
+            ),
+        },
+        "scheduler": state,
+        "qualification": qualification,
+    }
+
+
 @app.post("/api/v1/knowledge/candidates")
 def add_candidate(request: CandidateCreate, db: Session = Depends(get_db)) -> dict:
     row = create_candidate(
@@ -597,6 +631,11 @@ def publish(
     request: CandidatePublish,
     db: Session = Depends(get_db),
 ) -> dict:
+    if settings.knowledge_curation_enabled:
+        raise HTTPException(
+            409,
+            "manual publication is disabled while the local evidence editor is enabled",
+        )
     row = _candidate_or_404(db, candidate_id)
     row.metadata_json = {
         **(row.metadata_json or {}),

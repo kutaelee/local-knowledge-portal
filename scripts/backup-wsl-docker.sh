@@ -41,6 +41,10 @@ if [[ -d /mnt/e/Data/LocalKnowledgePortal/ingest/codex-spool ]]; then
   cp -R /mnt/e/Data/LocalKnowledgePortal/ingest/codex-spool \
     "$manifest_dir/events/codex-spool"
 fi
+if [[ -f /mnt/e/Manifests/local-knowledge-portal-gemma4-e4b.json ]]; then
+  cp /mnt/e/Manifests/local-knowledge-portal-gemma4-e4b.json \
+    "$manifest_dir/generation-model.json"
+fi
 
 revision=$(docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
   psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc \
@@ -55,6 +59,15 @@ embedding_model_digest=$(sed -n 's/^LKP_EMBEDDING_MODEL_DIGEST=//p' "$env_file" 
 embedding_dimension=$(sed -n 's/^LKP_EMBEDDING_DIMENSION=//p' "$env_file" | tr -d '\r')
 embedding_revision=$(sed -n 's/^LKP_EMBEDDING_REVISION=//p' "$env_file" | tr -d '\r')
 pipeline_version=$(sed -n 's/^LKP_PIPELINE_VERSION=//p' "$env_file" | tr -d '\r')
+generation_provider=$(sed -n 's/^LKP_GENERATION_PROVIDER=//p' "$env_file" | tr -d '\r')
+generation_model=$(sed -n 's/^LKP_GENERATION_MODEL=//p' "$env_file" | tr -d '\r')
+generation_model_digest=$(sed -n 's/^LKP_GENERATION_MODEL_DIGEST=//p' "$env_file" | tr -d '\r')
+generation_prompt_version=$(sed -n 's/^LKP_GENERATION_PROMPT_VERSION=//p' "$env_file" | tr -d '\r')
+generation_prompt_version=${generation_prompt_version:-evidence-blog-v1}
+curator_state=$(docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc \
+  "select coalesce((select value::text from system_setting
+   where key='knowledge_curator.scheduler'), '{}')")
 dump_size=$(stat -c %s "$dump_path")
 dump_sha=$(awk '{print $1}' "$manifest_dir/database.sha256")
 source_hash=$(sha256sum \
@@ -82,6 +95,11 @@ manifest = {
     "embedding_dimension": int(${embedding_dimension@Q}),
     "embedding_revision": ${embedding_revision@Q},
     "pipeline_version": ${pipeline_version@Q},
+    "generation_provider": ${generation_provider@Q},
+    "generation_model": ${generation_model@Q},
+    "generation_model_digest": ${generation_model_digest@Q},
+    "generation_prompt_version": ${generation_prompt_version@Q},
+    "knowledge_curator_state": json.loads(${curator_state@Q}),
     "compose_path": ${compose_file@Q},
     "data_path": "E:\\\\Data\\\\LocalKnowledgePortal",
     "managed_vault_files": int(${managed_vault_files@Q}),

@@ -34,9 +34,9 @@ configured 30-day window and hidden from the default activity list; prompts, out
 and evidence are retained. The bounded check runs hourly and does not delete DB rows.
 
 Create a knowledge candidate explicitly and publish only after its category-specific evidence
-gate, reusable-content quality gate, and a recorded `HUMAN_APPROVED` review pass. Codex, the
-deterministic extractor, embedding model, and optional generation model cannot approve a case.
-Exact
+gate, reusable-content quality gate, and the qualified local evidence editor's deterministic
+citation checks pass. Codex reports, the extractor, the embedding model, and unqualified
+generation output cannot approve a case. Exact
 problem/root-cause/resolution duplicates add occurrences and revisions to the existing canonical
 case; uncertain similarity remains `NEEDS_REVIEW`.
 
@@ -79,15 +79,33 @@ fields, and files; the retired directory is excluded from indexing.
 Start a new Codex session, run `/hooks`, inspect the six commands, and approve them. Codex owns
 this trust boundary, so the portal records `MANUAL_APPROVAL_REQUIRED` until the operator acts.
 
-### Enable a local generation model
+### Local evidence editor
 
-Set `LKP_GENERATION_PROVIDER=ollama`, `LKP_GENERATION_MODEL`, and a known
-`LKP_GENERATION_MODEL_DIGEST`, then restart the service using generation. Raw activity capture
-remains available if generation fails.
+The default candidate is `gemma4:e4b`. The `ollama-generation` service stores it below
+`E:\AI\Models\Ollama\generation\models`, separately from the CPU embedding model. It remains
+unloaded until the scheduler observes at least 12,288 MB free VRAM, at most 15% utilization, and
+at most 70°C. Busy checks back off from 15 minutes to 4 hours; after six checks the scheduler
+waits 24 hours. A batch contains one candidate and the model unloads after two minutes.
 
-The first successful call resolves the installed digest from `/api/tags` and records it in the
-generated result metadata. Copy that digest into configuration before treating output as revision
-stable. Generated summaries never satisfy an evidence gate without independent execution evidence.
+Inspect status without triggering inference:
+
+```bash
+curl -s http://127.0.0.1:8010/api/v1/knowledge/curation/status
+docker exec local-knowledge-portal-ollama-generation-1 ollama list
+docker exec local-knowledge-portal-ollama-generation-1 df -h /model-store
+```
+
+The model's exact digest and prompt version must pass the built-in three-case qualification before
+automatic publication. A failed E4B qualification leaves the scheduler in `model_rejected`; set
+`LKP_GENERATION_MODEL=gemma4:12b`, pull it explicitly, pin its digest, and rerun the same
+qualification. Do not report either model as sufficient before the recorded result is `PASS`.
+Generated prose never satisfies an evidence gate without independent execution evidence.
+
+Start or recreate these services only from WSL. Windows `docker compose` can interpret `/mnt/e`
+as a small internal ext4 mount even when E: has ample free space. If `df /model-store` does not
+show `E:\`, stop only `knowledge-curator`, `ollama-generation-model`, and
+`ollama-generation`; correct the invocation and recreate them. Never delete the shared model
+root.
 
 ## Queue recovery
 

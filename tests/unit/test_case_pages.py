@@ -39,3 +39,40 @@ def test_case_markdown_is_utf8_human_readable_and_current():
     assert "LastTaskResult=0, HTTP 200" in rendered
     assert "case_revision: 2" in rendered
     rendered.encode("utf-8").decode("utf-8")
+
+
+def test_curated_article_is_primary_body_without_duplicating_ticket_fields():
+    case = SimpleNamespace(
+        id=uuid.uuid4(),
+        category="implementation",
+        title="근거 기반 자동 편집",
+        problem="old problem field",
+        symptom="old symptom field",
+        root_cause="old cause field",
+        solution="old solution field",
+    )
+    article = (
+        "> 검증된 근거만 사용한 요약\n\n"
+        "## 상황과 맥락\n\n작업의 맥락을 사람이 읽기 쉽게 설명한다. [E1]"
+    )
+    rendered = render_case_markdown(
+        case,
+        revision_number=1,
+        evidence=[
+            SimpleNamespace(
+                evidence_type="test_pass",
+                claim="테스트 통과",
+                locator="pytest",
+                verified_value="passed",
+                exit_code=0,
+                verified=True,
+            )
+        ],
+        source_hash="b" * 64,
+        pipeline_version="test-v2",
+        generated_at=datetime(2026, 7, 24, tzinfo=timezone.utc),
+        revision_content={"article_markdown": article},
+    )
+    assert article in rendered
+    assert "old problem field" not in rendered
+    assert "## 검증 근거" in rendered

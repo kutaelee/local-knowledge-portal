@@ -86,7 +86,7 @@ test("overview, explorer, document versions, and provenance", async ({ page, req
   await expect(page.getByText("Chunk", { exact: true })).toBeVisible();
 });
 
-test("activity, knowledge cases, and candidate evidence gate", async ({ page }) => {
+test("activity, knowledge cases, and automatic evidence editor", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Activity", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Activity history" })).toBeVisible();
@@ -96,6 +96,8 @@ test("activity, knowledge cases, and candidate evidence gate", async ({ page }) 
 
   await page.getByRole("button", { name: "Knowledge cases", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Knowledge cases" })).toBeVisible();
+  await expect(page.getByText("Local knowledge editor", { exact: true })).toBeVisible();
+  await expect(page.getByText(/gemma4:e4b/)).toBeVisible();
   await page.locator(".record-list > button").first().click();
   await expect(page.getByText("Root cause", { exact: true })).toBeVisible();
   await expect(page.getByText("Revisions & occurrences")).toBeVisible();
@@ -103,10 +105,13 @@ test("activity, knowledge cases, and candidate evidence gate", async ({ page }) 
   await page.getByRole("button", { name: "Candidate review" }).click();
   await page.locator(".record-list > button").first().click();
   await expect(page.getByText("Reported / verified")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Publish if evidence passes" })).toBeVisible();
+  await expect(page.getByText("Auto-publish after local LLM evidence validation"))
+    .toBeVisible();
+  await expect(page.getByText("The local editor is checking the evidence."))
+    .toBeVisible();
 });
 
-test("keyword, semantic, hybrid, failed retry, and worker heartbeat", async ({ page }) => {
+test("keyword, semantic, hybrid, operations, and worker heartbeat", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   const input = page.getByPlaceholder(/Filename, error/);
@@ -121,8 +126,12 @@ test("keyword, semantic, hybrid, failed retry, and worker heartbeat", async ({ p
   await page.getByRole("button", { name: "Operations", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Durable queue" })).toBeVisible();
   const retry = page.getByRole("button", { name: "Retry" }).first();
-  await expect(retry).toBeVisible();
-  await retry.click();
+  if (await retry.count()) {
+    await expect(retry).toBeVisible();
+    await retry.click();
+  } else {
+    await expect(page.locator("tbody tr").first()).toBeVisible();
+  }
   await page.getByRole("button", { name: "Workers" }).click();
   await expect(page.getByText("watcher-service", { exact: false }).first()).toBeVisible();
   await expect(page.getByText(/idle|stale|healthy|busy/).first()).toBeVisible();

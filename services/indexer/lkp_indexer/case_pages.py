@@ -134,41 +134,56 @@ def render_case_markdown(
         "",
         canonical_notice,
         "",
-        f"## {problem_heading}",
-        "",
-        case.problem,
-        "",
-        f"## {symptom_heading}",
-        "",
-        case.symptom,
-        "",
-        f"## {cause_heading}",
-        "",
-        case.root_cause,
-        "",
-        f"## {solution_heading}",
-        "",
-        case.solution,
-        "",
-        f"## {reported_heading}",
-        "",
-        reported_notice,
-        "",
-        str(
-            revision_content.get("reported_result")
-            or ("보고된 결과 없음" if korean else "No reported outcome")
-        ),
-        "",
-        f"## {verified_heading}",
-        "",
-        str(
-            revision_content.get("verified_result")
-            or ("검증된 결과 없음" if korean else "No verified result")
-        ),
-        "",
-        f"## {evidence_heading}",
-        "",
     ]
+    curated_article = revision_content.get("article_markdown")
+    if isinstance(curated_article, str) and curated_article.strip():
+        lines.extend(
+            [
+                curated_article.strip(),
+                "",
+                f"## {evidence_heading}",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"## {problem_heading}",
+                "",
+                case.problem,
+                "",
+                f"## {symptom_heading}",
+                "",
+                case.symptom,
+                "",
+                f"## {cause_heading}",
+                "",
+                case.root_cause,
+                "",
+                f"## {solution_heading}",
+                "",
+                case.solution,
+                "",
+                f"## {reported_heading}",
+                "",
+                reported_notice,
+                "",
+                str(
+                    revision_content.get("reported_result")
+                    or ("보고된 결과 없음" if korean else "No reported outcome")
+                ),
+                "",
+                f"## {verified_heading}",
+                "",
+                str(
+                    revision_content.get("verified_result")
+                    or ("검증된 결과 없음" if korean else "No verified result")
+                ),
+                "",
+                f"## {evidence_heading}",
+                "",
+            ]
+        )
     for item in evidence:
         state = (
             ("검증됨" if item.verified else "보고됨")

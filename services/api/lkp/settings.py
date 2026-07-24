@@ -55,6 +55,30 @@ class Settings(BaseSettings):
     generation_model_digest: str = "unresolved"
     generation_timeout_seconds: int = 120
     generation_max_input_chars: int = 40000
+    generation_prompt_version: str = "evidence-blog-v1"
+    knowledge_curation_enabled: bool = False
+    knowledge_curation_auto_publish: bool = True
+    knowledge_curation_poll_seconds: int = Field(default=60, ge=10, le=3600)
+    knowledge_curation_gpu_min_free_mb: int = Field(
+        default=12_288, ge=1_024, le=131_072
+    )
+    knowledge_curation_gpu_max_utilization: int = Field(default=15, ge=0, le=100)
+    knowledge_curation_gpu_max_temperature: int = Field(default=70, ge=20, le=100)
+    knowledge_curation_busy_retry_base_seconds: int = Field(
+        default=900, ge=60, le=86_400
+    )
+    knowledge_curation_busy_retry_max_seconds: int = Field(
+        default=14_400, ge=60, le=604_800
+    )
+    knowledge_curation_busy_max_checks: int = Field(default=6, ge=1, le=100)
+    knowledge_curation_exhausted_cooldown_seconds: int = Field(
+        default=86_400, ge=3_600, le=2_592_000
+    )
+    knowledge_curation_batch_size: int = Field(default=1, ge=1, le=10)
+    knowledge_curation_min_article_chars: int = Field(default=1_000, ge=300, le=5000)
+    knowledge_curation_max_article_chars: int = Field(
+        default=10_000, ge=1_000, le=50_000
+    )
     hook_spool_dir: Path = Path("runtime/ingest/codex-spool")
     hook_spool_fallback_dir: Path = Field(
         default_factory=lambda: Path(os.getenv("LOCALAPPDATA", str(Path.home())))
@@ -112,7 +136,13 @@ class Settings(BaseSettings):
     @field_validator("ollama_base_url", "generation_base_url")
     @classmethod
     def local_model_guard(cls, value: str) -> str:
-        if urlparse(value).hostname not in {"127.0.0.1", "localhost", "::1", "ollama"}:
+        if urlparse(value).hostname not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+            "ollama",
+            "ollama-generation",
+        }:
             raise ValueError(
                 "model providers must use localhost/loopback or the private Docker service "
                 "'ollama'"

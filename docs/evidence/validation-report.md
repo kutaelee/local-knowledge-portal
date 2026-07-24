@@ -1214,3 +1214,139 @@ excluded. They do not affect the bounded functional, recovery, search, backup, o
 
 Final verdict for knowledge quality, Korean presentation, retention, mount safety, production
 embedding, search, and restore: **VERIFIED**.
+
+## 2026-07-24 local evidence editor and Gemma 4 E4B qualification gate
+
+ADR 0011's repeated human-approval step has been superseded by ADR 0013. The new workflow keeps
+ordinary work as activity, lets a local model classify and edit evidence-backed candidates, and
+automatically publishes only after both model qualification and deterministic validation pass.
+The model cannot create evidence or bypass the existing category-specific evidence gate.
+
+### Implemented behavior
+
+- `knowledge-curator` has a durable scheduler state in `system_setting`.
+- GPU admission requires at least 12,288 MB free VRAM, at most 15% utilization, and at most 70°C.
+- Busy checks use 15-minute exponential backoff capped at 4 hours, six checks per cycle, then a
+  24-hour cooldown. Qualification and inference errors use the same bounded failure policy.
+- Batches contain one candidate. Generation concurrency and queue are one, and Ollama unloads the
+  model after two minutes.
+- The model receives only verified evidence with stable `E1`/`E2` identifiers. Payload strings are
+  explicitly treated as untrusted data rather than instructions.
+- Output must use the structured article schema. The validator rejects missing/invalid citations,
+  unsupported numbers, unsupported inferences, inflated language, short sections, insufficient
+  evidence coverage, and out-of-bounds article length.
+- `activity_only` output is retained as activity and excluded from future publication attempts.
+- LLM wording does not replace the deterministic pre-curation dedup identity.
+- A passing article is stored in the append-only case revision and rendered as the primary Korean
+  managed page body with a separate evidence appendix.
+- Manual publication returns HTTP 409 while the local evidence editor is enabled.
+- The portal shows model, scheduler state, next check, GPU snapshot, and qualification status in
+  Korean and English. The manual approval action was removed.
+
+### Model installation and filesystem correction
+
+Official Ollama tag `gemma4:e4b` was installed with:
+
+```text
+model: gemma4:e4b
+size: 9,608,350,718 bytes
+format: GGUF Q4_K_M
+reported parameters: 8.0B
+digest: c6eb396dbd5992bbe3f5cdb947e8bbc0ee413d7c17e2beaae69f5d569cf982eb
+canonical store: E:\AI\Models\Ollama\generation\models
+manifest: E:\Manifests\local-knowledge-portal-gemma4-e4b.json
+```
+
+The first pull was deliberately stopped by Ollama at 63 MB with `no space left on device`.
+Although E: had more than 3 TB free, the service had been created with the Windows Docker CLI and
+`/mnt/e` resolved to a 127 MB internal ext4 mount. The task-owned failed containers were removed;
+no E: model file existed at that point. The service was recreated from WSL, and `df` then reported:
+
+```text
+E:\  3.7T total  3.1T available  /model-store
+```
+
+The completed pull exited 0 and `ollama list` returned the exact tag and digest above. The runbook
+and ADR now require WSL Compose and an in-container filesystem-capacity check. Windows Docker CLI
+must not start this Linux-path stack.
+
+### Actual scheduler observation
+
+The installed E4B model was not loaded for inference because another GPU workload was active:
+
+```text
+GPU total / used / free: 32,607 / 27,464 / 4,723 MB
+utilization / temperature: 0% / 35°C
+scheduler state: waiting_for_gpu
+busy check: 1 of 6
+retry delay: 900 seconds
+next attempt: 2026-07-24T02:16:59.354723+00:00
+curator CPU after check: 0.00%
+generation Ollama model loaded: no
+```
+
+An immediate manual `--once` call returned the same next-attempt timestamp without increasing the
+check counter, proving that the due-time guard prevents polling pressure. E4B editorial sufficiency
+is therefore **PENDING_GPU_IDLE**, not reported as a pass. When the GPU becomes eligible, the
+service first evaluates supported implementation, reported-only success, and unmeasured
+performance cases. Failure records `model_rejected` and recommends the explicit `gemma4:12b`
+fallback; it does not publish any candidate.
+
+### Verification commands and outcomes
+
+```text
+ruff check services tests scripts
+  PASS
+pytest tests/unit -q
+  PASS: 47
+dedicated PostgreSQL database lkp_test_curator2_20260724
+  PASS: 16 integration tests; then database removed
+  NOTE: the first run exposed 3 obsolete human/automatic-publication expectations.
+        Tests were changed to require local-model validation and rerun from a clean test DB.
+Next.js TypeScript check
+  PASS
+Docker build api web
+  PASS: production Next.js build compiled, checked types, generated 3 static pages
+Playwright
+  INITIAL BLOCKER: Playwright 1.61.1 browser was absent
+  ACTION: installed its pinned Chromium 1228 runtime
+  PASS: 4/4 portal flows, including localized editor state and semantic/hybrid search
+Compose config
+  PASS
+GET /health/ready
+  PASS
+canonical dedup audit
+  PASS: 3 verified cases, 3 distinct dedup keys, zero duplicate keys
+```
+
+The Playwright operations flow found no current failed/dead-letter production job, so it did not
+manufacture validation data in the production database merely to display a Retry button. Retry
+state transition remains covered by the dedicated integration suite. This preserves the production
+data boundary.
+
+### Backup and restore
+
+An append-only backup after the scheduler state and model manifest were recorded:
+
+```text
+D:\LocalBackup\LocalKnowledgePortal\database\2026-07-24T020930Z
+dump size: 34,187,095 bytes
+SHA-256: fe1b05705330a72035a52a40e9e21c4ec6f1ae441b3123461883b94997d5c53a
+database: PostgreSQL 18.4
+schema: 0006_chunk_content_trigram
+generation model: gemma4:e4b
+generation prompt: evidence-blog-v1
+curator state: waiting_for_gpu
+```
+
+The custom dump restored into a separate tmpfs PostgreSQL instance and passed with 4,389 document
+identities, 41,816 chunks, 483 vectors, and 1,272 activities. The temporary restore container was
+removed automatically.
+
+### Final status
+
+- Automatic evidence-editor implementation, GPU backoff, filesystem placement, API/UI, tests,
+  Docker build, backup, and restore: **VERIFIED**.
+- Gemma 4 E4B content-quality qualification for this exact digest: **PENDING_GPU_IDLE**.
+- Manual approval: not required for knowledge publication. Codex hook trust remains the separate,
+  already user-confirmed trust boundary.

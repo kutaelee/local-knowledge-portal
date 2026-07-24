@@ -82,9 +82,9 @@ and read-only Codex noise before activity storage, ignores generated tokenizer p
 repository code, nested Git dependencies, lockfiles, and over-budget documents lexical-only by
 default. Explorer projects are the top-level Git repositories below the source root, not an
 incidental parent such as `ai`. Canonical cases require verified execution evidence, reusable
-knowledge structure, and explicit user approval. See
+knowledge structure, and a qualified local evidence editor. See
 [ADR 0006](docs/adr/0006-knowledge-value-selection.md) and
-[ADR 0011](docs/adr/0011-human-reviewed-knowledge-quality.md).
+[ADR 0013](docs/adr/0013-local-llm-evidence-editor.md).
 
 ## Global Codex activity capture
 
@@ -96,12 +96,12 @@ database. A bounded fallback spool, deterministic event IDs, secret redaction, m
 oversized quarantine, and collector-side idempotency keep capture available during portal or
 database outages.
 
-Ordinary Codex work is activity history only. It does not create or overwrite wiki pages. Codex
-and optional local generation models may propose a candidate, but neither can approve it. The
-embedding model only creates retrieval vectors. A canonical case requires evidence and quality
-gates followed by an explicit `HUMAN_APPROVED` review; automatic publication is disabled by
-default. Managed case text follows `LKP_KNOWLEDGE_CONTENT_LANGUAGE=ko`, while paths, commands,
-variables, and model identifiers remain unchanged.
+Ordinary Codex work is activity history only. It does not create or overwrite wiki pages. The
+embedding model only creates retrieval vectors. A separate local evidence editor may publish a
+canonical case only after model qualification, verified evidence, citation/number checks, and the
+quality gate all pass. A Codex success report and model output are never evidence by themselves.
+Managed case text follows `LKP_KNOWLEDGE_CONTENT_LANGUAGE=ko`, while paths, commands, variables,
+and model identifiers remain unchanged.
 
 Low-signal hook envelopes are discarded after collection. Successful tool detail that is not
 linked to evidence is logically rolled up after 30 days and hidden from the default activity list;
@@ -117,23 +117,25 @@ Codex requires a human trust review for non-managed hooks. Start a new session, 
 approve the displayed commands. Until then the installation status is
 `MANUAL_APPROVAL_REQUIRED`; no script attempts to bypass this boundary.
 
-### Optional local LLM generation
+### Local evidence editor
 
-Ingestion, activity capture, evidence gates, and keyword search do not require an LLM. Optional
-generation is isolated behind a provider interface and disabled by default:
+Ingestion, activity capture, evidence gates, and keyword search do not require an LLM. Long-form
+case editing is isolated behind a provider interface:
 
 ```dotenv
 LKP_GENERATION_PROVIDER=ollama
-LKP_GENERATION_BASE_URL=http://127.0.0.1:11434
-LKP_GENERATION_MODEL=your-local-chat-model:tag
+LKP_GENERATION_BASE_URL=http://ollama-generation:11434
+LKP_GENERATION_MODEL=gemma4:e4b
 LKP_GENERATION_MODEL_DIGEST=unresolved
+LKP_KNOWLEDGE_CURATION_ENABLED=true
 ```
 
-The optional adapter uses the private Docker service `ollama` and structured outputs with
-temperature zero, then fails closed on a
-digest change. Other local runtimes can be added behind `GenerationProvider` without changing the
-scanner, queue, evidence, or retrieval data models. Generated text is never accepted as verified
-evidence by itself.
+The editor uses a private, GPU-enabled Ollama service separate from CPU-bounded embedding. It
+checks free VRAM, utilization, and temperature before each one-item batch, uses bounded exponential
+backoff while the GPU is busy, and unloads the generation model after two minutes. E4B must pass
+the built-in supported/unsupported claim corpus for its exact digest and prompt version; otherwise
+it is rejected and 12B is the documented fallback. Generated text is never accepted as verified
+evidence by itself. See [ADR 0013](docs/adr/0013-local-llm-evidence-editor.md).
 
 Production embedding uses Ollama `qwen3-embedding:0.6b`, digest
 `ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d`, dimension
@@ -171,6 +173,16 @@ Implemented endpoints include keyword/hybrid/semantic search, RAG context, docum
 Every retrieval result includes document, version, chunk, source root, canonical/relative path, source lines, content hash, indexed time, retrieval score, and match reason.
 
 ## Operations
+
+Always start this stack through WSL:
+
+```bash
+./scripts/docker-stack.sh up
+```
+
+Do not run the Linux-path Compose file with the Windows Docker CLI. A `/mnt/e` bind can otherwise
+land on a small Docker Desktop internal disk instead of `E:\`. The runbook includes the mount
+capacity check.
 
 See:
 

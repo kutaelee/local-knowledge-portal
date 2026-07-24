@@ -1,11 +1,12 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   BookCheck,
   ChevronRight,
   CircleCheck,
+  Cpu,
   FileDiff,
   ShieldAlert,
 } from "lucide-react";
@@ -28,15 +29,27 @@ const textByLocale = {
     knowledge: {
       eyebrow: "근거 검증 위키", title: "지식 사례",
       subtitle: "검증된 근거가 관문을 통과한 사례만 표준 지식으로 게시됩니다.",
-      cases: "검증된 사례", candidates: "승격 후보 검토", occurrences: "회 발생",
+      cases: "검증된 사례", candidates: "자동 선별 대기·보류", occurrences: "회 발생",
       empty: "이 화면에 표시할 기록이 없습니다.", select: "기록을 선택하세요.",
       problem: "문제", symptom: "증상", cause: "근본 원인", solution: "해결 방법",
       reportedVerified: "보고 결과 / 검증 결과",
       evidenceGate: "실행 근거", qualityGate: "지식 품질",
-      approvalPolicy: "승인 방식", humanReview: "사용자 검토 후 승인",
+      approvalPolicy: "게시 방식", humanReview: "로컬 LLM 근거 검증 후 자동 게시",
       qualityReasons: "보완이 필요한 이유",
-      publish: "검토 후 정식 사례로 승인", revisions: "리비전과 발생 이력",
+      publish: "자동 편집기가 근거를 확인하고 있습니다.", revisions: "리비전과 발생 이력",
       revisionCount: "리비전", occurrenceCount: "발생", relationCount: "관계",
+      curator: "로컬 지식 편집기", nextAttempt: "다음 확인",
+      gpu: "GPU 여유 / 사용률 / 온도", qualification: "모델 적합성",
+      schedulerStates: {
+        not_started: "시작 대기", waiting_for_gpu: "GPU 유휴 대기",
+        gpu_wait_cooldown: "GPU 점검 냉각 중", gpu_probe_error: "GPU 상태 확인 실패",
+        model_unavailable: "모델 준비 대기", model_rejected: "모델 적합성 탈락",
+        qualification_error: "모델 평가 재시도 대기",
+        qualification_error_cooldown: "모델 평가 오류 냉각 중",
+        curation_error: "편집 오류 재시도 대기",
+        curation_error_cooldown: "편집 오류 냉각 중",
+        idle: "대기 중", completed_batch: "최근 편집 완료", disabled: "비활성",
+      },
       categoryLabels: {
         error_resolution: "오류 해결", implementation: "구현 방식",
         custom_success: "검증된 성공 사례", performance: "성능·부하",
@@ -46,7 +59,9 @@ const textByLocale = {
         generic_file_change_is_not_a_cause: "파일 변경 수만으로는 원인을 설명할 수 없습니다.",
         artifact_list_is_not_a_reusable_solution: "변경 파일 목록만으로는 재사용 가능한 해결 방법이 아닙니다.",
         auto_report_missing_reusable_structure: "목표·원인 또는 방식·검증 결과를 구조화해야 합니다.",
-        human_restructuring_required: "사용자가 내용을 검토하고 지식 형태로 다시 정리해야 합니다.",
+        human_restructuring_required: "로컬 편집 모델이 재사용 가능한 구조로 정리해야 합니다.",
+        local_llm_evidence_validation_required: "로컬 편집 모델의 근거 인용 검증이 필요합니다.",
+        not_reusable_knowledge: "반복 활용할 지식이 아닌 일반 활동으로 분류됐습니다.",
       },
     },
     document: {
@@ -79,10 +94,22 @@ const textByLocale = {
       problem: "Problem", symptom: "Symptom", cause: "Root cause", solution: "Solution",
       reportedVerified: "Reported / verified",
       evidenceGate: "Execution evidence", qualityGate: "Knowledge quality",
-      approvalPolicy: "Approval policy", humanReview: "Human review required",
+      approvalPolicy: "Publication policy", humanReview: "Auto-publish after local LLM evidence validation",
       qualityReasons: "Reasons for review",
-      publish: "Approve canonical case", revisions: "Revisions & occurrences",
+      publish: "The local editor is checking the evidence.", revisions: "Revisions & occurrences",
       revisionCount: "revisions", occurrenceCount: "occurrences", relationCount: "relations",
+      curator: "Local knowledge editor", nextAttempt: "Next check",
+      gpu: "GPU free / utilization / temperature", qualification: "Model qualification",
+      schedulerStates: {
+        not_started: "not started", waiting_for_gpu: "waiting for idle GPU",
+        gpu_wait_cooldown: "GPU check cooldown", gpu_probe_error: "GPU probe failed",
+        model_unavailable: "model unavailable", model_rejected: "model rejected",
+        qualification_error: "qualification retry pending",
+        qualification_error_cooldown: "qualification error cooldown",
+        curation_error: "curation retry pending",
+        curation_error_cooldown: "curation error cooldown",
+        idle: "idle", completed_batch: "batch completed", disabled: "disabled",
+      },
       categoryLabels: {
         error_resolution: "Error resolution", implementation: "Implementation",
         custom_success: "Validated success", performance: "Performance",
@@ -92,7 +119,9 @@ const textByLocale = {
         generic_file_change_is_not_a_cause: "A file count does not explain the cause.",
         artifact_list_is_not_a_reusable_solution: "An artifact list is not a reusable solution.",
         auto_report_missing_reusable_structure: "Structure the goal, approach or cause, and validation.",
-        human_restructuring_required: "A human must review and restructure this candidate.",
+        human_restructuring_required: "The local editor must restructure this candidate.",
+        local_llm_evidence_validation_required: "Local model evidence validation is required.",
+        not_reusable_knowledge: "Classified as ordinary activity rather than reusable knowledge.",
       },
     },
     document: {
@@ -140,6 +169,13 @@ type Candidate = {
     quality_gate_status?: string;
     quality_gate_reasons?: string[];
     approval_policy?: string;
+    curation?: {
+      state?: string;
+      model?: string;
+      validation_status?: string;
+      validation_reasons?: string[];
+      decision_reason?: string;
+    };
   };
 };
 
@@ -153,10 +189,42 @@ type Case = {
   solution: string;
   status: string;
   occurrence_count: number;
-  revisions?: Array<{ id: string; number: number; evidence_summary: object; created_at: string }>;
+  revisions?: Array<{
+    id: string;
+    number: number;
+    evidence_summary: object;
+    created_at: string;
+    content?: { article_markdown?: string };
+  }>;
   occurrences?: Array<{ id: string; occurred_at: string; evidence: object }>;
   relations?: Array<{ source_case_id: string; target_case_id: string; type: string }>;
 };
+
+type CurationStatus = {
+  enabled: boolean;
+  auto_publish: boolean;
+  model: string;
+  scheduler: {
+    state?: string;
+    next_attempt_at?: string;
+    model?: string;
+    last_gpu?: {
+      free_mb: number;
+      utilization_percent: number;
+      temperature_c: number;
+    };
+  };
+  qualification: { status?: string } | null;
+};
+
+function Article({ markdown }: { markdown: string }) {
+  return <div className="curated-article">{markdown.split(/\n{2,}/).map((block, index) => {
+    const value = block.trim();
+    if (value.startsWith("## ")) return <h3 key={index}>{value.slice(3)}</h3>;
+    if (value.startsWith("> ")) return <blockquote key={index}>{value.slice(2)}</blockquote>;
+    return <p key={index}>{value}</p>;
+  })}</div>;
+}
 
 type DocumentDetail = {
   id: string;
@@ -265,7 +333,11 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
   const text = textByLocale[locale].knowledge;
   const [tab, setTab] = useState<"cases" | "candidates">("cases");
   const [selected, setSelected] = useState<string | null>(null);
-  const queryClient = useQueryClient();
+  const curation = useQuery({
+    queryKey: ["knowledge-curation-status"],
+    queryFn: () => api<CurationStatus>("/api/v1/knowledge/curation/status"),
+    refetchInterval: 30000,
+  });
   const cases = useQuery({
     queryKey: ["knowledge-cases"],
     queryFn: () => api<{ items: Case[]; total: number }>("/api/v1/knowledge/cases"),
@@ -288,33 +360,34 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
     ),
     enabled: tab === "candidates" && Boolean(selected),
   });
-  const publish = useMutation({
-    mutationFn: (id: string) => api<{ outcome: string }>(
-      `/api/v1/knowledge/candidates/${id}/publish`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          confirmation: "HUMAN_APPROVED",
-          reviewer: "local-user",
-        }),
-      },
-    ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["knowledge-candidates"] });
-      queryClient.invalidateQueries({ queryKey: ["knowledge-cases"] });
-      queryClient.invalidateQueries({ queryKey: ["knowledge-candidate", selected] });
-    },
-  });
   const items = tab === "cases"
     ? cases.data?.items ?? []
-    : candidates.data?.items.filter((candidate) => candidate.status !== "published") ?? [];
+    : candidates.data?.items.filter((candidate) =>
+      !["published", "activity_only"].includes(candidate.status)
+    ) ?? [];
   const selectedDetail = tab === "cases" ? caseDetail.data : candidateDetail.data;
+  const scheduler = curation.data?.scheduler;
+  const schedulerLabel = scheduler?.state
+    ? text.schedulerStates[scheduler.state as keyof typeof text.schedulerStates] ?? scheduler.state
+    : text.schedulerStates.not_started;
   return <section>
     <div className="page-title compact"><div>
       <p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
       <p>{text.subtitle}</p>
     </div></div>
+    <div className="panel curator-status">
+      <Cpu size={18} />
+      <div><strong>{text.curator}</strong>
+        <span>{curation.data?.model || "gemma4:e4b"} · {schedulerLabel}</span></div>
+      <div><small>{text.gpu}</small><strong>{scheduler?.last_gpu
+        ? `${Math.round(scheduler.last_gpu.free_mb / 1024)} GB / ${scheduler.last_gpu.utilization_percent}% / ${scheduler.last_gpu.temperature_c}°C`
+        : "—"}</strong></div>
+      <div><small>{text.qualification}</small>
+        <strong>{curation.data?.qualification?.status ?? "PENDING"}</strong></div>
+      <div><small>{text.nextAttempt}</small><strong>{scheduler?.next_attempt_at
+        ? new Date(scheduler.next_attempt_at).toLocaleString(locale === "ko" ? "ko-KR" : "en-US")
+        : "—"}</strong></div>
+    </div>
     <div className="tabs">
       <button className={tab === "cases" ? "active" : ""} onClick={() => {
         setTab("cases"); setSelected(null);
@@ -368,14 +441,10 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
                   ).join(" ")}</dd></div>}
             </>}
           </dl>
-          {tab === "candidates" && <button className="primary review-action"
-            disabled={publish.isPending ||
-              !("evidence_gate_status" in selectedDetail) ||
-              selectedDetail.metadata.quality_gate_status !== "PASS"}
-            onClick={() => publish.mutate(selectedDetail.id)}>
-            <BookCheck size={15} /> {text.publish}
-          </button>}
-          {publish.data && <p className="mutation-result">{publish.data.outcome}</p>}
+          {tab === "candidates" && <p className="mutation-result">{text.publish}</p>}
+          {"revisions" in selectedDetail &&
+            selectedDetail.revisions?.[0]?.content?.article_markdown &&
+            <Article markdown={selectedDetail.revisions[0].content.article_markdown} />}
           {"revisions" in selectedDetail && <div className="subrecords">
             <h3>{text.revisions}</h3>
             <p>{selectedDetail.revisions?.length ?? 0} {text.revisionCount} ·

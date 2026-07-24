@@ -22,9 +22,11 @@ from lkp.settings import Settings
 from lkp_indexer.activity_knowledge import finalize_pending_stops, finalize_stop
 from lkp_indexer.activity_retention import roll_up_activity_details
 from lkp_indexer.case_pages import materialize_case
+from lkp_indexer.generation import CuratedKnowledgeArticle, EvidenceBoundClaim
 from lkp_indexer.hook_collector import collect_file, envelope_to_activity
 from lkp_indexer.hook_spool import spool
 from lkp_indexer.knowledge import create_candidate, publish_candidate
+from lkp_indexer.knowledge_curator import curate_candidate
 from lkp_indexer.knowledge_quality import review_low_quality_auto_cases
 from lkp_indexer.paths import idempotency_key
 from lkp_indexer.queue import enqueue
@@ -57,6 +59,45 @@ def evidence(*items: tuple[str, int | None]) -> list[dict]:
     ]
 
 
+class FakeEvidenceEditor:
+    provider = "test-local"
+    model = "test-e4b"
+
+    def model_digest(self) -> str:
+        return "sha256:test-e4b"
+
+    def curate(self, _payload, *, language, prompt_version):
+        assert language == "ko"
+        assert prompt_version == "evidence-blog-v1"
+        section = (
+            "검증된 코드 변경과 독립 실행 테스트를 함께 확인했다. 작업 보고의 표현은 "
+            "근거로 사용하지 않았으며 관측 가능한 구현과 결과만 정리했다. [E1] [E2]"
+        )
+        return (
+            CuratedKnowledgeArticle(
+                decision="publish",
+                category="implementation",
+                title="근거를 인용하는 자동 지식 편집 절차",
+                standfirst="실행 근거가 있는 구현만 장문 사례로 승격하는 방식이다.",
+                context=section,
+                problem=section,
+                cause_or_decision=section,
+                implementation=section,
+                verification=section,
+                limitations="장시간 운영 부하는 이 사례의 검증 범위에 포함되지 않았다.",
+                evidence_claims=[
+                    EvidenceBoundClaim(
+                        text="코드 변경과 테스트가 확인됐다.",
+                        evidence_ids=["E1", "E2"],
+                    )
+                ],
+                unsupported_inferences=[],
+                decision_reason="독립된 두 근거가 재사용 가능한 구현을 지지한다.",
+            ),
+            self.model_digest(),
+        )
+
+
 def candidate(session: Session, **overrides):
     values = {
         "category": "error_resolution",
@@ -73,6 +114,52 @@ def candidate(session: Session, **overrides):
     }
     values.update(overrides)
     return create_candidate(session, **values)
+
+
+def test_local_editor_publishes_only_after_deterministic_validation(
+    database_url: str, tmp_path: Path
+):
+    engine = create_engine(database_url)
+    settings = Settings(
+        database_url=database_url,
+        vault_dir=tmp_path / "vault",
+        knowledge_content_language="ko",
+        knowledge_curation_auto_publish=True,
+        knowledge_curation_min_article_chars=300,
+    )
+    with Session(engine) as session:
+        row = create_candidate(
+            session,
+            category="implementation",
+            title="자동 지식 편집 구현",
+            problem="실행 보고가 지식으로 바로 게시될 수 있었다.",
+            symptom="검증되지 않은 짧은 요약이 후보로 생성됐다.",
+            root_cause="활동 근거와 게시 가능한 설명을 분리해야 했다.",
+            solution="근거 인용과 결정론적 검사를 통과한 본문만 게시한다.",
+            reported_result="완벽하게 구현됐다.",
+            verified_result="테스트 성공",
+            evidence=evidence(("code_change", None), ("test_pass", 0)),
+            metadata={"auto_generated": True},
+        )
+        outcome, case_id = curate_candidate(
+            session,
+            row,
+            FakeEvidenceEditor(),
+            settings,
+            "sha256:test-e4b",
+        )
+        assert outcome == "CREATED_CANONICAL"
+        assert case_id is not None
+        assert row.status == "published"
+        assert row.metadata_json["curation"]["state"] == "published"
+        case = session.get(KnowledgeCase, uuid.UUID(case_id))
+        assert case is not None
+        page = next((tmp_path / "vault" / "_generated" / "Knowledge-Cases").glob("*.md"))
+        content = page.read_text(encoding="utf-8")
+        assert "## 상황과 맥락" in content
+        assert "완벽하게 구현됐다" not in content
+        assert "## 검증 근거" in content
+        session.rollback()
 
 
 def test_collector_separates_reported_and_verified(database_url: str, tmp_path: Path):
@@ -375,8 +462,8 @@ def test_global_activity_turns_become_evidence_gated_cases(
         assert counts["considered"] >= 2
         assert counts["activity_only"] >= 1
         assert counts["candidates"] == 1
-        assert counts["published"] == 1
-        assert counts["needs_review"] == 0
+        assert counts["published"] == 0
+        assert counts["needs_review"] == 1
         generated = session.scalar(
             select(KnowledgeCandidate).where(
                 KnowledgeCandidate.metadata_json["source_session_id"].astext
@@ -384,18 +471,15 @@ def test_global_activity_turns_become_evidence_gated_cases(
             )
         )
         assert generated is not None
-        assert generated.status == "published"
+        assert generated.status == "needs_review"
         assert generated.metadata_json["reported_result_is_evidence"] is False
-        assert "sample-project" in generated.title
-        case = session.scalar(
-            select(KnowledgeCase).where(KnowledgeCase.dedup_key == generated.dedup_key)
+        assert "local_llm_evidence_validation_required" in (
+            generated.metadata_json["quality_gate_reasons"]
         )
-        assert case is not None
-        page = next((tmp_path / "vault" / "_generated" / "Knowledge-Cases").glob("*.md"))
-        content = page.read_text(encoding="utf-8")
-        assert "## 보고된 결과" in content
-        assert "그 자체는 검증 근거가 아닙니다" in content
-        assert "회귀 테스트 PASS" in content
+        assert "sample-project" in generated.title
+        assert session.scalar(
+            select(KnowledgeCase).where(KnowledgeCase.dedup_key == generated.dedup_key)
+        ) is None
 
         assert finalize_pending_stops(session, settings)["considered"] == 0
         session.rollback()
@@ -485,12 +569,12 @@ def test_late_tool_evidence_reopens_activity_only_stop(
         assert "knowledge_pipeline" not in stop.metadata_json
         candidate, outcome = finalize_stop(session, stop, settings)
         assert candidate is not None
-        assert candidate.status == "published"
-        assert outcome == "CREATED_CANONICAL"
+        assert candidate.status == "needs_review"
+        assert outcome == "NEEDS_REVIEW"
         session.rollback()
 
 
-def test_automatic_error_case_dedup_and_different_cause_relation(
+def test_qualified_error_case_dedup_and_different_cause_relation(
     database_url: str, tmp_path: Path
 ):
     engine = create_engine(database_url)
@@ -574,6 +658,15 @@ def test_automatic_error_case_dedup_and_different_cause_relation(
         return stop
 
     with Session(engine) as session:
+        def qualify_and_publish(candidate: KnowledgeCandidate):
+            candidate.metadata_json = {
+                **(candidate.metadata_json or {}),
+                "structured_knowledge": True,
+                "approval_policy": "local_llm_evidence_bound",
+                "curation_validation_status": "PASS",
+            }
+            return publish_candidate(session, candidate)
+
         first_stop = add_turn(
             session,
             session_id=f"error-session-{uuid.uuid4()}",
@@ -583,11 +676,9 @@ def test_automatic_error_case_dedup_and_different_cause_relation(
             resolution="fixture에 만료 시각을 추가했다",
         )
         first, outcome = finalize_stop(session, first_stop, settings)
-        assert first is not None and first.status == "published"
+        assert first is not None and first.status == "needs_review"
+        first_case, outcome = qualify_and_publish(first)
         assert outcome == "CREATED_CANONICAL"
-        first_case = session.scalar(
-            select(KnowledgeCase).where(KnowledgeCase.dedup_key == first.dedup_key)
-        )
         assert first_case is not None
 
         repeat_stop = add_turn(
@@ -600,7 +691,9 @@ def test_automatic_error_case_dedup_and_different_cause_relation(
         )
         repeated, outcome = finalize_stop(session, repeat_stop, settings)
         assert repeated is not None
+        repeated_case, outcome = qualify_and_publish(repeated)
         assert outcome == "MERGED_OCCURRENCE"
+        assert repeated_case is not None and repeated_case.id == first_case.id
         assert first_case.occurrence_count == 2
 
         other_stop = add_turn(
@@ -613,10 +706,8 @@ def test_automatic_error_case_dedup_and_different_cause_relation(
         )
         other, outcome = finalize_stop(session, other_stop, settings)
         assert other is not None
+        other_case, outcome = qualify_and_publish(other)
         assert outcome == "CREATED_CANONICAL"
-        other_case = session.scalar(
-            select(KnowledgeCase).where(KnowledgeCase.dedup_key == other.dedup_key)
-        )
         assert other_case is not None and other_case.id != first_case.id
         relation = session.scalar(
             select(KnowledgeCaseRelation).where(

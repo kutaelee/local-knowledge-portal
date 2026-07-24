@@ -158,12 +158,24 @@ def evaluate_quality(candidate: KnowledgeCandidate) -> tuple[str, list[str]]:
     if metadata.get("auto_generated") and not metadata.get("structured_knowledge"):
         reasons.append("auto_report_missing_reusable_structure")
 
-    status = "PASS" if not reasons else "NEEDS_REVIEW"
+    curation_validated = (
+        metadata.get("approval_policy") == "local_llm_evidence_bound"
+        and metadata.get("curation_validation_status") == "PASS"
+    )
+    status = "PASS" if not reasons and (
+        not metadata.get("auto_generated") or curation_validated
+    ) else "NEEDS_REVIEW"
+    if metadata.get("auto_generated") and not curation_validated:
+        reasons.append("local_llm_evidence_validation_required")
     metadata.update(
         {
             "quality_gate_status": status,
             "quality_gate_reasons": reasons,
-            "approval_policy": "human_review",
+            "approval_policy": (
+                "local_llm_evidence_bound"
+                if curation_validated
+                else metadata.get("approval_policy", "human_review")
+            ),
         }
     )
     candidate.metadata_json = metadata
@@ -194,6 +206,7 @@ def _new_revision(
             KnowledgeCaseRevision.case_id == case.id
         )
     )
+    candidate_metadata = dict(candidate.metadata_json or {})
     revision = KnowledgeCaseRevision(
         case_id=case.id,
         revision_number=(latest or 0) + 1,
@@ -205,6 +218,14 @@ def _new_revision(
             "solution": candidate.solution,
             "reported_result": candidate.reported_result,
             "verified_result": candidate.verified_result,
+            "article_markdown": candidate_metadata.get("article_markdown"),
+            "standfirst": candidate_metadata.get("standfirst"),
+            "limitations": candidate_metadata.get("limitations"),
+            "content_language": candidate_metadata.get("content_language"),
+            "curation": candidate_metadata.get("curation"),
+            "evidence_bound_claims": candidate_metadata.get(
+                "evidence_bound_claims"
+            ),
         },
         evidence_summary=_evidence_summary(session, candidate.id),
     )
@@ -212,6 +233,23 @@ def _new_revision(
     session.flush()
     case.current_revision_id = revision.id
     return revision
+
+
+def _case_metadata_from_candidate(candidate: KnowledgeCandidate) -> dict[str, Any]:
+    metadata = dict(candidate.metadata_json or {})
+    return {
+        key: metadata[key]
+        for key in (
+            "article_markdown",
+            "standfirst",
+            "limitations",
+            "content_language",
+            "curation",
+            "evidence_bound_claims",
+            "approval_policy",
+        )
+        if metadata.get(key) is not None
+    }
 
 
 def publish_candidate(
@@ -266,6 +304,7 @@ def publish_candidate(
         target.occurrence_count += 1
         target.metadata_json = {
             **(target.metadata_json or {}),
+            **_case_metadata_from_candidate(candidate),
             "previous_dedup_keys": sorted(
                 {
                     *(target.metadata_json or {}).get("previous_dedup_keys", []),
@@ -305,6 +344,11 @@ def publish_candidate(
             exact.occurrence_count += 1
             exact.last_seen_at = datetime.now(timezone.utc)
             _new_revision(session, exact, candidate)
+            exact.metadata_json = {
+                **(exact.metadata_json or {}),
+                **_case_metadata_from_candidate(candidate),
+                "last_revision_candidate_id": str(candidate.id),
+            }
         candidate.status = "published"
         return exact, "MERGED_OCCURRENCE"
 
@@ -333,6 +377,7 @@ def publish_candidate(
         solution=candidate.solution,
         dedup_key=candidate.dedup_key,
         status="verified",
+        metadata_json=_case_metadata_from_candidate(candidate),
     )
     session.add(case)
     session.flush()
