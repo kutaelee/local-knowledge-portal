@@ -81,24 +81,33 @@ Readable input is not automatically embedded knowledge. A deterministic policy r
 and read-only Codex noise before activity storage, ignores generated tokenizer payloads, and keeps
 repository code, nested Git dependencies, lockfiles, and over-budget documents lexical-only by
 default. Explorer projects are the top-level Git repositories below the source root, not an
-incidental parent such as `ai`. Canonical cases still require verified evidence. See
+incidental parent such as `ai`. Canonical cases require verified execution evidence, reusable
+knowledge structure, and explicit user approval. See
 [ADR 0006](docs/adr/0006-knowledge-value-selection.md) and
-[ADR 0007](docs/adr/0007-purpose-scoped-retrieval.md).
+[ADR 0011](docs/adr/0011-human-reviewed-knowledge-quality.md).
 
 ## Global Codex activity capture
 
 The user-level `%USERPROFILE%\.codex\hooks.json` records activity from every trusted Codex
 workspace, not only this repository. `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`,
 `SubagentStart`, and `SubagentStop` invoke a small PowerShell wrapper that only writes an atomic
-JSON envelope to `E:\LocalKnowledgePortal\ingest\codex-spool\pending`. It never calls the API or
+JSON envelope to `E:\Data\LocalKnowledgePortal\ingest\codex-spool\pending`. It never calls the API or
 database. A bounded fallback spool, deterministic event IDs, secret redaction, malformed and
 oversized quarantine, and collector-side idempotency keep capture available during portal or
 database outages.
 
-Ordinary Codex work is activity history only. It does not create or overwrite wiki pages.
-Knowledge cases are created only through the evidence-gated candidate workflow. The installer
-backs up the existing Codex configuration, merges only this portal's managed hooks, and is safe to
-run repeatedly:
+Ordinary Codex work is activity history only. It does not create or overwrite wiki pages. Codex
+and optional local generation models may propose a candidate, but neither can approve it. The
+embedding model only creates retrieval vectors. A canonical case requires evidence and quality
+gates followed by an explicit `HUMAN_APPROVED` review; automatic publication is disabled by
+default. Managed case text follows `LKP_KNOWLEDGE_CONTENT_LANGUAGE=ko`, while paths, commands,
+variables, and model identifiers remain unchanged.
+
+Low-signal hook envelopes are discarded after collection. Successful tool detail that is not
+linked to evidence is logically rolled up after 30 days and hidden from the default activity list;
+user instructions, turn outcomes, failures, and evidence remain visible. The hourly retention
+check never deletes database history. The installer backs up the existing Codex configuration,
+merges only this portal's managed hooks, and is safe to run repeatedly:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-codex-hook.ps1
@@ -132,17 +141,16 @@ Production embedding uses Ollama `qwen3-embedding:0.6b`, digest
 digest mismatch fails closed. Model changes require a new revision; vectors are never silently
 mixed. Tests use a separate deterministic revision.
 
-The WSL2 runtime keeps embedding thermally bounded: Ollama, the worker, and API each have a one-CPU
-Docker quota; watcher, hook collector, and web each have a half-CPU quota. Model concurrency is one,
-and requests use one-chunk batches. The one-CPU Ollama value is the safe default, not a permanent
-throughput claim. Query embeddings use a bounded revision-aware cache, the model is prewarmed and
+The WSL2 runtime keeps embedding thermally bounded: Ollama has a half-CPU Docker quota; worker and
+API have one CPU; watcher, hook collector, and web each have half a CPU. Model concurrency is one,
+and requests use one-chunk batches. Query embeddings use a bounded revision-aware cache, the model is prewarmed and
 kept loaded, and search SQL has a bounded execution time. Semantic and lexical
 jobs have separate cooldown/burst policies, so an initial code catalog scan drains without calling
 the model while semantic work remains conservative. Operators can create
 `E:\Data\LocalKnowledgePortal\runtime\embedding.pause` to stop new leases while keeping the portal
 and lexical search online. See the operations runbook before changing these defaults.
 The evidence required before evaluating a larger CPU profile is documented in
-[ADR 0008](docs/adr/0008-search-latency-and-cpu-budget.md).
+[ADR 0012](docs/adr/0012-mount-and-thermal-fail-closed.md).
 
 ## Tests
 

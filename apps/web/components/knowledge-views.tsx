@@ -32,8 +32,22 @@ const textByLocale = {
       empty: "이 화면에 표시할 기록이 없습니다.", select: "기록을 선택하세요.",
       problem: "문제", symptom: "증상", cause: "근본 원인", solution: "해결 방법",
       reportedVerified: "보고 결과 / 검증 결과",
-      publish: "근거 통과 시 게시", revisions: "리비전과 발생 이력",
+      evidenceGate: "실행 근거", qualityGate: "지식 품질",
+      approvalPolicy: "승인 방식", humanReview: "사용자 검토 후 승인",
+      qualityReasons: "보완이 필요한 이유",
+      publish: "검토 후 정식 사례로 승인", revisions: "리비전과 발생 이력",
       revisionCount: "리비전", occurrenceCount: "발생", relationCount: "관계",
+      categoryLabels: {
+        error_resolution: "오류 해결", implementation: "구현 방식",
+        custom_success: "검증된 성공 사례", performance: "성능·부하",
+        operations: "운영·장애",
+      },
+      qualityReasonLabels: {
+        generic_file_change_is_not_a_cause: "파일 변경 수만으로는 원인을 설명할 수 없습니다.",
+        artifact_list_is_not_a_reusable_solution: "변경 파일 목록만으로는 재사용 가능한 해결 방법이 아닙니다.",
+        auto_report_missing_reusable_structure: "목표·원인 또는 방식·검증 결과를 구조화해야 합니다.",
+        human_restructuring_required: "사용자가 내용을 검토하고 지식 형태로 다시 정리해야 합니다.",
+      },
     },
     document: {
       loading: "문서를 불러오는 중…", unavailable: "문서를 표시할 수 없습니다.",
@@ -64,8 +78,22 @@ const textByLocale = {
       empty: "No records in this view.", select: "Select a record.",
       problem: "Problem", symptom: "Symptom", cause: "Root cause", solution: "Solution",
       reportedVerified: "Reported / verified",
-      publish: "Publish if evidence passes", revisions: "Revisions & occurrences",
+      evidenceGate: "Execution evidence", qualityGate: "Knowledge quality",
+      approvalPolicy: "Approval policy", humanReview: "Human review required",
+      qualityReasons: "Reasons for review",
+      publish: "Approve canonical case", revisions: "Revisions & occurrences",
       revisionCount: "revisions", occurrenceCount: "occurrences", relationCount: "relations",
+      categoryLabels: {
+        error_resolution: "Error resolution", implementation: "Implementation",
+        custom_success: "Validated success", performance: "Performance",
+        operations: "Operations",
+      },
+      qualityReasonLabels: {
+        generic_file_change_is_not_a_cause: "A file count does not explain the cause.",
+        artifact_list_is_not_a_reusable_solution: "An artifact list is not a reusable solution.",
+        auto_report_missing_reusable_structure: "Structure the goal, approach or cause, and validation.",
+        human_restructuring_required: "A human must review and restructure this candidate.",
+      },
     },
     document: {
       loading: "Loading document…", unavailable: "Document unavailable.",
@@ -108,6 +136,11 @@ type Candidate = {
   evidence_gate_status: string;
   reported_result: string | null;
   verified_result: string | null;
+  metadata: {
+    quality_gate_status?: string;
+    quality_gate_reasons?: string[];
+    approval_policy?: string;
+  };
 };
 
 type Case = {
@@ -160,6 +193,15 @@ function Badge({ value, locale }: { value: string; locale: Locale }) {
     {good ? <CircleCheck size={12} /> : <ShieldAlert size={12} />}
     {labels[value as keyof typeof labels] ?? value}
   </span>;
+}
+
+function candidateBadge(candidate: Candidate): string {
+  if (candidate.metadata.quality_gate_status === "NEEDS_REVIEW") {
+    return "NEEDS_REVIEW";
+  }
+  return candidate.status === "published"
+    ? "published"
+    : candidate.evidence_gate_status;
 }
 
 export function ActivityHistory({ locale }: { locale: Locale }) {
@@ -248,7 +290,15 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
   });
   const publish = useMutation({
     mutationFn: (id: string) => api<{ outcome: string }>(
-      `/api/v1/knowledge/candidates/${id}/publish`, { method: "POST" },
+      `/api/v1/knowledge/candidates/${id}/publish`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          confirmation: "HUMAN_APPROVED",
+          reviewer: "local-user",
+        }),
+      },
     ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["knowledge-candidates"] });
@@ -256,7 +306,9 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
       queryClient.invalidateQueries({ queryKey: ["knowledge-candidate", selected] });
     },
   });
-  const items = tab === "cases" ? cases.data?.items ?? [] : candidates.data?.items ?? [];
+  const items = tab === "cases"
+    ? cases.data?.items ?? []
+    : candidates.data?.items.filter((candidate) => candidate.status !== "published") ?? [];
   const selectedDetail = tab === "cases" ? caseDetail.data : candidateDetail.data;
   return <section>
     <div className="page-title compact"><div>
@@ -276,10 +328,12 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
         {items.map((item) => <button key={item.id} onClick={() => setSelected(item.id)}
           className={selected === item.id ? "selected" : ""}>
           <BookCheck size={16} /><span><strong>{item.title}</strong>
-            <small>{item.category}{!("evidence_gate_status" in item)
+            <small>{text.categoryLabels[
+              item.category as keyof typeof text.categoryLabels
+            ] ?? item.category}{!("evidence_gate_status" in item)
               ? ` · ${item.occurrence_count}${locale === "ko" ? text.occurrences : ` ${text.occurrences}`}` : ""}</small></span>
           <Badge value={"evidence_gate_status" in item
-            ? item.evidence_gate_status : item.status} locale={locale} /><ChevronRight size={14} />
+            ? candidateBadge(item) : item.status} locale={locale} /><ChevronRight size={14} />
         </button>)}
         {!items.length && <div className="inline-empty">{text.empty}</div>}
       </div>
@@ -287,7 +341,7 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
         {selectedDetail ? <>
           <div className="panel-head"><h2>{selectedDetail.title}</h2>
             <Badge value={"evidence_gate_status" in selectedDetail
-              ? selectedDetail.evidence_gate_status : selectedDetail.status} locale={locale} /></div>
+              ? candidateBadge(selectedDetail) : selectedDetail.status} locale={locale} /></div>
           <dl className="detail-grid">
             <div><dt>{text.problem}</dt><dd>{selectedDetail.problem}</dd></div>
             <div><dt>{text.symptom}</dt><dd>{selectedDetail.symptom}</dd></div>
@@ -297,9 +351,28 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
               <div><dt>{text.reportedVerified}</dt><dd>
                 {selectedDetail.reported_result ?? "—"} / {selectedDetail.verified_result ?? "—"}
               </dd></div>}
+            {"evidence_gate_status" in selectedDetail && <>
+              <div><dt>{text.evidenceGate}</dt>
+                <dd><Badge value={selectedDetail.evidence_gate_status} locale={locale} /></dd></div>
+              <div><dt>{text.qualityGate}</dt><dd>
+                <Badge value={selectedDetail.metadata.quality_gate_status ?? "NEEDS_REVIEW"}
+                  locale={locale} />
+              </dd></div>
+              <div><dt>{text.approvalPolicy}</dt><dd>{text.humanReview}</dd></div>
+              {!!selectedDetail.metadata.quality_gate_reasons?.length &&
+                <div><dt>{text.qualityReasons}</dt>
+                  <dd>{selectedDetail.metadata.quality_gate_reasons.map((reason) =>
+                    text.qualityReasonLabels[
+                      reason as keyof typeof text.qualityReasonLabels
+                    ] ?? reason
+                  ).join(" ")}</dd></div>}
+            </>}
           </dl>
           {tab === "candidates" && <button className="primary review-action"
-            disabled={publish.isPending} onClick={() => publish.mutate(selectedDetail.id)}>
+            disabled={publish.isPending ||
+              !("evidence_gate_status" in selectedDetail) ||
+              selectedDetail.metadata.quality_gate_status !== "PASS"}
+            onClick={() => publish.mutate(selectedDetail.id)}>
             <BookCheck size={15} /> {text.publish}
           </button>}
           {publish.data && <p className="mutation-result">{publish.data.outcome}</p>}

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from watchfiles import Change, awatch
 
 from .chunking import SUPPORTED_EXTENSIONS
+from .file_safety import source_file_rejection_reason
 from .ignore import IgnoreRules
 from .paths import idempotency_key, is_reparse_point
 from .queue import enqueue
@@ -90,6 +91,7 @@ async def watch_root(
                 added.remove(canonical)
         with session_factory() as session:
             session: Session
+            unsupported: dict[str, str] = {}
             deleted = [
                 canonical
                 for canonical, change in merged.items()
@@ -116,6 +118,13 @@ async def watch_root(
             for canonical, _change in merged.items():
                 path = Path(canonical)
                 if path.exists() and path.is_file():
+                    try:
+                        reason = source_file_rejection_reason(path, max_file_bytes)
+                    except OSError:
+                        reason = "unreadable"
+                    if reason:
+                        unsupported[canonical] = reason
+                        continue
                     info = path.stat()
                     old_path = rename_for.get(canonical)
                     job_type = "watch_rename" if old_path else "watch_index"
@@ -152,6 +161,8 @@ async def watch_root(
                         "event_count": len(changes),
                         "merged_count": len(merged),
                         "renames": len(rename_for),
+                        "unsupported_count": len(unsupported),
+                        "unsupported_reasons": sorted(set(unsupported.values())),
                     },
                 )
             )

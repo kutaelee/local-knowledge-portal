@@ -83,3 +83,8 @@ class CandidateCreate(BaseModel):
     verified_result: str | None = Field(default=None, max_length=10000)
     evidence: list[EvidenceInput] = Field(default_factory=list, max_length=100)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidatePublish(BaseModel):
+    confirmation: Literal["HUMAN_APPROVED"]
+    reviewer: str = Field(default="local-user", min_length=1, max_length=100)

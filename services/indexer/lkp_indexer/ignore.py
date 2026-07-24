@@ -6,8 +6,12 @@ DEFAULT_IGNORES = [
     ".git/",
     "node_modules/",
     ".next/",
+    # Next.js alternate build directories such as .next-prod-v24 are derived.
+    "**/.next*/",
+    ".turbo/",
     "dist/",
     "build/",
+    "out/",
     "coverage/",
     "target/",
     "bin/",
@@ -21,6 +25,10 @@ DEFAULT_IGNORES = [
     "vendor/",
     "tmp/",
     "temp/",
+    # Playwright/Chromium profiles contain LevelDB and browser caches, not logs
+    # intended for human retrieval.
+    "**/playwright-profile*/",
+    "**/.playwright/",
     # Generated tokenizer payloads are model artifacts rather than human knowledge.
     # They can contain tens of thousands of merge/vocabulary records and otherwise
     # monopolize a single embedding job for many minutes.

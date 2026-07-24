@@ -5,6 +5,25 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+def assert_mount_guards(settings) -> None:
+    missing = [
+        str(path)
+        for path in settings.mount_guard_path_list
+        if not path.is_file()
+    ]
+    empty = []
+    for path in settings.mount_guard_nonempty_dir_list:
+        try:
+            if not path.is_dir() or next(path.iterdir(), None) is None:
+                empty.append(str(path))
+        except OSError:
+            empty.append(str(path))
+    if missing or empty:
+        raise RuntimeError(
+            f"mount guard failed; missing={missing}; empty_or_unreadable={empty}"
+        )
+
+
 @contextmanager
 def service_pid():
     raw_path = os.getenv("LKP_SERVICE_PID_FILE")

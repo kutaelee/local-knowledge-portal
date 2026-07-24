@@ -16,7 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .activity_knowledge import finalize_pending_stops, project_from_paths
-from .service_runtime import service_pid
+from .activity_retention import roll_up_activity_details
+from .service_runtime import assert_mount_guards, service_pid
 
 _LOW_SIGNAL_PROMPTS = {
     "",
@@ -52,6 +53,7 @@ _REUSABLE_INSTRUCTION = re.compile(
     r"파이프라인|설정|운영)"
 )
 _MUTATING_TOOLS = {"apply_patch", "write_file", "edit_file"}
+_last_retention_check = 0.0
 
 
 def _parse_time(value: str | None) -> datetime:
@@ -476,6 +478,7 @@ def _claim(path: Path) -> Path | None:
 
 
 def collect_once(settings: Settings) -> dict[str, int]:
+    global _last_retention_check
     counts = {
         "seen": 0,
         "processed": 0,
@@ -528,10 +531,22 @@ def collect_once(settings: Settings) -> dict[str, int]:
     try:
         with SessionLocal() as session:
             knowledge_counts = finalize_pending_stops(session, settings)
+            rolled_up = 0
+            now_monotonic = time.monotonic()
+            if (
+                now_monotonic - _last_retention_check
+                >= settings.activity_retention_check_seconds
+            ):
+                rolled_up = roll_up_activity_details(
+                    session,
+                    retention_days=settings.activity_detail_retention_days,
+                )
+                _last_retention_check = now_monotonic
             session.commit()
         counts.update(
             {f"knowledge_{key}": value for key, value in knowledge_counts.items()}
         )
+        counts["activity_details_rolled_up"] = rolled_up
     except Exception:
         counts["failed"] += 1
         counts["knowledge_failed"] = 1
@@ -539,6 +554,7 @@ def collect_once(settings: Settings) -> dict[str, int]:
 
 
 def watch(settings: Settings) -> None:
+    assert_mount_guards(settings)
     while True:
         collect_once(settings)
         time.sleep(max(1.0, settings.hook_collector_poll_seconds))

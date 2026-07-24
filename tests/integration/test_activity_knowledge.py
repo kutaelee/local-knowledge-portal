@@ -20,10 +20,12 @@ from lkp.models import (
 )
 from lkp.settings import Settings
 from lkp_indexer.activity_knowledge import finalize_pending_stops, finalize_stop
+from lkp_indexer.activity_retention import roll_up_activity_details
 from lkp_indexer.case_pages import materialize_case
 from lkp_indexer.hook_collector import collect_file, envelope_to_activity
 from lkp_indexer.hook_spool import spool
 from lkp_indexer.knowledge import create_candidate, publish_candidate
+from lkp_indexer.knowledge_quality import review_low_quality_auto_cases
 from lkp_indexer.paths import idempotency_key
 from lkp_indexer.queue import enqueue
 from sqlalchemy import create_engine, func, select
@@ -336,7 +338,12 @@ def test_global_activity_turns_become_evidence_gated_cases(
             instruction="worker 재시작 안전장치를 구현하고 회귀 테스트해",
             changed_files=[],
             document_version_ids=[],
-            reported_result="worker 재시작 안전장치 구현 완료\n\n회귀 테스트 PASS",
+            reported_result=(
+                "구현 완료\n"
+                "목표: worker 재시작 시 중복 처리를 방지합니다.\n"
+                "구현 방식: lease 만료와 idempotency key를 함께 검사합니다.\n"
+                "검증: 회귀 테스트 PASS"
+            ),
             verified_result="apply_patch exit=0; Bash exit=0",
             verification_status="VERIFIED",
             metadata_json={},
@@ -386,7 +393,7 @@ def test_global_activity_turns_become_evidence_gated_cases(
         assert case is not None
         page = next((tmp_path / "vault" / "_generated" / "Knowledge-Cases").glob("*.md"))
         content = page.read_text(encoding="utf-8")
-        assert "보고된 결과 / Reported outcome" in content
+        assert "## 보고된 결과" in content
         assert "그 자체는 검증 근거가 아닙니다" in content
         assert "회귀 테스트 PASS" in content
 
@@ -417,7 +424,12 @@ def test_late_tool_evidence_reopens_activity_only_stop(
             instruction="late evidence 처리 로직을 구현하고 테스트해",
             changed_files=[],
             document_version_ids=[],
-            reported_result="late evidence 처리 구현 완료, 테스트 PASS",
+            reported_result=(
+                "구현 완료\n"
+                "목표: 늦게 도착한 실행 근거를 안전하게 연결합니다.\n"
+                "구현 방식: 완료 이벤트를 다시 열어 idempotent하게 평가합니다.\n"
+                "검증: pytest PASS"
+            ),
             verification_status="UNVERIFIED",
             metadata_json={},
         )
@@ -615,4 +627,104 @@ def test_automatic_error_case_dedup_and_different_cause_relation(
             )
         )
         assert relation is not None
+        session.rollback()
+
+
+def test_generic_auto_case_is_retracted_without_deleting_history(
+    database_url: str, tmp_path: Path
+):
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        auto = create_candidate(
+            session,
+            category="implementation",
+            title="[sample] changed files",
+            problem="sample implementation work",
+            symptom="sample implementation work",
+            root_cause=(
+                "Observed implementation in sample: 3 meaningful file(s) changed "
+                "with successful tool exits."
+            ),
+            solution="Changed artifacts: worker.py. Observed validation: test command.",
+            reported_result="implementation completed",
+            verified_result="pytest exit 0",
+            evidence=evidence(("code_change", None), ("test_pass", 0)),
+            metadata={
+                "auto_generated": True,
+                "extractor": "deterministic-activity-v1",
+            },
+        )
+        auto.status = "published"
+        auto.evidence_gate_status = "VERIFIED"
+        case = KnowledgeCase(
+            category=auto.category,
+            title=auto.title,
+            problem=auto.problem,
+            symptom=auto.symptom,
+            root_cause=auto.root_cause,
+            solution=auto.solution,
+            dedup_key=auto.dedup_key,
+            status="verified",
+        )
+        session.add(case)
+        session.flush()
+        session.add(KnowledgeOccurrence(case_id=case.id, candidate_id=auto.id))
+        session.flush()
+
+        preview = review_low_quality_auto_cases(
+            session, vault_dir=tmp_path / "vault", apply=False
+        )
+        assert any(item["case_id"] == str(case.id) for item in preview)
+        assert case.status == "verified"
+
+        applied = review_low_quality_auto_cases(
+            session, vault_dir=tmp_path / "vault", apply=True
+        )
+        assert any(item["case_id"] == str(case.id) for item in applied)
+        assert case.status == "retired"
+        assert auto.status == "needs_review"
+        assert auto.evidence_gate_status == "VERIFIED"
+        assert auto.metadata_json["quality_gate_status"] == "NEEDS_REVIEW"
+        session.rollback()
+
+
+def test_activity_detail_rollup_preserves_failures_and_evidence(database_url: str):
+    engine = create_engine(database_url)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        old_success = ActivityEvent(
+            event_key=f"old-success-{uuid.uuid4()}",
+            session_id=f"retention-{uuid.uuid4()}",
+            turn_id="old",
+            event_type="PostToolUse",
+            occurred_at=now - timedelta(days=31),
+            tool_name="Bash",
+            command="git status",
+            exit_code=0,
+            changed_files=[],
+            document_version_ids=[],
+            verification_status="VERIFIED",
+            metadata_json={},
+        )
+        old_failure = ActivityEvent(
+            event_key=f"old-failure-{uuid.uuid4()}",
+            session_id=old_success.session_id,
+            turn_id="old",
+            event_type="PostToolUse",
+            occurred_at=now - timedelta(days=31),
+            tool_name="Bash",
+            command="pytest",
+            exit_code=1,
+            changed_files=[],
+            document_version_ids=[],
+            verification_status="VERIFIED",
+            metadata_json={},
+        )
+        session.add_all([old_success, old_failure])
+        session.flush()
+
+        assert roll_up_activity_details(session, retention_days=30, now=now) == 1
+        assert old_success.metadata_json["retention_state"] == "rolled_up"
+        assert "retention_state" not in old_failure.metadata_json
+        assert roll_up_activity_details(session, retention_days=30, now=now) == 0
         session.rollback()

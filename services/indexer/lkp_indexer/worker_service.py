@@ -19,7 +19,7 @@ from sqlalchemy import update
 from .cli import get_embedder
 from .queue import lease
 from .selection import semantic_policy
-from .service_runtime import service_pid
+from .service_runtime import assert_mount_guards, service_pid
 from .worker import heartbeat, process_job
 
 logger = structlog.get_logger()
@@ -96,6 +96,7 @@ def _renew_lease(
 
 def run(deterministic: bool = False, once: bool = False) -> int:
     settings = get_settings()
+    assert_mount_guards(settings)
     worker_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
     stopping = threading.Event()
 

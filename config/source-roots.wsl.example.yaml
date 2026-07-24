@@ -17,3 +17,7 @@ source_roots:
     read_only: false
     enabled: true
     managed_subdirectory: _generated
+    include_patterns:
+      - "**/*.md"
+    exclude_patterns:
+      - "_generated/_retired/**"

@@ -29,8 +29,14 @@ Only meaningful instructions, changed files, failures, verification/operation co
 reported outcomes become activity history. Session lifecycle, acknowledgements, and read-only
 inspection events do not become durable rows. A successfully handled raw envelope is deleted; only
 failed or unclaimed envelopes remain in the spool for retry. Ordinary retained activity is still
-not promoted to a wiki page. Create a knowledge
-candidate explicitly and publish only after its category-specific evidence gate passes. Exact
+not promoted to a wiki page. Unlinked successful tool detail is marked `rolled_up` after the
+configured 30-day window and hidden from the default activity list; prompts, outcomes, failures,
+and evidence are retained. The bounded check runs hourly and does not delete DB rows.
+
+Create a knowledge candidate explicitly and publish only after its category-specific evidence
+gate, reusable-content quality gate, and a recorded `HUMAN_APPROVED` review pass. Codex, the
+deterministic extractor, embedding model, and optional generation model cannot approve a case.
+Exact
 problem/root-cause/resolution duplicates add occurrences and revisions to the existing canonical
 case; uncertain similarity remains `NEEDS_REVIEW`.
 
@@ -56,6 +62,19 @@ docker compose -f C:\Docker\local-knowledge-portal\compose.yaml exec -T postgres
 Legacy `_generated/Runbooks` pages are ignored, not deleted. If a canonical page is missing, call
 `POST /api/v1/knowledge/cases/{id}/materialize`; the operation refuses cases without verified
 evidence.
+
+Audit generic auto-published cases with a dry run before applying reversible retirement:
+
+```bash
+docker compose --env-file /mnt/c/Docker/local-knowledge-portal/.env \
+  -f /mnt/c/Docker/local-knowledge-portal/compose.yaml run --rm --no-deps \
+  hook-collector python -m lkp_indexer.knowledge_quality
+```
+
+Add `--apply` only after reviewing the exact IDs. Apply changes status to `retired`, returns
+candidates to `NEEDS_REVIEW`, and moves only portal-managed pages to
+`_generated/_retired/Knowledge-Cases`. It preserves cases, revisions, evidence, original extracted
+fields, and files; the retired directory is excluded from indexing.
 
 Start a new Codex session, run `/hooks`, inspect the six commands, and approve them. Codex owns
 this trust boundary, so the portal records `MANUAL_APPROVAL_REQUIRED` until the operator acts.
@@ -113,18 +132,18 @@ If Ollama is unavailable, new embedding jobs fail and retry; keyword retrieval o
 
 ### CPU and thermal guard
 
-The WSL2 Compose deployment applies a hard one-CPU quota to Ollama, worker, and API, plus a
-half-CPU quota to watcher, hook collector, and web. Do not remove these limits to accelerate an
+The WSL2 Compose deployment applies a hard half-CPU quota to Ollama, one CPU to worker and API,
+and half a CPU to watcher, hook collector, and web. Do not remove these limits to accelerate an
 initial scan. Semantic throughput is intentionally bounded
 with one-chunk embedding batches, inter-batch and inter-job delays, and a 20-job burst cooldown.
 Lexical-only jobs never call Ollama and use a separate 200-job burst with a short cooldown under
 the same worker CPU limit.
 
-One CPU is the current safe Ollama default, not a universal optimum. Startup prewarming and
+Half a CPU is the current conservative Ollama default. Startup prewarming and
 `OLLAMA_KEEP_ALIVE=24h` avoid repeated cold model loads; the 512-entry, 24-hour revision-aware
 query cache removes repeat inference. Inspect dashboard search p50/p95 and cache occupancy before
-considering CPU. Do not evaluate 1.5 CPUs until a real temperature sensor, representative workload,
-30-minute thermal soak, and rollback evidence are available. Never jump directly to two CPUs.
+considering CPU. Do not restore one CPU or evaluate a larger profile until a real temperature
+sensor, representative workload, 30-minute thermal soak, and rollback evidence are available.
 
 Inspect the effective cgroup limits and current load:
 

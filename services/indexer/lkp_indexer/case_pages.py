@@ -36,6 +36,7 @@ def _source_hash(
     case: KnowledgeCase,
     evidence: list[EvidenceRecord],
     revision_content: dict,
+    content_language: str,
 ) -> str:
     payload = {
         "id": str(case.id),
@@ -46,6 +47,7 @@ def _source_hash(
         "root_cause": case.root_cause,
         "solution": case.solution,
         "status": case.status,
+        "content_language": content_language,
         "revision_content": revision_content,
         "evidence": [
             {
@@ -74,18 +76,46 @@ def render_case_markdown(
     pipeline_version: str,
     generated_at: datetime,
     revision_content: dict | None = None,
+    content_language: str = "ko",
 ) -> str:
     revision_content = revision_content or {}
-    if case.category in {"implementation", "custom_success"}:
-        problem_heading = "목표 / Goal"
-        symptom_heading = "작업 범위 / Scope"
-        cause_heading = "검증된 구현 범위 / Verified implementation scope"
-        solution_heading = "적용 조치 / Applied change"
+    korean = content_language == "ko"
+    if case.category in {"implementation", "custom_success"} and korean:
+        problem_heading = "목표"
+        symptom_heading = "작업 범위"
+        cause_heading = "검증된 구현 방식"
+        solution_heading = "적용 조치"
+    elif case.category in {"implementation", "custom_success"}:
+        problem_heading = "Goal"
+        symptom_heading = "Scope"
+        cause_heading = "Verified implementation approach"
+        solution_heading = "Applied change"
+    elif korean:
+        problem_heading = "문제"
+        symptom_heading = "증상"
+        cause_heading = "확인된 원인"
+        solution_heading = "현재 조치"
     else:
-        problem_heading = "문제 / Problem"
-        symptom_heading = "증상 / Symptom"
-        cause_heading = "확인된 원인 / Verified root cause"
-        solution_heading = "현재 조치 / Current resolution"
+        problem_heading = "Problem"
+        symptom_heading = "Symptom"
+        cause_heading = "Verified root cause"
+        solution_heading = "Current resolution"
+    canonical_notice = (
+        "> 검증된 정식 지식 사례입니다. 아래 내용은 현재 개정본이며 "
+        "이전 내용은 사례 이력에 보존됩니다."
+        if korean
+        else "> This is a verified canonical knowledge case. Prior revisions remain in history."
+    )
+    reported_heading = "보고된 결과" if korean else "Reported outcome"
+    reported_notice = (
+        "> 이 내용은 작업 종료 보고에서 가져왔으며 그 자체는 검증 근거가 아닙니다. "
+        "아래 실행 증거와 구분해서 읽어야 합니다."
+        if korean
+        else "> This came from the completion report and is not evidence by itself."
+    )
+    verified_heading = "검증된 결과" if korean else "Verified result"
+    evidence_heading = "검증 근거" if korean else "Evidence"
+    provenance_heading = "출처" if korean else "Provenance"
     lines = [
         "---",
         "managed: true",
@@ -102,10 +132,7 @@ def render_case_markdown(
         "",
         f"# {case.title}",
         "",
-        (
-            "> 검증된 canonical 지식 사례입니다. 아래 내용은 현재 revision이며 "
-            "이전 내용은 사례 이력에 보존됩니다."
-        ),
+        canonical_notice,
         "",
         f"## {problem_heading}",
         "",
@@ -123,24 +150,31 @@ def render_case_markdown(
         "",
         case.solution,
         "",
-        "## 보고된 결과 / Reported outcome",
+        f"## {reported_heading}",
         "",
-        (
-            "> 이 내용은 작업 종료 메시지에서 가져온 보고이며, 그 자체는 검증 근거가 "
-            "아닙니다. 아래 실행 증거와 구분해서 읽어야 합니다."
+        reported_notice,
+        "",
+        str(
+            revision_content.get("reported_result")
+            or ("보고된 결과 없음" if korean else "No reported outcome")
         ),
         "",
-        str(revision_content.get("reported_result") or "보고된 결과 없음"),
+        f"## {verified_heading}",
         "",
-        "## 검증된 결과 / Verified result",
+        str(
+            revision_content.get("verified_result")
+            or ("검증된 결과 없음" if korean else "No verified result")
+        ),
         "",
-        str(revision_content.get("verified_result") or "검증된 결과 없음"),
-        "",
-        "## 검증 근거 / Evidence",
+        f"## {evidence_heading}",
         "",
     ]
     for item in evidence:
-        state = "verified" if item.verified else "reported"
+        state = (
+            ("검증됨" if item.verified else "보고됨")
+            if korean
+            else ("verified" if item.verified else "reported")
+        )
         lines.append(
             f"- **{state} · {item.evidence_type}**: {_one_line(item.claim)}"
         )
@@ -151,11 +185,15 @@ def render_case_markdown(
         if item.exit_code is not None:
             lines.append(f"  - exit code: `{item.exit_code}`")
     if not evidence:
-        lines.append("- 검증 근거가 연결되지 않았습니다. 이 상태로 발행하면 안 됩니다.")
+        lines.append(
+            "- 검증 근거가 연결되지 않았습니다. 이 상태로 발행하면 안 됩니다."
+            if korean
+            else "- No verified evidence is linked. This case must not be published."
+        )
     lines.extend(
         [
             "",
-            "## 식별자 / Provenance",
+            f"## {provenance_heading}",
             "",
             f"- case: `{case.id}`",
             f"- revision: `{revision_number}`",
@@ -172,6 +210,7 @@ def materialize_case(
     *,
     vault_dir: Path,
     pipeline_version: str,
+    content_language: str = "ko",
 ) -> Path:
     candidate_ids = list(
         session.scalars(
@@ -203,7 +242,12 @@ def materialize_case(
     revision_number = revision.revision_number
 
     now = datetime.now(timezone.utc)
-    source_hash = _source_hash(case, evidence, revision.content_json)
+    source_hash = _source_hash(
+        case,
+        evidence,
+        revision.content_json,
+        content_language,
+    )
     metadata = dict(case.metadata_json or {})
     relative_value = metadata.get("materialized_path")
     if relative_value:
@@ -251,6 +295,7 @@ def materialize_case(
         pipeline_version=pipeline_version,
         generated_at=now,
         revision_content=revision.content_json,
+        content_language=content_language,
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None

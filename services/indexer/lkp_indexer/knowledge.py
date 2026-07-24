@@ -133,6 +133,43 @@ def evaluate_gate(session: Session, candidate: KnowledgeCandidate) -> str:
     return candidate.evidence_gate_status
 
 
+def evaluate_quality(candidate: KnowledgeCandidate) -> tuple[str, list[str]]:
+    """Evaluate whether verified activity is reusable canonical knowledge.
+
+    Evidence proves that work happened. It does not prove that the candidate
+    explains a reusable cause, decision, or method. Auto-extracted candidates
+    therefore need explicit structure before a human can publish them.
+    """
+
+    reasons: list[str] = []
+    metadata = dict(candidate.metadata_json or {})
+    fields = {
+        "problem": candidate.problem.strip(),
+        "root_cause": candidate.root_cause.strip(),
+        "solution": candidate.solution.strip(),
+    }
+    for name, value in fields.items():
+        if len(value) < 12:
+            reasons.append(f"{name}_too_short")
+    if candidate.root_cause.startswith("Observed implementation in "):
+        reasons.append("generic_file_change_is_not_a_cause")
+    if candidate.solution.startswith("Changed artifacts:"):
+        reasons.append("artifact_list_is_not_a_reusable_solution")
+    if metadata.get("auto_generated") and not metadata.get("structured_knowledge"):
+        reasons.append("auto_report_missing_reusable_structure")
+
+    status = "PASS" if not reasons else "NEEDS_REVIEW"
+    metadata.update(
+        {
+            "quality_gate_status": status,
+            "quality_gate_reasons": reasons,
+            "approval_policy": "human_review",
+        }
+    )
+    candidate.metadata_json = metadata
+    return status, reasons
+
+
 def _evidence_summary(session: Session, candidate_id: uuid.UUID) -> dict[str, Any]:
     evidence = list(
         session.scalars(
@@ -182,6 +219,10 @@ def publish_candidate(
 ) -> tuple[KnowledgeCase | None, str]:
     if evaluate_gate(session, candidate) != "VERIFIED":
         return None, "NEEDS_EVIDENCE"
+    quality_status, _ = evaluate_quality(candidate)
+    if quality_status != "PASS":
+        candidate.status = "needs_review"
+        return None, "NEEDS_REVIEW"
     supersedes_case_id = (candidate.metadata_json or {}).get("supersedes_case_id")
     if supersedes_case_id:
         try:

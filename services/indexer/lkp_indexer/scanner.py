@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .chunking import SUPPORTED_EXTENSIONS
+from .file_safety import source_file_rejection_reason
 from .ignore import IgnoreRules
 from .paths import canonicalize, idempotency_key, is_reparse_point
 from .queue import enqueue
@@ -86,8 +87,8 @@ def scan_root(session: Session, source_root: SourceRoot, max_file_bytes: int) ->
                     stats.unsupported += 1
                     continue
                 info = candidate.stat()
-                if info.st_size > max_file_bytes:
-                    stats.ignored += 1
+                if source_file_rejection_reason(candidate, max_file_bytes):
+                    stats.unsupported += 1
                     continue
                 canonical = canonicalize(candidate, root)
                 key = idempotency_key(

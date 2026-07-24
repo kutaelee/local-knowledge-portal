@@ -18,7 +18,7 @@ from lkp.settings import get_settings
 
 from .reconcile import reconcile_root
 from .scanner import register_roots
-from .service_runtime import service_pid
+from .service_runtime import assert_mount_guards, service_pid
 from .watcher import reconciliation_loop, watch_root
 
 logger = structlog.get_logger()
@@ -212,6 +212,7 @@ async def _supervise(
 
 async def run(once: bool = False) -> int:
     settings = get_settings()
+    assert_mount_guards(settings)
     with SessionLocal() as session:
         roots = register_roots(session, settings.source_roots_config)
         for root in roots:

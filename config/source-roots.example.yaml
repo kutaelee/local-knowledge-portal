@@ -19,3 +19,4 @@ source_roots:
       - "**/*.md"
     exclude_patterns:
       - "_generated/Runbooks/**"
+      - "_generated/_retired/**"

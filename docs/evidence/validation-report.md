@@ -1007,3 +1007,210 @@ events. Long-duration watcher endurance, sustained thermal load, and real Window
 previously declared exclusions.
 
 Verdict for global multi-session knowledge promotion: **VERIFIED**.
+
+## 2026-07-24 knowledge quality, localization, retention, and mount-safety correction
+
+### Superseded conclusion
+
+This section supersedes the preceding conclusion that four deterministically extracted activity
+summaries were suitable for automatic canonical publication. The evidence gate correctly proved
+that commands and file changes occurred, but it did not prove that a generic file count was a
+reusable cause or that a changed-artifact list was a reusable solution. Evidence validity and
+knowledge quality are now separate gates.
+
+The production approval boundary is:
+
+1. Codex hooks append a bounded, redacted activity envelope to the local raw spool.
+2. The collector records observed activities and independently verified command/file evidence.
+3. A deterministic extractor may create a candidate, but cannot publish it.
+4. The evidence gate checks observed results; the quality gate checks reusable structure.
+5. A candidate that passes both gates still requires an explicit
+   `HUMAN_APPROVED` API request from the portal.
+
+`qwen3-embedding:0.6b` is only the vector encoder. It does not classify, approve, merge, or publish
+knowledge. The optional generation provider remains disabled and, if enabled later, is not allowed
+to create evidence or bypass either gate. `LKP_KNOWLEDGE_AUTO_PUBLISH=false` is the operational
+default.
+
+### Activity retention and noise boundary
+
+Low-signal hook envelopes are discarded immediately after bounded classification and are not
+promoted into activity history. Successful, unlinked `PostToolUse` detail is retained for 30 days
+and then marked `retention_state=rolled_up`; the default activity API excludes rolled-up detail.
+The collector evaluates this policy at most hourly, not on every two-second spool poll.
+
+User prompts, Stop summaries, failures, evidence-linked activities, candidate evidence, canonical
+revisions, and occurrences remain durable. The retention job performs a logical roll-up and does
+not physically delete audit rows. This keeps repeated low-value tool detail out of the normal UI
+without destroying evidence that may be needed later.
+
+### Production quality correction
+
+The reversible quality-maintenance command first ran in dry-run mode and identified exactly six
+generic auto-published cases. Apply mode then:
+
+- changed the six case rows from `verified` to `retired`;
+- returned their candidates to `needs_review`;
+- preserved every occurrence, revision, evidence record, and original extracted English field;
+- moved only portal-managed pages with verified managed frontmatter to
+  `_generated/_retired/Knowledge-Cases`;
+- marked retired document identities ignored so keyword, semantic, hybrid, and RAG retrieval omit
+  them.
+
+No database row or page was deleted. The current live state is:
+
+```text
+canonical cases: verified 3, retired 6
+candidates: needs_review 9, published historical audit rows 4
+visible canonical managed pages: 3
+current canonical chunks / production vectors: 30 / 30
+quality dry run after correction: 0 additional cases
+retired paths returned by search: 0
+```
+
+The three visible canonical cases are the manually reviewed, reusable cases:
+
+- WSL2 Docker watcher polling CPU overload prevention;
+- WSL2 Docker Ollama embedding CPU safety limit;
+- Windows reboot automatic-start recovery.
+
+The candidate-review UI now shows only the nine unpublished review candidates. Published candidate
+audit rows no longer pollute that work queue. Korean mode localizes category labels, gate reasons,
+cause/solution labels, and managed-page headings. A browser inspection confirmed the watcher case
+renders its problem, measured symptom, verified cause, and mitigation in Korean while preserving
+technical identifiers such as `watchfiles`, WSL2, and CPU.
+
+### Mount and thermal fail-closed correction
+
+A Compose recreation invoked without the canonical WSL repository working directory produced
+containers whose expected bind destinations existed but were empty. Readiness had previously been
+able to succeed using database state alone. This was corrected with startup mount guards:
+
+- `/data/.lkp-runtime-root` must be a real sentinel file;
+- `/mount-guards/source-pyproject.toml` must be the repository's mounted `pyproject.toml`;
+- configured source directories can additionally require non-empty contents.
+
+API readiness and the worker, watcher, and hook collector now fail closed when these sentinels are
+missing, are directories, or are unreadable. Current API, worker, and watcher mounts resolve to
+`E:\Data\LocalKnowledgePortal`, `/home/kutae/src`, and the canonical WSL repository guard file.
+
+Ollama remains stored at `E:\AI\Models\Ollama`, not C:. Its container limit was reduced from one
+CPU to `0.5` CPU (`NanoCpus=500000000`) with one parallel request and one loaded model. A real
+production reindex retry completed in 68 seconds while observed Ollama CPU samples were 48.02%,
+49.15%, and 49.44%, followed by 0%. Final idle samples were:
+
+```text
+Ollama 0.00%
+worker 0.21%
+watcher 0.31%
+hook collector 0.24%
+API 0.13%
+web 0.01%
+```
+
+The watcher canonical page SHA-256
+`7560734e923f966fd745d83bd1bb4d7877d952940f3a17b1245a5433c3d19cff`
+matches both the current `document` and `document_version` hashes after the successful retry.
+
+### Non-retryable input correction
+
+The first full reconciliation after adding another WSL repository exposed a separate queue-design
+defect. Alternate Next.js output directory `.next-prod-v24`, Playwright Chromium profiles, binary
+LevelDB `.log` files, and a JSON file above the 10 MiB limit could reach the queue. Retrying those
+inputs cannot make them valid.
+
+The scanner and watcher now run the same bounded preflight before enqueueing:
+
+- maximum byte size;
+- NUL-byte binary detection;
+- UTF-8 sample validation;
+- default derived-directory policy for `.next*`, `.turbo`, `out`, Playwright profiles, and
+  `.playwright`.
+
+The worker repeats the same fail-safe check in case a stale or externally inserted job bypasses
+collection. Such a job is recorded as an `unsupported` event and completes without retrying.
+Reconciliation changed 365 previously indexed `.next-prod-v24` document identities to `ignored`;
+active search results for that tree and the Playwright profile are both zero.
+
+The 12 already exhausted jobs were not deleted. A dry-run maintenance command proved that each
+current path was now deterministically an ignore-rule, binary, or oversized match. Apply mode
+changed only those rows from `dead_letter` to `cancelled`, retained their error and attempt fields,
+and added 12 `dead_letter_resolved` events. A second dry run returned zero items. Final active queue
+state was 4,459 succeeded, 17 cancelled historical jobs, and zero pending, processing, failed, or
+dead-letter jobs.
+
+### Retrieval check
+
+Live semantic and hybrid queries used production revision
+`ollama-qwen3-embedding-0.6b-ac6da0df-d1024-v1`:
+
+| Query | Expected top case | Semantic similarity | Semantic / cached hybrid latency |
+|---|---|---:|---:|
+| watcher polling CPU 과부하 원인과 조치 | watcher CPU prevention | 0.7913 | 1,521 ms / 18 ms |
+| Ollama 임베딩 CPU 안전 제한 | Ollama CPU safety | 0.8656 | 1,546 ms / 13 ms |
+| 재부팅 후 자동 시작 복구 | reboot recovery | 0.6680 | 1,285 ms / 13 ms |
+
+All three responses had high confidence and returned canonical path, document/version/chunk IDs,
+content hash, indexed timestamp, and line range. An exact retired-case query returned no retired
+path.
+
+### Commands and verification evidence
+
+```text
+uv run ruff check .
+  PASS
+uv run pytest -q tests/unit
+  PASS: 42
+dedicated temporary PostgreSQL database with vector and pg_trgm
+bash scripts/test-integration-container.sh /home/kutae/src/local-knowledge-portal
+  PASS: 15; one upstream Starlette deprecation warning
+docker compose ... build api web
+  PASS
+Next.js production build and TypeScript validation inside Docker
+  PASS: compiled, checked types, generated 3 static pages
+browser UI flow: overview -> knowledge cases -> candidate review -> case detail
+  PASS: Korean UI, 9 review candidates, 0 published candidates in review queue,
+        no framework overlay, 0 console errors
+GET /health/ready
+  PASS: PostgreSQL 18.4, schema 0006_chunk_content_trigram, Ollama connected
+python -m lkp_indexer.knowledge_quality
+  PASS: dry-run items []
+python -m lkp_indexer.job_recovery
+  PASS: dry-run items [] after 12 safe, non-destructive resolutions
+```
+
+No schema migration was needed; the live revision remains `0006_chunk_content_trigram`.
+
+### Backup and restore
+
+The corrected production state was captured in the append-only backup:
+
+```text
+D:\LocalBackup\LocalKnowledgePortal\database\2026-07-24T013031Z
+dump size: 34,039,330 bytes
+SHA-256: 9d4b12e0db0bb379002bc0b7da419e2daca94790817eed99e170a00630f28d7a
+checksum comparison: PASS
+```
+
+The manifest records Ollama model `qwen3-embedding:0.6b`, digest
+`ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d`,
+dimension 1,024, the production embedding revision, and pipeline `1.2.0`.
+
+A restore into a separate temporary database passed with revision
+`0006_chunk_content_trigram`, 4,388 document identities, 41,798 historical chunks, 471 historical
+vectors, and 1,148 activities. These restore counts include ignored/retired identities and old
+versions; the active portal count is 4,013 documents.
+
+### Hook trust and remaining exclusions
+
+The global merged hook file contains one entry for each of `SessionStart`, `UserPromptSubmit`,
+`PostToolUse`, `Stop`, `SubagentStart`, and `SubagentStop`. Pending, processing, and quarantine spool
+counts were all zero after collection. Hook trust cannot be programmatically granted; the user
+explicitly confirmed that all six entries were changed to trusted. The status is therefore
+`USER_CONFIRMED_APPROVED`, not an automated trust assertion.
+
+Only long-duration watcher endurance, sustained thermal load, and real Windows sleep/resume remain
+excluded. They do not affect the bounded functional, recovery, search, backup, or UI checks above.
+
+Final verdict for knowledge quality, Korean presentation, retention, mount safety, production
+embedding, search, and restore: **VERIFIED**.

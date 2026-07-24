@@ -27,6 +27,8 @@ def test_ignore_defaults(tmp_path: Path):
     assert rules.matches("node_modules/pkg/index.js")
     assert rules.matches("project/tokenizer_configs/stable_diffusion/merges.txt")
     assert rules.matches("project/tokenizer/merges.txt")
+    assert rules.matches("project/.next-prod-v24/server/route.js")
+    assert rules.matches("old/playwright-profile-notice/Default/leveldb/000003.log")
     assert not rules.matches("docs/readme.md")
 
 

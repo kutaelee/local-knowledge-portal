@@ -64,7 +64,12 @@ class Settings(BaseSettings):
     codex_sessions_dir: Path = Path("/codex-sessions")
     hook_collector_poll_seconds: float = 2.0
     hook_claim_stale_seconds: int = 60
-    knowledge_auto_publish: bool = True
+    knowledge_auto_publish: bool = False
+    knowledge_content_language: Literal["ko", "en"] = "ko"
+    activity_detail_retention_days: int = Field(default=30, ge=1, le=3650)
+    activity_retention_check_seconds: int = Field(default=3600, ge=60, le=86400)
+    mount_guard_paths: str = ""
+    mount_guard_nonempty_dirs: str = ""
     knowledge_transcript_tail_bytes: int = Field(
         default=8_000_000, ge=1_000_000, le=32_000_000
     )
@@ -138,6 +143,22 @@ class Settings(BaseSettings):
             for item in self.watch_polling_roots.replace(";", ",").split(",")
             if item.strip()
         }
+
+    @property
+    def mount_guard_path_list(self) -> list[Path]:
+        return [
+            Path(item.strip())
+            for item in self.mount_guard_paths.replace(",", ";").split(";")
+            if item.strip()
+        ]
+
+    @property
+    def mount_guard_nonempty_dir_list(self) -> list[Path]:
+        return [
+            Path(item.strip())
+            for item in self.mount_guard_nonempty_dirs.replace(",", ";").split(";")
+            if item.strip()
+        ]
 
 
 @lru_cache

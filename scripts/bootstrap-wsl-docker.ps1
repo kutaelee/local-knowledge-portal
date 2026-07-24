@@ -43,6 +43,14 @@ $Directories = @(
   (Join-Path $BackupRoot 'restore-tests')
 )
 New-Item -ItemType Directory -Force -Path $Directories | Out-Null
+$RuntimeSentinel = Join-Path $DataRoot '.lkp-runtime-root'
+if (-not (Test-Path -LiteralPath $RuntimeSentinel)) {
+  [System.IO.File]::WriteAllText(
+    $RuntimeSentinel,
+    "local-knowledge-portal runtime mount sentinel v1`n",
+    [System.Text.UTF8Encoding]::new($false)
+  )
+}
 
 Copy-Item -LiteralPath (Join-Path $RepoWindows 'scripts\codex-hook-standalone.ps1') `
   -Destination (Join-Path $HookRoot 'codex-hook.ps1') -Force

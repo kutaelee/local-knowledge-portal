@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from .chunking import chunk_document
 from .embedding import Embedder
+from .file_safety import source_file_rejection_reason
 from .ignore import IgnoreRules
 from .paths import canonicalize
 from .projects import project_identity
@@ -266,12 +267,54 @@ def process_job(
             finish(session, job)
             heartbeat(session, worker_id, "idle", success=True)
             return
-        if info.st_size > settings.max_file_bytes:
-            raise ValueError(f"file exceeds {settings.max_file_bytes} bytes")
+        rejection_reason = source_file_rejection_reason(
+            canonical, settings.max_file_bytes
+        )
+        if rejection_reason:
+            if existing:
+                existing.state = DocumentState.unsupported
+                existing.last_seen_at = _utcnow()
+                job.document_id = existing.id
+            session.add(
+                IngestEvent(
+                    source_root_id=root.id,
+                    document_id=existing.id if existing else None,
+                    event_type="unsupported",
+                    path=str(canonical),
+                    details={
+                        "reason": rejection_reason,
+                        "relative_path": relative,
+                        "size_bytes": info.st_size,
+                    },
+                )
+            )
+            finish(session, job)
+            heartbeat(session, worker_id, "idle", success=True)
+            return
         raw = canonical.read_bytes()
-        if b"\x00" in raw[:8192]:
-            raise ValueError("binary file rejected")
-        content = raw.decode("utf-8")
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if existing:
+                existing.state = DocumentState.unsupported
+                existing.last_seen_at = _utcnow()
+                job.document_id = existing.id
+            session.add(
+                IngestEvent(
+                    source_root_id=root.id,
+                    document_id=existing.id if existing else None,
+                    event_type="unsupported",
+                    path=str(canonical),
+                    details={
+                        "reason": "invalid_utf8",
+                        "relative_path": relative,
+                        "size_bytes": info.st_size,
+                    },
+                )
+            )
+            finish(session, job)
+            heartbeat(session, worker_id, "idle", success=True)
+            return
         digest = hashlib.sha256(raw).hexdigest()
         modified = datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)
         if existing is None:

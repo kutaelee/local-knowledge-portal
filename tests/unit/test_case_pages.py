@@ -34,7 +34,7 @@ def test_case_markdown_is_utf8_human_readable_and_current():
         generated_at=datetime(2026, 7, 24, tzinfo=timezone.utc),
     )
     assert "# 재부팅 후 포털 자동 시작 복구" in rendered
-    assert "## 확인된 원인 / Verified root cause" in rendered
+    assert "## 확인된 원인" in rendered
     assert "Docker readiness 실패를 종료 예외로 처리했다." in rendered
     assert "LastTaskResult=0, HTTP 200" in rendered
     assert "case_revision: 2" in rendered

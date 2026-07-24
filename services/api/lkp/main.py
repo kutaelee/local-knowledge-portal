@@ -16,6 +16,7 @@ from lkp_indexer.embedding import CachedEmbedder, OllamaEmbedder
 from lkp_indexer.knowledge import create_candidate, evaluate_gate, publish_candidate
 from lkp_indexer.queue import retry_as_new
 from lkp_indexer.selection import CODE_EXTENSIONS
+from lkp_indexer.service_runtime import assert_mount_guards
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
@@ -42,7 +43,13 @@ from .models import (
     SourceRoot,
     WorkerHeartbeat,
 )
-from .schemas import CandidateCreate, RagRequest, SearchRequest, SearchResponse
+from .schemas import (
+    CandidateCreate,
+    CandidatePublish,
+    RagRequest,
+    SearchRequest,
+    SearchResponse,
+)
 from .search import search
 from .settings import get_settings
 
@@ -141,6 +148,13 @@ def live() -> dict:
 
 @app.get("/health/ready")
 def ready(db: Session = Depends(get_db)) -> dict:
+    try:
+        assert_mount_guards(settings)
+    except RuntimeError as exc:
+        raise HTTPException(
+            503,
+            detail={"mounts": False, "error": str(exc)},
+        ) from exc
     try:
         database_version = db.execute(text("select version()")).scalar_one()
         revision = db.execute(text("select version_num from alembic_version")).scalar_one()
@@ -429,10 +443,18 @@ def activities(
     page_size: int = Query(50, ge=1, le=200),
     event_type: str | None = None,
     verification_status: str | None = None,
+    include_rolled_up: bool = False,
     db: Session = Depends(get_db),
 ) -> dict:
     statement = select(ActivityEvent)
     count_statement = select(func.count()).select_from(ActivityEvent)
+    if not include_rolled_up:
+        visible = or_(
+            ActivityEvent.metadata_json["retention_state"].astext.is_(None),
+            ActivityEvent.metadata_json["retention_state"].astext != "rolled_up",
+        )
+        statement = statement.where(visible)
+        count_statement = count_statement.where(visible)
     if event_type:
         statement = statement.where(ActivityEvent.event_type == event_type)
         count_statement = count_statement.where(ActivityEvent.event_type == event_type)
@@ -570,8 +592,19 @@ def evaluate_candidate(candidate_id: uuid.UUID, db: Session = Depends(get_db)) -
 
 
 @app.post("/api/v1/knowledge/candidates/{candidate_id}/publish")
-def publish(candidate_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+def publish(
+    candidate_id: uuid.UUID,
+    request: CandidatePublish,
+    db: Session = Depends(get_db),
+) -> dict:
     row = _candidate_or_404(db, candidate_id)
+    row.metadata_json = {
+        **(row.metadata_json or {}),
+        "approval_policy": "human_review",
+        "approved_by": request.reviewer,
+        "approved_at": datetime.now(timezone.utc).isoformat(),
+        "approval_confirmation": request.confirmation,
+    }
     case, outcome = publish_candidate(db, row)
     materialized_path = None
     if case is not None:
@@ -580,6 +613,7 @@ def publish(candidate_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
             case,
             vault_dir=settings.vault_dir,
             pipeline_version=settings.pipeline_version,
+            content_language=settings.knowledge_content_language,
         )
     db.commit()
     return {
@@ -705,6 +739,7 @@ def materialize_knowledge_case(
         row,
         vault_dir=settings.vault_dir,
         pipeline_version=settings.pipeline_version,
+        content_language=settings.knowledge_content_language,
     )
     db.commit()
     return {

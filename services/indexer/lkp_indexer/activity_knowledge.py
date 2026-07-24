@@ -11,7 +11,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .case_pages import materialize_case
-from .knowledge import create_candidate, evaluate_gate, publish_candidate
+from .knowledge import (
+    create_candidate,
+    evaluate_gate,
+    evaluate_quality,
+    publish_candidate,
+)
 
 _PROJECT_PATH = re.compile(
     r"(?ix)(?:[a-z]:/dev/repos|/home/[^/]+/src)/(?P<project>[^/\\]+)"
@@ -68,6 +73,15 @@ _LABELED_CAUSE = re.compile(
 )
 _LABELED_SOLUTION = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:조치|해결|수정|solution|resolution|fix)\s*[:：]\s*(.+?)\s*$"
+)
+_LABELED_GOAL = re.compile(
+    r"(?im)^\s*(?:[-*]\s*)?(?:목표|문제|goal|problem)\s*[:：]\s*(.+?)\s*$"
+)
+_LABELED_APPROACH = re.compile(
+    r"(?im)^\s*(?:[-*]\s*)?(?:구현\s*방식|방식|접근|approach|implementation)\s*[:：]\s*(.+?)\s*$"
+)
+_LABELED_VERIFICATION = re.compile(
+    r"(?im)^\s*(?:[-*]\s*)?(?:검증|확인\s*결과|verification|validated\s*result)\s*[:：]\s*(.+?)\s*$"
 )
 
 
@@ -200,8 +214,11 @@ def summarize_turn(session: Session, stop: ActivityEvent) -> TurnSummary:
     )
 
 
-def _candidate_evidence(summary: TurnSummary) -> list[dict]:
+def _candidate_evidence(
+    summary: TurnSummary, content_language: str = "ko"
+) -> list[dict]:
     records: list[dict] = []
+    korean = content_language == "ko"
     for event in summary.change_events[:20]:
         files = [path for path in event.changed_files if _meaningful_file(path)]
         if not files:
@@ -210,9 +227,17 @@ def _candidate_evidence(summary: TurnSummary) -> list[dict]:
             {
                 "activity_id": event.id,
                 "evidence_type": "code_change",
-                "claim": f"Observed successful file mutation in {summary.project}",
+                "claim": (
+                    f"{summary.project}에서 성공한 파일 변경을 관측했습니다"
+                    if korean
+                    else f"Observed successful file mutation in {summary.project}"
+                ),
                 "locator": ", ".join(files[:8]),
-                "verified_value": f"{len(files)} changed file(s); tool exit 0",
+                "verified_value": (
+                    f"변경 파일 {len(files)}개, 도구 exit code 0"
+                    if korean
+                    else f"{len(files)} changed file(s); tool exit 0"
+                ),
                 "exit_code": 0,
                 "verified": True,
             }
@@ -222,9 +247,17 @@ def _candidate_evidence(summary: TurnSummary) -> list[dict]:
             {
                 "activity_id": event.id,
                 "evidence_type": "command_failure",
-                "claim": f"Observed {_safe_command_family(event.command)} failure",
+                "claim": (
+                    f"{_safe_command_family(event.command)} 실패를 관측했습니다"
+                    if korean
+                    else f"Observed {_safe_command_family(event.command)} failure"
+                ),
                 "locator": _safe_command_family(event.command),
-                "verified_value": f"observed exit_code={event.exit_code}",
+                "verified_value": (
+                    f"관측된 exit_code={event.exit_code}"
+                    if korean
+                    else f"observed exit_code={event.exit_code}"
+                ),
                 "exit_code": event.exit_code,
                 "verified": True,
             }
@@ -235,9 +268,15 @@ def _candidate_evidence(summary: TurnSummary) -> list[dict]:
             {
                 "activity_id": event.id,
                 "evidence_type": _event_evidence_type(event),
-                "claim": f"Observed successful {family}",
+                "claim": (
+                    f"성공한 {family} 실행을 관측했습니다"
+                    if korean
+                    else f"Observed successful {family}"
+                ),
                 "locator": family,
-                "verified_value": "observed exit_code=0",
+                "verified_value": (
+                    "관측된 exit_code=0" if korean else "observed exit_code=0"
+                ),
                 "exit_code": 0,
                 "verified": True,
             }
@@ -245,11 +284,20 @@ def _candidate_evidence(summary: TurnSummary) -> list[dict]:
     return records
 
 
-def _candidate_fields(summary: TurnSummary) -> dict[str, str]:
+def _candidate_fields(
+    summary: TurnSummary, content_language: str = "ko"
+) -> dict[str, str]:
     report_title = _first_line(summary.report, limit=140)
     instruction_title = _first_line(summary.instruction, limit=240)
-    title = report_title or instruction_title or f"{summary.project} verified change"
-    goal = instruction_title or report_title or f"Verified development work in {summary.project}"
+    korean = content_language == "ko"
+    title = report_title or instruction_title or (
+        f"{summary.project} 검증 작업" if korean else f"{summary.project} verified change"
+    )
+    goal = instruction_title or report_title or (
+        f"{summary.project}에서 검증된 개발 작업"
+        if korean
+        else f"Verified development work in {summary.project}"
+    )
     file_names = [
         PurePosixPath(path.replace("\\", "/")).name
         for path in summary.changed_files[:12]
@@ -257,20 +305,40 @@ def _candidate_fields(summary: TurnSummary) -> dict[str, str]:
     validation_families = sorted(
         {_safe_command_family(item.command) for item in summary.successful_events}
     )
-    approach = (
-        f"Observed implementation in {summary.project}: "
-        f"{len(summary.changed_files)} meaningful file(s) changed with successful tool exits."
-    )
-    solution = (
-        f"Changed artifacts: {', '.join(file_names)}. "
-        f"Observed validation: {', '.join(validation_families)}."
-    )
-    verified = (
-        f"{len(summary.change_events)} successful change event(s), "
-        f"{len(summary.successful_events)} successful validation event(s)"
-    )
+    if korean:
+        approach = (
+            f"{summary.project}에서 의미 있는 파일 {len(summary.changed_files)}개의 "
+            "성공한 변경은 확인됐지만, 재사용 가능한 원인이나 구현 결정은 "
+            "아직 구조화되지 않았습니다."
+        )
+        solution = (
+            f"변경 파일: {', '.join(file_names)}. "
+            f"관측된 검증: {', '.join(validation_families)}. "
+            "이 목록만으로 정식 지식 사례를 발행하지 않습니다."
+        )
+        verified = (
+            f"성공한 변경 이벤트 {len(summary.change_events)}건, "
+            f"성공한 검증 이벤트 {len(summary.successful_events)}건"
+        )
+    else:
+        approach = (
+            f"Observed implementation in {summary.project}: "
+            f"{len(summary.changed_files)} meaningful file(s) changed with successful tool exits."
+        )
+        solution = (
+            f"Changed artifacts: {', '.join(file_names)}. "
+            f"Observed validation: {', '.join(validation_families)}."
+        )
+        verified = (
+            f"{len(summary.change_events)} successful change event(s), "
+            f"{len(summary.successful_events)} successful validation event(s)"
+        )
     if summary.failed_events:
-        verified += f", {len(summary.failed_events)} observed failure event(s)"
+        verified += (
+            f", 관측된 실패 이벤트 {len(summary.failed_events)}건"
+            if korean
+            else f", {len(summary.failed_events)} observed failure event(s)"
+        )
     return {
         "title": f"[{summary.project}] {title}"[:300],
         "problem": goal,
@@ -315,20 +383,35 @@ def finalize_stop(
         stop.metadata_json = metadata
         return None, "ACTIVITY_ONLY"
 
-    fields = _candidate_fields(summary)
+    content_language = settings.knowledge_content_language
+    fields = _candidate_fields(summary, content_language)
     category = "error_resolution" if summary.failed_events else "implementation"
     labeled_cause = _LABELED_CAUSE.search(summary.report)
     labeled_solution = _LABELED_SOLUTION.search(summary.report)
+    labeled_goal = _LABELED_GOAL.search(summary.report)
+    labeled_approach = _LABELED_APPROACH.search(summary.report)
+    labeled_verification = _LABELED_VERIFICATION.search(summary.report)
+    structured_knowledge = False
     if category == "error_resolution" and labeled_cause and labeled_solution:
         fields["root_cause"] = labeled_cause.group(1)[:2000]
         fields["solution"] = labeled_solution.group(1)[:4000]
+        structured_knowledge = True
+    elif (
+        category == "implementation"
+        and labeled_goal
+        and labeled_approach
+        and labeled_verification
+    ):
+        fields["problem"] = labeled_goal.group(1)[:2000]
+        fields["symptom"] = labeled_goal.group(1)[:2000]
+        fields["root_cause"] = labeled_approach.group(1)[:2000]
+        fields["solution"] = labeled_approach.group(1)[:4000]
+        fields["verified_result"] = labeled_verification.group(1)[:4000]
+        structured_knowledge = True
     auto_publish = bool(
         _COMPLETION.search(summary.report)
         and not _PROGRESS_LEAD.search(summary.report)
-        and (
-            category == "implementation"
-            or bool(labeled_cause and labeled_solution)
-        )
+        and structured_knowledge
     )
     candidate = create_candidate(
         session,
@@ -340,10 +423,13 @@ def finalize_stop(
         solution=fields["solution"],
         reported_result=summary.report[:16000],
         verified_result=fields["verified_result"],
-        evidence=_candidate_evidence(summary),
+        evidence=_candidate_evidence(summary, content_language),
         metadata={
             "auto_generated": True,
             "auto_publish_eligible": auto_publish,
+            "structured_knowledge": structured_knowledge,
+            "content_language": content_language,
+            "approval_policy": "human_review",
             "extractor": "deterministic-activity-v1",
             "project": summary.project,
             "source_session_id": stop.session_id,
@@ -354,7 +440,16 @@ def finalize_stop(
     )
     gate = evaluate_gate(session, candidate)
     outcome = gate
-    if gate == "VERIFIED" and auto_publish and settings.knowledge_auto_publish:
+    quality_status, quality_reasons = evaluate_quality(candidate)
+    if gate == "VERIFIED" and quality_status != "PASS":
+        candidate.status = "needs_review"
+        outcome = "NEEDS_REVIEW"
+    if (
+        gate == "VERIFIED"
+        and quality_status == "PASS"
+        and auto_publish
+        and settings.knowledge_auto_publish
+    ):
         case, outcome = publish_candidate(session, candidate)
         if case is not None:
             materialize_case(
@@ -362,6 +457,7 @@ def finalize_stop(
                 case,
                 vault_dir=settings.vault_dir,
                 pipeline_version=settings.pipeline_version,
+                content_language=content_language,
             )
 
     metadata["knowledge_pipeline"] = {
@@ -369,6 +465,9 @@ def finalize_stop(
         "candidate_id": str(candidate.id),
         "outcome": outcome,
         "auto_publish_eligible": auto_publish,
+        "quality_gate_status": quality_status,
+        "quality_gate_reasons": quality_reasons,
+        "approval_policy": "human_review",
     }
     stop.metadata_json = metadata
     return candidate, outcome
