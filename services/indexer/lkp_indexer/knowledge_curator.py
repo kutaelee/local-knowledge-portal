@@ -521,6 +521,9 @@ def qualify_provider(
                 "passed": actual == expected,
                 "reasons": reasons,
                 "article_chars": len(article),
+                "decision": draft.decision,
+                "decision_reason": draft.decision_reason,
+                "article_markdown": article,
             }
         )
     passed = all(item["passed"] for item in results)
