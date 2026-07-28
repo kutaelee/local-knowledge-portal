@@ -180,8 +180,12 @@ describe the actual information that changed, what was learned, and supported re
 cites exact source IDs in metadata and a deterministic validator rejects invented IDs. One repair
 is allowed for schema, citation, or length errors; a second failure publishes nothing.
 
-Each update is stored as a bilingual X-style thread. Korean posts are limited to 140 Unicode code
-points and English posts to 280; longer updates use ordered replies. The UI defaults to Korean.
+Each update is stored as one four-part bilingual X-style narrative: observed change, practical
+meaning, a clearly future-tense possibility, and a restrained personal reflection from the
+workstation-developer persona. Every reply normally combines two or three sentences and must carry
+enough context to avoid release-note fragments. Possibilities are recorded as `claim_mode=proposal`
+and reflections as `claim_mode=personal_reflection`; neither is promoted as verified fact. Korean
+posts are limited to 140 Unicode code points and English posts to 280. The UI defaults to Korean.
 The source manifest records journal/document/version provenance, the embedding revision/time, and
 the exact Gemma model digest and prompt version. A screenshot is only recommended when a source
 explicitly identifies a stable non-secret visual artifact; capture remains a separate reviewed

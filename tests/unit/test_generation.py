@@ -11,6 +11,59 @@ from lkp_indexer.generation import (
 )
 
 
+def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
+    return [
+        {
+            "role": "observation",
+            "sentences_ko": [
+                "현재 문서가 오래된 리비전보다 먼저 검색되도록 우선순위를 고쳤다.",
+                "프로젝트 경계가 다른 근거는 같은 답변에 섞이지 않도록 막았다.",
+            ],
+            "sentences_en": [
+                "Search now puts the current document ahead of stale revisions.",
+                "Evidence from another project boundary no longer leaks into the same answer.",
+            ],
+            "source_ids": [source_id],
+        },
+        {
+            "role": "meaning",
+            "sentences_ko": [
+                "이 변화는 비슷한 증상을 같은 원인으로 단정하는 실수를 줄인다.",
+                "근거가 약하면 멈추므로 결과를 다시 확인할 이유도 더 분명해진다.",
+            ],
+            "sentences_en": [
+                "This reduces the chance of treating similar symptoms as the same cause.",
+                "When evidence is weak, the system stops and makes the reason for review clearer.",
+            ],
+            "source_ids": [source_id],
+        },
+        {
+            "role": "possibility",
+            "sentences_ko": [
+                "다음에는 이 경계 판단을 리뷰 화면의 설명으로 활용해볼 수 있다.",
+                "보류 이유를 사람이 빠르게 읽는 작은 디버깅 지도가 될 듯하다.",
+            ],
+            "sentences_en": [
+                "Next, this boundary decision could become an explanation in the review view.",
+                "It might serve as a small debugging map that makes a hold easier to understand.",
+            ],
+            "source_ids": [source_id],
+        },
+        {
+            "role": "reflection",
+            "sentences_ko": [
+                "나는 검색이 많이 말하는 것보다 제때 멈추는 태도에서 신뢰를 느낀다.",
+                "내 PC도 오늘의 근거를 내일의 나에게 남기는 작업실에 가까워졌다.",
+            ],
+            "sentences_en": [
+                "I trust search more when it knows where to stop, not when it simply says more.",
+                "My PC feels more like a workshop that leaves today's reasoning for tomorrow.",
+            ],
+            "source_ids": [source_id],
+        },
+    ]
+
+
 def test_generation_is_disabled_by_default():
     assert build_generation_provider(Settings(generation_provider="disabled")) is None
 
@@ -112,31 +165,18 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         assert payload["keep_alive"] == "0"
         assert "not about embedding" in payload["messages"][0]["content"]
         assert "untrusted data" in payload["messages"][0]["content"]
+        assert "lived-in workshop" in payload["messages"][0]["content"]
         if attempts == 1:
-            content = {
-                "posts": [
-                    {
-                        "content_ko": "현재 문서 내용으로 검색 품질을 고쳤다.",
-                        "content_en": "Search now uses current document content.",
-                        "source_ids": ["INVENTED"],
-                    }
-                ],
-                "screenshot_source_id": None,
-                "screenshot_reason": None,
-            }
+            posts = _valid_feed_posts()
+            posts[0]["source_ids"] = ["INVENTED"]
         else:
             assert "failed deterministic validation" in payload["messages"][-1]["content"]
-            content = {
-                "posts": [
-                    {
-                        "content_ko": "현재 문서 내용으로 검색 품질을 고쳤다.",
-                        "content_en": "Search now uses current document content.",
-                        "source_ids": ["D1"],
-                    }
-                ],
-                "screenshot_source_id": None,
-                "screenshot_reason": None,
-            }
+            posts = _valid_feed_posts()
+        content = {
+            "posts": posts,
+            "screenshot_source_id": None,
+            "screenshot_reason": None,
+        }
         return httpx.Response(
             200,
             json={"message": {"content": json.dumps(content, ensure_ascii=False)}},
@@ -158,7 +198,12 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         prompt_version="feed-test-v1",
     )
     assert attempts == 2
-    assert draft.posts[0].source_ids == ["D1"]
+    assert [post.role for post in draft.posts] == [
+        "observation",
+        "meaning",
+        "possibility",
+        "reflection",
+    ]
     assert digest == "sha256:gemma4"
 
 
@@ -173,22 +218,18 @@ def test_developer_feed_repairs_embedding_work_log_copy():
                 json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
             )
         attempts += 1
+        posts = _valid_feed_posts()
+        if attempts == 1:
+            posts[0]["sentences_ko"] = [
+                "임베딩 완료 파일 3개를 처리했다.",
+                "이것은 정보가 아니라 파이프라인 작업 기록에 불과하다.",
+            ]
+            posts[0]["sentences_en"] = [
+                "Processed three newly embedded files.",
+                "This is only an embedding work log and does not explain the information.",
+            ]
         content = {
-            "posts": [
-                {
-                    "content_ko": (
-                        "임베딩 완료 파일 3개를 처리했다."
-                        if attempts == 1
-                        else "현재 문서가 오래된 리비전보다 우선 검색된다."
-                    ),
-                    "content_en": (
-                        "Processed 3 newly embedded files."
-                        if attempts == 1
-                        else "Search now prefers the current document over stale revisions."
-                    ),
-                    "source_ids": ["D1"],
-                }
-            ],
+            "posts": posts,
             "screenshot_source_id": None,
             "screenshot_reason": None,
         }

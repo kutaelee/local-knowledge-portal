@@ -286,6 +286,14 @@ def _add_thread(
             source_manifest_json={
                 **manifest,
                 "post_source_ids": message.source_ids,
+                "editorial_role": message.role,
+                "claim_mode": (
+                    "proposal"
+                    if message.role == "possibility"
+                    else "personal_reflection"
+                    if message.role == "reflection"
+                    else "evidence_bound"
+                ),
             },
             source_embedding_from=embedded_from,
             source_embedding_to=embedded_to,
@@ -304,7 +312,7 @@ def _provider(settings: Settings) -> OllamaGenerationProvider:
         settings.developer_feed_model,
         settings.developer_feed_model_digest,
         settings.developer_feed_timeout_seconds,
-        temperature=0.2,
+        temperature=settings.developer_feed_temperature,
         context_window=settings.developer_feed_context_window,
         keep_alive="0",
     )
@@ -368,6 +376,10 @@ def publish_once(
         payload = _bounded_payload(
             {
                 "post_type": "information_update",
+                "editorial_intent": (
+                    "Tell one connected story: observed change, practical meaning, "
+                    "a clearly proposed new use or experiment, and a personal reflection."
+                ),
                 "window": {
                     "embedded_from": batch.embedded_from.isoformat(),
                     "embedded_to": batch.embedded_to.isoformat(),
@@ -467,6 +479,10 @@ def publish_once(
                 {
                     "post_type": "daily_summary",
                     "local_date": local_date,
+                    "editorial_intent": (
+                        "Make a rich daily narrative, not a changelog: connect the day's work, "
+                        "explain its practical meaning, propose one next use, and close personally."
+                    ),
                     "sources": sources,
                 },
                 settings.developer_feed_max_input_chars,
@@ -480,14 +496,15 @@ def publish_once(
             draft = DeveloperFeedDraft(
                 posts=[
                     {
-                        "content_ko": (
-                            f"{local_date} 오늘은 새로 확인된 프로젝트 정보가 없어 "
-                            "정리글만 남긴다. 근거 없는 진행 상황은 덧붙이지 않았다."
-                        ),
-                        "content_en": (
-                            f"{local_date}: no new project information was verified today. "
-                            "Closing the daily note without inventing progress."
-                        ),
+                        "role": "reflection",
+                        "sentences_ko": [
+                            f"{local_date} 오늘은 새로 확인된 프로젝트 정보가 없다.",
+                            "근거 없는 진행 상황은 덧붙이지 않고 조용히 기록을 닫는다.",
+                        ],
+                        "sentences_en": [
+                            f"{local_date}: no new project information was verified today.",
+                            "I am closing the daily note without inventing progress.",
+                        ],
                         "source_ids": ["NO_UPDATE"],
                     }
                 ]
