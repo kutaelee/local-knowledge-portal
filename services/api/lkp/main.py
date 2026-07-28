@@ -2010,6 +2010,8 @@ def developer_feed(
 
 @app.get("/api/v1/developer-feed/status")
 def developer_feed_status(db: Session = Depends(get_db)) -> dict:
+    from lkp_indexer.developer_feed import inspect_due
+
     latest_activity = db.scalar(
         select(func.max(DeveloperFeedPost.created_at)).where(
             DeveloperFeedPost.post_type == "activity"
@@ -2030,15 +2032,21 @@ def developer_feed_status(db: Session = Depends(get_db)) -> dict:
     )
     if next_daily <= local_now:
         next_daily += timedelta(days=1)
+    due = inspect_due(db, settings, now=datetime.now(timezone.utc))
     return {
         "enabled": settings.developer_feed_enabled,
+        "schedule_interval_minutes": settings.developer_feed_interval_minutes,
         "timezone": settings.developer_feed_timezone,
         "daily_hour": settings.developer_feed_daily_hour,
         "next_daily_at": next_daily,
         "latest_activity_at": latest_activity,
         "latest_daily_at": latest_daily,
+        **due,
         "embedding_revision": settings.embedding_revision,
         "persona_version": settings.developer_feed_persona_version,
+        "generator_model": settings.developer_feed_model,
+        "generator_model_digest": settings.developer_feed_model_digest,
+        "prompt_version": settings.developer_feed_prompt_version,
     }
 
 

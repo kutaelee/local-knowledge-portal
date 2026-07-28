@@ -97,6 +97,119 @@ def test_ollama_generation_fails_closed_on_digest_change():
         provider.generate("source")
 
 
+def test_developer_feed_uses_content_prompt_and_repairs_once():
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        attempts += 1
+        payload = json.loads(request.content)
+        assert payload["keep_alive"] == "0"
+        assert "not about embedding" in payload["messages"][0]["content"]
+        assert "untrusted data" in payload["messages"][0]["content"]
+        if attempts == 1:
+            content = {
+                "posts": [
+                    {
+                        "content_ko": "현재 문서 내용으로 검색 품질을 고쳤다.",
+                        "content_en": "Search now uses current document content.",
+                        "source_ids": ["INVENTED"],
+                    }
+                ],
+                "screenshot_source_id": None,
+                "screenshot_reason": None,
+            }
+        else:
+            assert "failed deterministic validation" in payload["messages"][-1]["content"]
+            content = {
+                "posts": [
+                    {
+                        "content_ko": "현재 문서 내용으로 검색 품질을 고쳤다.",
+                        "content_en": "Search now uses current document content.",
+                        "source_ids": ["D1"],
+                    }
+                ],
+                "screenshot_source_id": None,
+                "screenshot_reason": None,
+            }
+        return httpx.Response(
+            200,
+            json={"message": {"content": json.dumps(content, ensure_ascii=False)}},
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    draft, digest = provider.write_developer_feed(
+        {
+            "post_type": "information_update",
+            "sources": [{"id": "D1", "content": "current document content"}],
+        },
+        prompt_version="feed-test-v1",
+    )
+    assert attempts == 2
+    assert draft.posts[0].source_ids == ["D1"]
+    assert digest == "sha256:gemma4"
+
+
+def test_developer_feed_repairs_embedding_work_log_copy():
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        attempts += 1
+        content = {
+            "posts": [
+                {
+                    "content_ko": (
+                        "임베딩 완료 파일 3개를 처리했다."
+                        if attempts == 1
+                        else "현재 문서가 오래된 리비전보다 우선 검색된다."
+                    ),
+                    "content_en": (
+                        "Processed 3 newly embedded files."
+                        if attempts == 1
+                        else "Search now prefers the current document over stale revisions."
+                    ),
+                    "source_ids": ["D1"],
+                }
+            ],
+            "screenshot_source_id": None,
+            "screenshot_reason": None,
+        }
+        return httpx.Response(200, json={"message": {"content": json.dumps(content)}})
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    draft, _ = provider.write_developer_feed(
+        {"sources": [{"id": "D1", "content": "current document"}]},
+        prompt_version="feed-test-v1",
+    )
+    assert attempts == 2
+    assert "임베딩" not in draft.posts[0].content_ko
+
+
 def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/tags":

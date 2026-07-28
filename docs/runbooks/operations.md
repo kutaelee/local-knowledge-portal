@@ -169,30 +169,39 @@ must stop Windows Ollama first and preserve both model stores; never delete the 
 
 ### Evidence-bound developer feed
 
-`developer-feed` is a CPU-only default-profile service. Every five minutes it looks for verified
-project journal entries whose changed files have a current `chunk_embedding` in the configured
-embedding revision. The global `source_embedding_to` cursor means an activity is posted only when
-its evidence was embedded after the last activity post. A delayed embedding can therefore be
-picked up on a later poll without replaying an already published journal.
+`developer-feed` is a one-shot GPU-queued editor, not an always-on service. Task Scheduler invokes
+`publish-developer-feed.ps1` every three hours. Its read-only status preflight submits no GPU job
+when there is neither newly embedded verified information nor a daily summary due. An admitted job
+uses `gemma4:12b` only for the bounded edit and unloads it in `finally`.
 
-Each activity is stored as a bilingual X-style thread. Korean posts are limited to 140 Unicode
-code points and English posts to 280. Content beyond either limit is preserved in ordered replies,
-not truncated. The UI defaults to Korean and switches without regenerating content.
-The source manifest records journal, document, version, embedding revision/time, and passing
-execution-check counts. Raw conversation text is never copied into the feed.
+The editor receives redacted verified journal facts plus excerpts from the current embedded document
+versions. Its prompt explicitly prohibits embedding/index/model-operation narration: posts must
+describe the actual information that changed, what was learned, and supported results. Each post
+cites exact source IDs in metadata and a deterministic validator rejects invented IDs. One repair
+is allowed for schema, citation, or length errors; a second failure publishes nothing.
 
-At 18:00 `Asia/Seoul`, the service creates the idempotent `daily:YYYY-MM-DD` summary. If it restarts
-after 18:00, the same-day summary is caught up once. A day with no new embedded verified work still
-gets a transparent no-progress closeout.
+Each update is stored as a bilingual X-style thread. Korean posts are limited to 140 Unicode code
+points and English posts to 280; longer updates use ordered replies. The UI defaults to Korean.
+The source manifest records journal/document/version provenance, the embedding revision/time, and
+the exact Gemma model digest and prompt version. A screenshot is only recommended when a source
+explicitly identifies a stable non-secret visual artifact; capture remains a separate reviewed
+action.
+
+At 18:00 `Asia/Seoul`, the same one-shot entrypoint creates the idempotent
+`daily:YYYY-MM-DD` synthesis from the day's actual source catalog. A day with no verified update
+gets a deterministic transparent closeout without loading the model.
 
 ```powershell
+.\scripts\install-developer-feed-schedule.ps1
+.\scripts\publish-developer-feed.ps1
 Invoke-RestMethod http://127.0.0.1:8010/api/v1/developer-feed/status
 Invoke-RestMethod 'http://127.0.0.1:8010/api/v1/developer-feed?language=ko'
 ```
 
-Rollback is application-safe: stop `developer-feed` and redeploy the prior API/web image. Existing
-feed rows are derived, non-authoritative records and may remain unread by the prior version. Do not
-downgrade the database during an ordinary rollback.
+Rollback is application-safe: disable `\LocalKnowledgePortal\PublishInformationFeed`, redeploy the
+prior API/web image, and restore the prior schedule only if the old persistent service is desired.
+Feed rows are derived, non-authoritative records. Do not downgrade the database during an ordinary
+rollback.
 
 ### Current GPU-queued evidence editor
 

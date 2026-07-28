@@ -1,50 +1,47 @@
-from lkp_indexer.developer_feed import (
-    _daily_copy,
-    _evidence_copy,
-    _expand_messages,
-    _split_text,
-    _work_copy,
-)
+from lkp.settings import Settings
+from lkp_indexer.developer_feed import _bounded_payload
+from lkp_indexer.generation import DeveloperFeedDraft
 
 
-def test_activity_thread_is_bilingual_and_x_sized():
-    messages = [
-        _work_copy(
-            "local-knowledge-portal",
-            7,
-            3,
-            ["verified_failure_and_recovery"],
-        ),
-        _evidence_copy(
-            [
-                "services/indexer/developer_feed.py",
-                "services/api/main.py",
-                "apps/web/knowledge-views.tsx",
-                "apps/web/globals.css",
-                "tests/test_developer_feed.py",
-            ],
-            3,
-        ),
-    ]
-    expanded = _expand_messages(messages)
-    assert all(0 < len(ko) <= 140 and 0 < len(en) <= 280 for ko, en in expanded)
-    assert "오류를 복구한" in messages[0][0]
-    assert "recovered a verified failure" in messages[0][1].casefold()
-    assert "외 1개" in messages[1][0]
-    assert "+1 more" in messages[1][1]
+def test_feed_contract_enforces_x_limits_and_reply_thread():
+    draft = DeveloperFeedDraft(
+        posts=[
+            {
+                "content_ko": "검색 결과가 오래된 문서보다 현재 리비전을 우선하도록 바꿨다.",
+                "content_en": "Search now prefers the current revision over stale documents.",
+                "source_ids": ["J1", "D2"],
+            },
+            {
+                "content_ko": "경계 사례에서도 근거가 없으면 답하지 않는다.",
+                "content_en": "Boundary cases now return no answer when evidence is absent.",
+                "source_ids": ["J1"],
+            },
+        ]
+    )
+    assert len(draft.posts) == 2
+    assert all(len(post.content_ko) <= 140 for post in draft.posts)
+    assert all(len(post.content_en) <= 280 for post in draft.posts)
 
 
-def test_daily_wrap_is_mandatory_even_without_new_embedded_work():
-    ko, en = _daily_copy("2026-07-28", 0, [], 0)
-    assert "새로 임베딩되고 검증된 작업은 없었다" in ko
-    assert "no newly embedded, verified work" in en
-    assert len(ko) <= 140
-    assert len(en) <= 280
+def test_payload_budget_drops_document_excerpts_before_verified_journal():
+    payload = {
+        "post_type": "information_update",
+        "sources": [
+            {"id": "J1", "source_type": "verified_project_journal", "change": "kept"},
+            {
+                "id": "D2",
+                "source_type": "current_embedded_document",
+                "excerpts": [{"content": "x" * 5000}],
+            },
+        ],
+    }
+    bounded = _bounded_payload(payload, 1000)
+    assert [source["id"] for source in bounded["sources"]] == ["J1"]
 
 
-def test_long_post_becomes_lossless_reply_parts():
-    source = " ".join(f"근거{i}" for i in range(80))
-    parts = _split_text(source, 140)
-    assert len(parts) > 1
-    assert all(len(part) <= 140 for part in parts)
-    assert " ".join(parts) == source
+def test_feed_defaults_to_three_hour_gemma_batch():
+    settings = Settings()
+    assert settings.developer_feed_interval_minutes == 180
+    assert settings.developer_feed_daily_hour == 18
+    assert settings.developer_feed_model == "gemma4:12b"
+    assert settings.developer_feed_persona_version.endswith("-content")

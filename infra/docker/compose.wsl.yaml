@@ -260,10 +260,25 @@ services:
 
   developer-feed:
     <<: *app
+    profiles: ["manual-developer-feed"]
     command: ["python", "-m", "lkp_indexer.developer_feed"]
-    cpus: "${LKP_DEVELOPER_FEED_CPUS:-0.25}"
-    mem_limit: 384m
-    pids_limit: 96
+    restart: "no"
+    cpus: "${LKP_DEVELOPER_FEED_CPUS:-0.5}"
+    mem_limit: 768m
+    pids_limit: 128
+    environment:
+      LKP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      LKP_SOURCE_ROOTS_CONFIG: /config/source-roots.yaml
+      LKP_SETTINGS_CONFIG: /config/settings.yaml
+      LKP_RUNTIME_DIR: /data/runtime
+      LKP_GENERATION_BASE_URL: ${LKP_GENERATION_BASE_URL:-http://host.docker.internal:11434}
+      LKP_DEVELOPER_FEED_MODEL: ${LKP_DEVELOPER_FEED_MODEL:-gemma4:12b}
+      LKP_DEVELOPER_FEED_MODEL_DIGEST: ${LKP_DEVELOPER_FEED_MODEL_DIGEST:-4eb23ef187e2c5462566d6a1d3bbbc2f1346d0b4327cbb66d58fffbcc9b2b05c}
+    volumes:
+      - ${LKP_CONFIG_ROOT}:/config:ro
+      - ${LKP_DATA_ROOT}:/data
+      - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
