@@ -290,8 +290,8 @@ def _add_thread(
                 "claim_mode": (
                     "proposal"
                     if message.role == "possibility"
-                    else "personal_reflection"
-                    if message.role == "reflection"
+                    else "personal_aside"
+                    if message.role == "afterthought"
                     else "evidence_bound"
                 ),
             },
@@ -319,7 +319,10 @@ def _provider(settings: Settings) -> OllamaGenerationProvider:
 
 
 def _bounded_payload(payload: dict[str, Any], max_chars: int) -> dict[str, Any]:
-    while len(json.dumps(payload, ensure_ascii=False)) > max_chars:
+    def size() -> int:
+        return len(json.dumps(payload, ensure_ascii=False))
+
+    while size() > max_chars:
         documents = [
             source
             for source in payload["sources"]
@@ -329,6 +332,49 @@ def _bounded_payload(payload: dict[str, Any], max_chars: int) -> dict[str, Any]:
             payload["sources"].remove(documents[-1])
             continue
         break
+    protected_keys = {
+        "id",
+        "source_type",
+        "project",
+        "filename",
+        "content_hash",
+        "occurred_at",
+        "embedded_at",
+        "lines",
+    }
+
+    def mutable_strings(
+        value: Any,
+    ) -> list[tuple[int, dict | list, str | int]]:
+        candidates: list[tuple[int, dict | list, str | int]] = []
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if isinstance(item, str):
+                    if key not in protected_keys and len(item) > 64:
+                        candidates.append((len(item), value, key))
+                else:
+                    candidates.extend(mutable_strings(item))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                if isinstance(item, str):
+                    if len(item) > 64:
+                        candidates.append((len(item), value, index))
+                else:
+                    candidates.extend(mutable_strings(item))
+        return candidates
+
+    while size() > max_chars:
+        candidates = mutable_strings(payload)
+        if not candidates:
+            raise ValueError(
+                "developer feed payload cannot fit the configured character budget "
+                "without dropping source identity"
+            )
+        length, container, key = max(candidates, key=lambda item: item[0])
+        overflow = size() - max_chars
+        target = max(64, length - max(64, min(length - 64, overflow + 8)))
+        original = str(container[key])
+        container[key] = f"{original[: target - 1].rstrip()}…"
     return payload
 
 
@@ -378,7 +424,7 @@ def publish_once(
                 "post_type": "information_update",
                 "editorial_intent": (
                     "Tell one connected story: observed change, practical meaning, "
-                    "a clearly proposed new use or experiment, and a personal reflection."
+                    "a clearly proposed new use or experiment, and a casual afterthought."
                 ),
                 "window": {
                     "embedded_from": batch.embedded_from.isoformat(),
@@ -481,7 +527,7 @@ def publish_once(
                     "local_date": local_date,
                     "editorial_intent": (
                         "Make a rich daily narrative, not a changelog: connect the day's work, "
-                        "explain its practical meaning, propose one next use, and close personally."
+                        "explain its practical meaning, propose one next use, and close casually."
                     ),
                     "sources": sources,
                 },
@@ -496,7 +542,7 @@ def publish_once(
             draft = DeveloperFeedDraft(
                 posts=[
                     {
-                        "role": "reflection",
+                        "role": "afterthought",
                         "sentences_ko": [
                             f"{local_date} 오늘은 새로 확인된 프로젝트 정보가 없다.",
                             "근거 없는 진행 상황은 덧붙이지 않고 조용히 기록을 닫는다.",

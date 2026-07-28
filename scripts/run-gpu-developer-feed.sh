@@ -3,8 +3,8 @@
 # Ollama daemon and releases Gemma immediately after the bounded batch.
 set -eu
 
-docker compose \
+LKP_REPO_PATH=/mnt/c/Dev/Repos/local-knowledge-portal docker compose \
   --env-file /mnt/c/Docker/local-knowledge-portal/.env \
-  -f /home/kutae/src/local-knowledge-portal/infra/docker/compose.wsl.yaml \
+  -f /mnt/c/Dev/Repos/local-knowledge-portal/infra/docker/compose.wsl.yaml \
   --profile manual-developer-feed \
   run --rm --no-deps developer-feed

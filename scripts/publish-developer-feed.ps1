@@ -45,6 +45,14 @@ if ($existing.Count -gt 0) {
 }
 
 $gpuq = Get-Command "gpuq" -ErrorAction Stop
+$linuxCommand = @(
+    "LKP_REPO_PATH=/mnt/c/Dev/Repos/local-knowledge-portal",
+    "docker", "compose",
+    "--env-file", "/mnt/c/Docker/local-knowledge-portal/.env",
+    "-f", "/mnt/c/Dev/Repos/local-knowledge-portal/infra/docker/compose.wsl.yaml",
+    "--profile", "manual-developer-feed",
+    "run", "--rm", "--no-deps", "developer-feed"
+) -join " "
 $command = @(
     "run",
     "--vram", [string]$VramMiB,
@@ -55,7 +63,7 @@ $command = @(
     "--workload", $workload,
     "--",
     "wsl.exe", "-d", "Ubuntu", "--",
-    "bash", "/home/kutae/src/local-knowledge-portal/scripts/run-gpu-developer-feed.sh"
+    "bash", "-lc", $linuxCommand
 )
 
 & $gpuq.Source @command

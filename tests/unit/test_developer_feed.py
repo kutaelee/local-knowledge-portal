@@ -1,3 +1,5 @@
+import json
+
 from lkp.settings import Settings
 from lkp_indexer.developer_feed import _bounded_payload
 from lkp_indexer.generation import DeveloperFeedDraft
@@ -46,16 +48,14 @@ def test_feed_contract_enforces_x_limits_and_reply_thread():
                 "source_ids": ["J1"],
             },
             {
-                "role": "reflection",
+                "role": "afterthought",
                 "sentences_ko": [
-                    "나는 검색이 많이 말하는 것보다 제때 멈추는 태도에서 더 신뢰를 느낀다.",
-                    "내 PC도 오늘의 판단 근거를 내일의 나에게 남기는 작업실에 가까워졌다.",
+                    "막상 써보니 답이 없는 이유가 보이는 쪽이 괜히 많이 말하는 것보다 편했다.",
+                    "다음에 비슷한 버그를 만나도 오늘처럼 한참 헤매지는 않을 것 같다.",
                 ],
                 "sentences_en": [
-                    "I trust search more when it knows where to stop, not when it "
-                    "simply says more.",
-                    "My PC feels a little more like a workshop "
-                    "that leaves today's reasoning for tomorrow.",
+                    "In practice, seeing why there is no answer feels better than extra noise.",
+                    "The next similar bug should involve less staring at the screen and wondering.",
                 ],
                 "source_ids": ["J1"],
             },
@@ -84,10 +84,34 @@ def test_payload_budget_drops_document_excerpts_before_verified_journal():
     assert [source["id"] for source in bounded["sources"]] == ["J1"]
 
 
+def test_payload_budget_compacts_journals_without_dropping_source_identity():
+    payload = {
+        "post_type": "information_update",
+        "sources": [
+            {
+                "id": f"J{index}",
+                "source_type": "verified_project_journal",
+                "project": "local-knowledge-portal",
+                "change": f"change-{index} " + ("설명 " * 500),
+                "resolution": "검증 결과 " * 100,
+            }
+            for index in range(1, 5)
+        ],
+    }
+    bounded = _bounded_payload(payload, 2400)
+    assert len(json.dumps(bounded, ensure_ascii=False)) <= 2400
+    assert [source["id"] for source in bounded["sources"]] == [
+        "J1",
+        "J2",
+        "J3",
+        "J4",
+    ]
+
+
 def test_feed_defaults_to_three_hour_gemma_batch():
     settings = Settings()
     assert settings.developer_feed_interval_minutes == 180
     assert settings.developer_feed_daily_hour == 18
     assert settings.developer_feed_model == "gemma4:12b"
-    assert settings.developer_feed_persona_version.endswith("-workshop")
-    assert settings.developer_feed_temperature == 0.45
+    assert settings.developer_feed_persona_version.endswith("-session-notes")
+    assert settings.developer_feed_temperature == 0.65

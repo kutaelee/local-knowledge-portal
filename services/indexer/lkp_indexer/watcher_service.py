@@ -79,7 +79,15 @@ def select_watch_mode(
     polling_roots: set[str],
 ) -> str:
     normalized = str(os.path.realpath(canonical_path))
-    return "polling" if force_polling or normalized in polling_roots else "native"
+    normalized_polling_roots = {
+        str(os.path.realpath(root))
+        for root in polling_roots
+    }
+    return (
+        "polling"
+        if force_polling or normalized in normalized_polling_roots
+        else "native"
+    )
 
 
 def _health(

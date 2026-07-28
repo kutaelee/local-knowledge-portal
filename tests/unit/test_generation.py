@@ -16,8 +16,8 @@ def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
         {
             "role": "observation",
             "sentences_ko": [
-                "현재 문서가 오래된 리비전보다 먼저 검색되도록 우선순위를 고쳤다.",
-                "프로젝트 경계가 다른 근거는 같은 답변에 섞이지 않도록 막았다.",
+                "현재 문서가 오래된 리비전보다 먼저 나오도록 검색 우선순위를 손봤어요.",
+                "다른 프로젝트 근거가 한 답변에 슬쩍 끼지 못하게 경계도 막았고요.",
             ],
             "sentences_en": [
                 "Search now puts the current document ahead of stale revisions.",
@@ -28,8 +28,8 @@ def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
         {
             "role": "meaning",
             "sentences_ko": [
-                "이 변화는 비슷한 증상을 같은 원인으로 단정하는 실수를 줄인다.",
-                "근거가 약하면 멈추므로 결과를 다시 확인할 이유도 더 분명해진다.",
+                "겉으로 비슷한 증상만 보고 같은 원인이라고 덥석 답할 일이 줄었어요.",
+                "근거가 약하면 멈추는 이유도 보여서 다시 볼 지점이 또렷해졌고요.",
             ],
             "sentences_en": [
                 "This reduces the chance of treating similar symptoms as the same cause.",
@@ -40,8 +40,8 @@ def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
         {
             "role": "possibility",
             "sentences_ko": [
-                "다음에는 이 경계 판단을 리뷰 화면의 설명으로 활용해볼 수 있다.",
-                "보류 이유를 사람이 빠르게 읽는 작은 디버깅 지도가 될 듯하다.",
+                "다음에는 이 경계 판단을 리뷰 화면 옆에 짧게 붙여볼까 해요.",
+                "왜 보류됐는지 바로 읽히는 작은 디버깅 지도로 써봐도 괜찮겠네요.",
             ],
             "sentences_en": [
                 "Next, this boundary decision could become an explanation in the review view.",
@@ -50,14 +50,14 @@ def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
             "source_ids": [source_id],
         },
         {
-            "role": "reflection",
+            "role": "afterthought",
             "sentences_ko": [
-                "나는 검색이 많이 말하는 것보다 제때 멈추는 태도에서 신뢰를 느낀다.",
-                "내 PC도 오늘의 근거를 내일의 나에게 남기는 작업실에 가까워졌다.",
+                "막상 써보니 답이 없는 이유가 보이는 쪽이 괜히 많이 말하는 것보다 편했다.",
+                "다음에 또 비슷한 버그를 만나도 오늘처럼 한참 헤매지는 않을 것 같다.",
             ],
             "sentences_en": [
-                "I trust search more when it knows where to stop, not when it simply says more.",
-                "My PC feels more like a workshop that leaves today's reasoning for tomorrow.",
+                "In practice, seeing why there is no answer feels better than getting extra noise.",
+                "The next similar bug should involve less staring at the screen and wondering.",
             ],
             "source_ids": [source_id],
         },
@@ -165,7 +165,9 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         assert payload["keep_alive"] == "0"
         assert "not about embedding" in payload["messages"][0]["content"]
         assert "untrusted data" in payload["messages"][0]["content"]
-        assert "lived-in workshop" in payload["messages"][0]["content"]
+        assert "jotting down" in payload["messages"][0]["content"]
+        assert "Draft Korean first" in payload["messages"][0]["content"]
+        assert "해요/했어요/됐네요" in payload["messages"][0]["content"]
         if attempts == 1:
             posts = _valid_feed_posts()
             posts[0]["source_ids"] = ["INVENTED"]
@@ -202,7 +204,7 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         "observation",
         "meaning",
         "possibility",
-        "reflection",
+        "afterthought",
     ]
     assert digest == "sha256:gemma4"
 
@@ -249,6 +251,250 @@ def test_developer_feed_repairs_embedding_work_log_copy():
     )
     assert attempts == 2
     assert "임베딩" not in draft.posts[0].content_ko
+
+
+def test_developer_feed_repairs_manifesto_tone():
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        attempts += 1
+        posts = _valid_feed_posts()
+        if attempts == 1:
+            posts[3]["sentences_ko"] = [
+                "도구는 우리의 주의력을 보호하는 울타리가 되어야 한다.",
+                "이것이 개발자가 지켜야 할 본질적인 가치라고 믿는다.",
+            ]
+            posts[3]["sentences_en"] = [
+                "Tools should serve as a fence that protects our attention.",
+                "I believe this is a core value every developer must defend.",
+            ]
+        content = {
+            "posts": posts,
+            "screenshot_source_id": None,
+            "screenshot_reason": None,
+        }
+        return httpx.Response(
+            200,
+            json={"message": {"content": json.dumps(content, ensure_ascii=False)}},
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    draft, _ = provider.write_developer_feed(
+        {"sources": [{"id": "D1", "content": "current document"}]},
+        prompt_version="feed-test-v1",
+    )
+    assert attempts == 2
+    assert "울타리" not in draft.posts[3].content_ko
+    assert draft.posts[3].role == "afterthought"
+
+
+def test_developer_feed_repairs_self_imposed_rule():
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        attempts += 1
+        posts = _valid_feed_posts()
+        if attempts == 1:
+            posts[3]["sentences_ko"] = [
+                "GPU를 오래 잡은 프로세스 때문에 잠깐 당황했어요.",
+                "앞으로는 서버와 연산 작업을 확실히 분리해서 관리해야겠어요.",
+            ]
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "posts": posts,
+                            "screenshot_source_id": None,
+                            "screenshot_reason": None,
+                        },
+                        ensure_ascii=False,
+                    )
+                }
+            },
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    draft, _ = provider.write_developer_feed(
+        {"sources": [{"id": "D1", "content": "current document"}]},
+        prompt_version="feed-test-v1",
+    )
+    assert attempts == 2
+    assert "해야겠" not in draft.posts[3].content_ko
+
+
+def test_developer_feed_repairs_formal_translated_korean():
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        attempts += 1
+        posts = _valid_feed_posts()
+        if attempts == 1:
+            posts[0]["sentences_ko"] = [
+                "최근 프로젝트의 데이터 정제 로직을 대폭 개선했습니다.",
+                "실제 의미를 담은 콘텐츠가 생성되도록 구조를 잡았습니다.",
+            ]
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "posts": posts,
+                            "screenshot_source_id": None,
+                            "screenshot_reason": None,
+                        },
+                        ensure_ascii=False,
+                    )
+                }
+            },
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    draft, _ = provider.write_developer_feed(
+        {"sources": [{"id": "D1", "content": "current document"}]},
+        prompt_version="feed-test-v1",
+    )
+    assert attempts == 2
+    assert "습니다" not in draft.posts[0].content_ko
+    assert "대폭 개선" not in draft.posts[0].content_ko
+
+
+def test_developer_feed_repairs_vague_product_prose():
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        attempts += 1
+        posts = _valid_feed_posts()
+        if attempts == 1:
+            posts[2]["sentences_ko"] = [
+                "단순 기록을 넘어선 소통 도구로 확장할 수 있는 가능성이 보이네요.",
+                "팀 전체의 가독성도 높일 수 있을 것 같아요.",
+            ]
+            posts[2]["sentences_en"] = [
+                "This could become a context-rich communication tool.",
+                "It may unlock potential across the whole team.",
+            ]
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "posts": posts,
+                            "screenshot_source_id": None,
+                            "screenshot_reason": None,
+                        },
+                        ensure_ascii=False,
+                    )
+                }
+            },
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    draft, _ = provider.write_developer_feed(
+        {"sources": [{"id": "D1", "content": "current document"}]},
+        prompt_version="feed-test-v1",
+    )
+    assert attempts == 2
+    assert "가능성이 보" not in draft.posts[2].content_ko
+    assert "context-rich" not in draft.posts[2].content_en
+
+
+def test_developer_feed_accepts_proposal_marker_in_one_localization():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        posts = _valid_feed_posts()
+        posts[2]["sentences_en"] = [
+            "The boundary decision appears beside each held result.",
+            "A short note beside it explains the relevant evidence.",
+        ]
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "posts": posts,
+                            "screenshot_source_id": None,
+                            "screenshot_reason": None,
+                        },
+                        ensure_ascii=False,
+                    )
+                }
+            },
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    draft, _ = provider.write_developer_feed(
+        {"sources": [{"id": "D1", "content": "current document"}]},
+        prompt_version="feed-test-v1",
+    )
+    assert draft.posts[2].role == "possibility"
 
 
 def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():
