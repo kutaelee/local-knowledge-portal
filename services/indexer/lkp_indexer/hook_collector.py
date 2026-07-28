@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
 import re
 import socket
 import time
@@ -13,11 +14,12 @@ from typing import Any
 from lkp.db import SessionLocal
 from lkp.models import ActivityEvent, Document, HookSpoolEvent, WorkerHeartbeat
 from lkp.settings import Settings, get_settings
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .activity_knowledge import finalize_pending_stops, project_from_paths
 from .activity_retention import roll_up_activity_details, roll_up_operational_details
+from .artifact_evidence import ARTIFACT_EVIDENCE_VERSION, verify_report_artifacts
 from .service_runtime import assert_mount_guards, service_pid
 
 _LOW_SIGNAL_PROMPTS = {
@@ -435,17 +437,107 @@ def activity_signal(
     return False, ["unsupported_activity_signal"]
 
 
+def _document_path_aliases(raw_path: str, cwd: str | None) -> tuple[str, ...]:
+    """Map host hook paths to the canonical read-only paths stored by the watcher."""
+
+    raw = raw_path.strip().strip('"').replace("\\", "/")
+    base = (cwd or "").strip().strip('"').replace("\\", "/")
+    if not re.match(r"^(?:[A-Za-z]:/|/|//)", raw) and base:
+        raw = f"{base.rstrip('/')}/{raw}"
+    raw = re.sub(r"/+", "/", raw)
+    aliases: list[str] = []
+
+    def add(value: str) -> None:
+        normalized = posixpath.normpath(value)
+        if normalized not in aliases:
+            aliases.append(normalized)
+
+    windows_repo = re.match(r"(?i)^[A-Za-z]:/Dev/Repos(?:/(.*))?$", raw)
+    if windows_repo:
+        suffix = windows_repo.group(1) or ""
+        add(f"/sources/windows-repositories/{suffix}")
+    mounted_windows_repo = re.match(r"(?i)^/mnt/c/Dev/Repos(?:/(.*))?$", raw)
+    if mounted_windows_repo:
+        suffix = mounted_windows_repo.group(1) or ""
+        add(f"/sources/windows-repositories/{suffix}")
+    wsl_unc = re.match(
+        r"(?i)^/(?:/)?wsl(?:\.localhost|\$)/[^/]+(?P<path>/.*)$",
+        raw,
+    )
+    if wsl_unc:
+        add(wsl_unc.group("path"))
+    if raw.startswith("/") and not wsl_unc:
+        add(raw)
+    return tuple(aliases)
+
+
 def _document_versions(session: Session, changed_files: list[str], cwd: str | None) -> list:
     versions = []
     for raw_path in changed_files:
-        path = Path(raw_path)
-        if not path.is_absolute() and cwd:
-            path = Path(cwd) / path
-        canonical = str(path.resolve(strict=False))
-        row = session.scalar(select(Document).where(Document.canonical_path == canonical))
+        aliases = _document_path_aliases(raw_path, cwd)
+        if not aliases:
+            continue
+        row = session.scalar(
+            select(Document).where(Document.canonical_path.in_(aliases))
+        )
         if row and row.current_version_id and row.current_version_id not in versions:
             versions.append(row.current_version_id)
     return versions
+
+
+def backfill_activity_document_versions(session: Session) -> dict[str, int]:
+    """Relink historical host-path mutations after a source root is reconciled."""
+
+    considered = 0
+    linked = 0
+    rows = session.scalars(
+        select(ActivityEvent).where(
+            ActivityEvent.event_type == "PostToolUse",
+            func.cardinality(ActivityEvent.document_version_ids) == 0,
+            func.cardinality(ActivityEvent.changed_files) > 0,
+        )
+    )
+    for event in rows:
+        considered += 1
+        versions = _document_versions(session, list(event.changed_files or []), event.cwd)
+        if not versions:
+            continue
+        event.document_version_ids = versions
+        linked += 1
+    session.flush()
+    return {"considered": considered, "linked": linked}
+
+
+def backfill_activity_report_artifacts(session: Session) -> dict[str, int]:
+    """Verify historical report-linked assets once under the current verifier."""
+
+    considered = 0
+    with_artifacts = 0
+    for event in session.scalars(
+        select(ActivityEvent).where(
+            ActivityEvent.event_type.in_(["Stop", "SubagentStop"]),
+            ActivityEvent.reported_result.is_not(None),
+        )
+    ):
+        metadata = dict(event.metadata_json or {})
+        scan = dict(metadata.get("artifact_scan") or {})
+        if scan.get("version") == ARTIFACT_EVIDENCE_VERSION:
+            continue
+        considered += 1
+        artifacts = verify_report_artifacts(
+            event.reported_result or "",
+            occurred_at=event.occurred_at,
+        )
+        metadata["artifact_scan"] = {
+            "version": ARTIFACT_EVIDENCE_VERSION,
+            "verified_count": len(artifacts),
+        }
+        if artifacts:
+            metadata["verified_artifacts"] = artifacts
+            with_artifacts += 1
+        event.metadata_json = metadata
+    session.flush()
+    return {"considered": considered, "with_artifacts": with_artifacts}
 
 
 def envelope_to_activity(
@@ -529,12 +621,31 @@ def envelope_to_activity(
                 f"{item.tool_name or 'tool'} exit={item.exit_code}" for item in prior[-10:]
             )
             verification_status = "VERIFIED"
+    occurred_at = _parse_time(payload.get("timestamp") or envelope.get("received_at"))
+    activity_metadata = {
+        "hook_status": envelope.get("status"),
+        "permission_mode": payload.get("permission_mode"),
+        "model": payload.get("model"),
+        "payload_hash": envelope.get("payload_hash"),
+        "exit_evidence_source": exit_evidence_source,
+    }
+    if event_name in {"Stop", "SubagentStop"} and reported_result:
+        artifacts = verify_report_artifacts(
+            reported_result,
+            occurred_at=occurred_at,
+        )
+        activity_metadata["artifact_scan"] = {
+            "version": ARTIFACT_EVIDENCE_VERSION,
+            "verified_count": len(artifacts),
+        }
+        if artifacts:
+            activity_metadata["verified_artifacts"] = artifacts
     activity = ActivityEvent(
         event_key=event_id,
         session_id=str(envelope.get("session_id") or ""),
         turn_id=turn_id,
         event_type=event_name,
-        occurred_at=_parse_time(payload.get("timestamp") or envelope.get("received_at")),
+        occurred_at=occurred_at,
         project_key=project_from_paths(changed_files, cwd),
         cwd=cwd,
         instruction=instruction,
@@ -546,13 +657,7 @@ def envelope_to_activity(
         reported_result=reported_result,
         verified_result=verified_result,
         verification_status=verification_status,
-        metadata_json={
-            "hook_status": envelope.get("status"),
-            "permission_mode": payload.get("permission_mode"),
-            "model": payload.get("model"),
-            "payload_hash": envelope.get("payload_hash"),
-            "exit_evidence_source": exit_evidence_source,
-        },
+        metadata_json=activity_metadata,
     )
     session.add(activity)
     session.flush()
@@ -697,10 +802,12 @@ def collect_once(settings: Settings) -> dict[str, int]:
                 os.replace(claimed, retry)
     try:
         with SessionLocal() as session:
+            artifact_backfill = backfill_activity_report_artifacts(session)
             knowledge_counts = finalize_pending_stops(session, settings)
             rolled_up = 0
             now_monotonic = time.monotonic()
             if now_monotonic - _last_retention_check >= settings.activity_retention_check_seconds:
+                document_version_backfill = backfill_activity_document_versions(session)
                 rolled_up = roll_up_activity_details(
                     session,
                     retention_days=settings.activity_detail_retention_days,
@@ -712,6 +819,7 @@ def collect_once(settings: Settings) -> dict[str, int]:
                 )
                 _last_retention_check = now_monotonic
             else:
+                document_version_backfill = {"considered": 0, "linked": 0}
                 operational_rollup = {"jobs": 0, "events": 0}
             heartbeat = session.get(WorkerHeartbeat, "hook-collector")
             now = datetime.now(timezone.utc)
@@ -745,10 +853,14 @@ def collect_once(settings: Settings) -> dict[str, int]:
                     "terminal_jobs": operational_rollup["jobs"],
                     "ingest_events": operational_rollup["events"],
                 },
+                "document_version_backfill": document_version_backfill,
+                "artifact_backfill": artifact_backfill,
             }
             session.commit()
         counts.update({f"knowledge_{key}": value for key, value in knowledge_counts.items()})
         counts["activity_details_rolled_up"] = rolled_up
+        counts["document_versions_linked"] = document_version_backfill["linked"]
+        counts["artifact_reports_verified"] = artifact_backfill["with_artifacts"]
     except Exception:
         counts["failed"] += 1
         counts["knowledge_failed"] = 1

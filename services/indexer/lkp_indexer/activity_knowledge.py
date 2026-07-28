@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 
 from lkp.models import (
     ActivityEvent,
+    EvidenceRecord,
     KnowledgeCandidate,
     ProjectJournalEntry,
     SystemSetting,
@@ -137,6 +138,8 @@ _JOURNAL_CANDIDATE_REASSESSMENT_KEY = "knowledge.journal_candidate_reassessment.
 _JOURNAL_CANDIDATE_REASSESSMENT_VERSION = "journal-backed-editorial-v1"
 _SEMANTIC_CANDIDATE_REASSESSMENT_KEY = "knowledge.semantic_candidate_reassessment.v2"
 _SEMANTIC_CANDIDATE_REASSESSMENT_VERSION = "reported-provenance-editorial-v2"
+_OBSERVED_CANDIDATE_REASSESSMENT_KEY = "knowledge.observed_candidate_reassessment.v1"
+_OBSERVED_CANDIDATE_REASSESSMENT_VERSION = "observed-change-promotion-hold-v1"
 _PROJECT_JOURNAL_REASSESSMENT_KEY = "project_journal.significance_reassessment.v2"
 _PROJECT_JOURNAL_REASSESSMENT_VERSION = "observed-change-journal-v2"
 _PROJECT_JOURNAL_SCOPE_REASSESSMENT_KEY = "project_journal.scope_reassessment.v3"
@@ -145,12 +148,14 @@ _PROJECT_JOURNAL_SCOPE_REASSESSMENT_VERSION = "session-anchor-project-scope-v3"
 
 @dataclass(frozen=True)
 class TurnSummary:
+    stop_id: object
     project: str
     project_scope_verified: bool
     changed_files: tuple[str, ...]
     change_events: tuple[ActivityEvent, ...]
     failed_events: tuple[ActivityEvent, ...]
     successful_events: tuple[ActivityEvent, ...]
+    verified_artifacts: tuple[dict, ...]
     instruction: str | None
     report: str
 
@@ -356,6 +361,7 @@ def summarize_turn(session: Session, stop: ActivityEvent) -> TurnSummary:
         session_anchor or current_cwd_project or stop.project_key or stop.cwd,
     )
     return TurnSummary(
+        stop_id=stop.id,
         project=project,
         project_scope_verified=bool(
             changed_path_projects or session_anchor or current_cwd_project
@@ -364,6 +370,11 @@ def summarize_turn(session: Session, stop: ActivityEvent) -> TurnSummary:
         change_events=change_events,
         failed_events=failed_events,
         successful_events=successful_events,
+        verified_artifacts=tuple(
+            item
+            for item in (stop.metadata_json or {}).get("verified_artifacts", [])
+            if isinstance(item, dict)
+        ),
         instruction=instruction,
         report=stop.reported_result or "",
     )
@@ -430,6 +441,37 @@ def _candidate_evidence(summary: TurnSummary, content_language: str = "ko") -> l
                 "verified_value": ("관측된 exit_code=0" if korean else "observed exit_code=0"),
                 "exit_code": 0,
                 "verified": True,
+            }
+        )
+    for artifact in summary.verified_artifacts[:10]:
+        evidence_type = str(artifact.get("evidence_type") or "artifact_output")
+        if evidence_type not in {"artifact_output", "comparison_artifact"}:
+            continue
+        referenced = int(artifact.get("referenced_asset_count") or 0)
+        size_bytes = int(artifact.get("size_bytes") or 0)
+        records.append(
+            {
+                "activity_id": summary.stop_id,
+                "evidence_type": evidence_type,
+                "claim": (
+                    "A/B 비교 산출물과 참조 이미지가 읽기 전용 경로에서 확인됐습니다."
+                    if korean and evidence_type == "comparison_artifact"
+                    else "읽기 전용 경로에서 보고된 산출물 파일을 확인했습니다."
+                    if korean
+                    else "Verified an A/B comparison artifact and its referenced images."
+                    if evidence_type == "comparison_artifact"
+                    else "Verified the reported artifact on a read-only source path."
+                ),
+                "locator": str(artifact.get("host_path") or ""),
+                "verified_value": (
+                    f"sha256={artifact.get('sha256')}; size_bytes={size_bytes}; "
+                    f"referenced_assets={referenced}"
+                ),
+                "verified": True,
+                "metadata": {
+                    "artifact_verifier_version": artifact.get("verifier_version"),
+                    "modified_at": artifact.get("modified_at"),
+                },
             }
         )
     return records
@@ -602,6 +644,13 @@ def _has_reusable_report_detail(summary: TurnSummary) -> bool:
     return bool(summary.failed_events and len(report) >= 60)
 
 
+def _has_comparison_artifact(summary: TurnSummary) -> bool:
+    return any(
+        item.get("evidence_type") == "comparison_artifact"
+        for item in summary.verified_artifacts
+    )
+
+
 def _extract_knowledge_references(events: tuple[ActivityEvent, ...]) -> list[dict]:
     references: list[dict] = []
     seen: set[str] = set()
@@ -678,6 +727,16 @@ def finalize_project_journal(
         }
         for event in summary.successful_events[:20]
     ]
+    verification.extend(
+        {
+            "activity_id": str(summary.stop_id),
+            "command_family": "artifact_verifier",
+            "evidence_type": "comparison_artifact",
+            "locator": str(item.get("host_path") or ""),
+        }
+        for item in summary.verified_artifacts[:10]
+        if item.get("evidence_type") == "comparison_artifact"
+    )
     memo_fields = _reusable_memo_fields(summary.report)
     labeled_resolution = (
         _LABELED_SOLUTION.search(summary.report)
@@ -763,7 +822,9 @@ def finalize_project_journal(
         knowledge_references_json=references,
         significance_reasons=reasons,
         verification_status=(
-            "VERIFIED" if summary.successful_events else "OBSERVED_CHANGE"
+            "VERIFIED"
+            if summary.successful_events or _has_comparison_artifact(summary)
+            else "OBSERVED_CHANGE"
         ),
         metadata_json={
             "source_session_id": stop.session_id,
@@ -780,6 +841,8 @@ def finalize_project_journal(
             "validation_state": (
                 "test_or_build_observed"
                 if summary.successful_events
+                else "comparison_artifact_observed"
+                if _has_comparison_artifact(summary)
                 else "file_change_observed_without_test_or_build"
             ),
         },
@@ -812,15 +875,13 @@ def finalize_stop(
 
     summary = summarize_turn(session, stop)
     metadata = dict(stop.metadata_json or {})
-    if not summary.report.strip() or not summary.changed_files or not summary.successful_events:
+    if not summary.report.strip() or not summary.changed_files:
         metadata["knowledge_pipeline"] = {
             "state": "activity_only",
             "reason": (
                 "missing_report"
                 if not summary.report.strip()
                 else "no_meaningful_file_change"
-                if not summary.changed_files
-                else "no_successful_validation"
             ),
         }
         stop.metadata_json = metadata
@@ -866,7 +927,10 @@ def finalize_stop(
     journal_backed = bool(
         not structured_knowledge
         and journal_reasons
-        and _has_reusable_report_detail(summary)
+        and (
+            _has_reusable_report_detail(summary)
+            or _has_comparison_artifact(summary)
+        )
     )
     # A development journal may retain a material verified project change, but
     # a canonical knowledge candidate needs a reusable decision or a
@@ -913,6 +977,14 @@ def finalize_stop(
             "policy": "key_terms_then_pgvector-v1",
         },
     }
+    if not summary.successful_events and not _has_comparison_artifact(summary):
+        candidate_metadata["promotion_hold"] = {
+            "state": "needs_evidence",
+            "reasons": ["no_successful_validation"],
+            "policy": (
+                "retain_significant_observed_change_for_review_but_fail_closed_on_promotion"
+            ),
+        }
     value_assessment = assess_knowledge_value(
         category=category,
         problem=fields["problem"],
@@ -981,6 +1053,199 @@ def finalize_stop(
     }
     stop.metadata_json = metadata
     return candidate, outcome
+
+
+def reopen_historical_observed_candidates(
+    session: Session,
+    settings: Settings,
+) -> dict[str, int | str]:
+    """Create reviewable holds for significant observed changes dropped before persistence.
+
+    A missing test/build event must block publication, not erase the project from
+    the promotion queue. This one-time pass keeps immutable activity and journal
+    rows intact and reruns only stops previously classified for that exact reason.
+    """
+
+    existing = session.get(SystemSetting, _OBSERVED_CANDIDATE_REASSESSMENT_KEY)
+    if existing is not None:
+        return {
+            "state": "already_completed",
+            "created": int((existing.value or {}).get("created") or 0),
+            "skipped": int((existing.value or {}).get("skipped") or 0),
+            "version": _OBSERVED_CANDIDATE_REASSESSMENT_VERSION,
+        }
+
+    journal_stop_ids = set(
+        session.scalars(
+            select(ProjectJournalEntry.source_stop_activity_id).where(
+                ProjectJournalEntry.verification_status == "OBSERVED_CHANGE"
+            )
+        )
+    )
+    existing_stop_ids = {
+        str(value)
+        for value in session.scalars(
+            select(KnowledgeCandidate.metadata_json["source_stop_activity_id"].astext)
+        )
+        if value
+    }
+    stops = list(
+        session.scalars(
+            select(ActivityEvent).where(
+                ActivityEvent.event_type.in_(["Stop", "SubagentStop"]),
+                ActivityEvent.metadata_json["knowledge_pipeline"]["reason"].astext
+                == "no_successful_validation",
+            )
+        )
+    )
+    created = 0
+    skipped = 0
+    for stop in stops:
+        if stop.id not in journal_stop_ids or str(stop.id) in existing_stop_ids:
+            skipped += 1
+            continue
+        summary = summarize_turn(session, stop)
+        if not _journal_significance(summary) or not _has_reusable_report_detail(summary):
+            skipped += 1
+            continue
+        metadata = dict(stop.metadata_json or {})
+        metadata.pop("knowledge_pipeline", None)
+        stop.metadata_json = metadata
+        candidate, _outcome = finalize_stop(session, stop, settings)
+        if candidate is None:
+            skipped += 1
+            continue
+        candidate.metadata_json = {
+            **(candidate.metadata_json or {}),
+            "observed_candidate_reassessment": {
+                "version": _OBSERVED_CANDIDATE_REASSESSMENT_VERSION,
+                "reason": "observed_change_was_hidden_instead_of_held_for_evidence",
+            },
+        }
+        created += 1
+
+    now = datetime.now(timezone.utc)
+    session.add(
+        SystemSetting(
+            key=_OBSERVED_CANDIDATE_REASSESSMENT_KEY,
+            value={
+                "version": _OBSERVED_CANDIDATE_REASSESSMENT_VERSION,
+                "completed_at": now.isoformat(),
+                "created": created,
+                "skipped": skipped,
+                "activities_deleted": False,
+                "knowledge_cases_created": False,
+                "reversible": True,
+            },
+        )
+    )
+    session.flush()
+    return {
+        "state": "completed",
+        "created": created,
+        "skipped": skipped,
+        "version": _OBSERVED_CANDIDATE_REASSESSMENT_VERSION,
+    }
+
+
+def sync_historical_artifact_evidence(session: Session) -> dict[str, int]:
+    """Attach independently verified report artifacts to existing held candidates."""
+
+    considered = 0
+    evidence_created = 0
+    gate_verified = 0
+    stops = session.scalars(
+        select(ActivityEvent).where(
+            ActivityEvent.event_type.in_(["Stop", "SubagentStop"]),
+            ActivityEvent.metadata_json["verified_artifacts"].astext.is_not(None),
+        )
+    )
+    for stop in stops:
+        candidate = session.scalar(
+            select(KnowledgeCandidate).where(
+                KnowledgeCandidate.metadata_json["source_stop_activity_id"].astext
+                == str(stop.id)
+            )
+        )
+        if candidate is None or candidate.status in {"published", "activity_only"}:
+            continue
+        considered += 1
+        existing = {
+            (row.evidence_type, row.locator or "")
+            for row in session.scalars(
+                select(EvidenceRecord).where(
+                    EvidenceRecord.candidate_id == candidate.id,
+                    EvidenceRecord.evidence_type.in_(
+                        ["artifact_output", "comparison_artifact"]
+                    ),
+                )
+            )
+        }
+        summary = summarize_turn(session, stop)
+        for item in _candidate_evidence(
+            summary,
+            str((candidate.metadata_json or {}).get("content_language") or "ko"),
+        ):
+            if item["evidence_type"] not in {
+                "artifact_output",
+                "comparison_artifact",
+            }:
+                continue
+            key = (item["evidence_type"], item.get("locator") or "")
+            if key in existing:
+                continue
+            session.add(
+                EvidenceRecord(
+                    candidate_id=candidate.id,
+                    activity_id=item.get("activity_id"),
+                    evidence_type=item["evidence_type"],
+                    claim=item["claim"],
+                    locator=item.get("locator"),
+                    reported_value=item.get("reported_value"),
+                    verified_value=item.get("verified_value"),
+                    exit_code=item.get("exit_code"),
+                    verified=item.get("verified", False),
+                    metadata_json=item.get("metadata", {}),
+                )
+            )
+            existing.add(key)
+            evidence_created += 1
+        session.flush()
+        gate = evaluate_gate(session, candidate)
+        rows = list(
+            session.scalars(
+                select(EvidenceRecord).where(
+                    EvidenceRecord.candidate_id == candidate.id
+                )
+            )
+        )
+        metadata = dict(candidate.metadata_json or {})
+        metadata["knowledge_value"] = assess_knowledge_value(
+            category=candidate.category,
+            problem=candidate.problem,
+            root_cause=candidate.root_cause,
+            solution=candidate.solution,
+            evidence=rows,
+            metadata=metadata,
+        )
+        metadata["artifact_validation"] = {
+            "state": "verified" if gate == "VERIFIED" else "insufficient",
+            "comparison_artifact_count": sum(
+                row.verified and row.evidence_type == "comparison_artifact"
+                for row in rows
+            ),
+            "policy": "artifact_existence_and_board_membership_do_not_assert_visual_quality",
+        }
+        if gate == "VERIFIED":
+            metadata.pop("promotion_hold", None)
+            gate_verified += 1
+        candidate.metadata_json = metadata
+    session.flush()
+    return {
+        "considered": considered,
+        "evidence_created": evidence_created,
+        "gate_verified": gate_verified,
+    }
 
 
 def reopen_historical_journal_candidates(session: Session) -> dict[str, int | str]:
@@ -1403,4 +1668,15 @@ def finalize_pending_stops(session: Session, settings: Settings) -> dict[str, in
     counts["semantic_candidates_created"] = int(
         semantic_reassessment.get("created") or 0
     )
+    observed_reassessment = reopen_historical_observed_candidates(session, settings)
+    counts["observed_candidates_created"] = int(
+        observed_reassessment.get("created") or 0
+    )
+    counts["observed_candidates_skipped"] = int(
+        observed_reassessment.get("skipped") or 0
+    )
+    artifact_sync = sync_historical_artifact_evidence(session)
+    counts["artifact_candidates_considered"] = artifact_sync["considered"]
+    counts["artifact_evidence_created"] = artifact_sync["evidence_created"]
+    counts["artifact_candidates_verified"] = artifact_sync["gate_verified"]
     return counts

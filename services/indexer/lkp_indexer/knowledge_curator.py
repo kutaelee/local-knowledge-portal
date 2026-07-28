@@ -40,7 +40,7 @@ logger = structlog.get_logger()
 _SCHEDULER_KEY = "knowledge_curator.scheduler"
 _EVIDENCE_REPAIR_KEY = "knowledge.evidence_repair.non_execution_v1"
 _VALUE_BACKFILL_KEY = "knowledge.value_backfill.v3"
-CURATION_HARNESS_VERSION = "evidence-gate-v5-single-repair"
+CURATION_HARNESS_VERSION = "evidence-gate-v6-artifact-experiments"
 _CURATION_HARNESS_VERSION = CURATION_HARNESS_VERSION
 _INLINE_CITATION = re.compile(
     r"\[[^\]\r\n]{1,50}\]|\((?:\s*[ER]\d+\s*,?)+\s*\)",
@@ -245,7 +245,13 @@ def _payload(
                 ),
             }
         )
+    knowledge_shape = (
+        "artifact_backed_experiment"
+        if any(item.evidence_type == "comparison_artifact" for item in evidence)
+        else "incident_or_implementation"
+    )
     payload = {
+        "knowledge_shape": knowledge_shape,
         "candidate": {
             "current_category": candidate.category,
             "title": candidate.title,
@@ -261,6 +267,14 @@ def _payload(
             "R-prefixed sources preserve reported intent, cause, decision, and implementation "
             "context; cite them only as reported context. E-prefixed sources are independently "
             "observed evidence. Verification and measured outcomes must cite E sources."
+        ),
+        "shape_rule": (
+            "For artifact_backed_experiment, a concrete comparison run and its output set are "
+            "reusable knowledge even when there is no incident root cause and no independently "
+            "verified subjective winner. Use reported sources for the experiment goal, conditions, "
+            "or selection, and label them as reported. Use code/document evidence for what changed "
+            "and comparison_artifact evidence for what was objectively produced. Do not require or "
+            "invent a failure story, causal claim, or visual-quality winner."
         ),
     }
     return payload, evidence_map

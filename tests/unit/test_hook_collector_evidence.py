@@ -1,15 +1,73 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from lkp_indexer.activity_knowledge import _reusable_memo_fields, project_from_paths
+from lkp_indexer.artifact_evidence import verify_report_artifacts
 from lkp_indexer.hook_collector import (
     _changed_files,
     _clean_instruction,
+    _document_path_aliases,
     _exit_code,
     _transcript_turn_instruction,
     _transcript_turn_result,
     activity_signal,
 )
+
+
+def test_review_board_with_multiple_local_images_is_verified(tmp_path: Path):
+    board_dir = tmp_path / "Working" / "wedding_picture" / "ab-test"
+    images = board_dir / "images"
+    images.mkdir(parents=True)
+    (images / "a.png").write_bytes(b"image-a")
+    (images / "b.png").write_bytes(b"image-b")
+    (board_dir / "review-board.html").write_text(
+        '<img src="images/a.png"><img src="images/b.png">',
+        encoding="utf-8",
+    )
+    artifacts = verify_report_artifacts(
+        "[A/B 보드](<E:/AI/Assets/Working/wedding_picture/ab-test/review-board.html>)",
+        occurred_at=datetime.now(timezone.utc),
+        mount_root=tmp_path,
+    )
+    assert len(artifacts) == 1
+    assert artifacts[0]["evidence_type"] == "comparison_artifact"
+    assert artifacts[0]["referenced_asset_count"] == 2
+    assert len(str(artifacts[0]["sha256"])) == 64
+
+
+def test_review_board_without_comparison_members_is_only_output(tmp_path: Path):
+    board_dir = tmp_path / "Working" / "wedding_picture" / "single"
+    board_dir.mkdir(parents=True)
+    (board_dir / "review-board.html").write_text("<p>empty</p>", encoding="utf-8")
+    artifacts = verify_report_artifacts(
+        "[보드](<E:/AI/Assets/Working/wedding_picture/single/review-board.html>)",
+        occurred_at=datetime.now(timezone.utc),
+        mount_root=tmp_path,
+    )
+    assert artifacts[0]["evidence_type"] == "artifact_output"
+
+
+def test_windows_repository_paths_map_to_container_document_paths():
+    assert _document_path_aliases(
+        r"C:\Dev\Repos\wedding_picture\scripts\prepare_dataset.py",
+        None,
+    ) == (
+        "/sources/windows-repositories/wedding_picture/scripts/prepare_dataset.py",
+    )
+    assert _document_path_aliases(
+        "scripts/prepare_dataset.py",
+        r"C:\Dev\Repos\wedding_picture",
+    ) == (
+        "/sources/windows-repositories/wedding_picture/scripts/prepare_dataset.py",
+    )
+
+
+def test_wsl_unc_paths_map_to_linux_document_paths():
+    assert _document_path_aliases(
+        r"\\wsl.localhost\Ubuntu\home\kutae\src\local-knowledge-portal\README.md",
+        None,
+    ) == ("/home/kutae/src/local-knowledge-portal/README.md",)
 
 
 def test_apply_patch_response_extracts_exit_code_and_changed_files():

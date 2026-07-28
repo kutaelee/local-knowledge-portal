@@ -253,6 +253,7 @@ services:
       - ${LKP_HOOK_SPOOL_HOST_PATH:-/mnt/e/Data/LocalKnowledgePortal/ingest/codex-spool}:/hook-spool
       - ${LKP_HOOK_FALLBACK_ROOT:?set LKP_HOOK_FALLBACK_ROOT}:/fallback
       - ${LKP_CODEX_SESSIONS_HOST_PATH:?set LKP_CODEX_SESSIONS_HOST_PATH}:/codex-sessions:ro
+      - ${LKP_AI_ASSETS_ROOT:-/mnt/e/AI/Assets}:/sources/ai-assets:ro
       - ${LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
     depends_on:
       migrate:

@@ -113,18 +113,24 @@ def assess_knowledge_value(
         for item in verified
     )
     succeeded = any(
-        _evidence_value(item, "exit_code") == 0
-        or _evidence_value(item, "evidence_type")
-        in {
-            "build_pass",
-            "command_success",
-            "recovery_success",
-            "test_pass",
-        }
+        _evidence_value(item, "evidence_type")
+        in {"build_pass", "command_success", "recovery_success", "test_pass"}
+        and (
+            _evidence_value(item, "evidence_type") == "recovery_success"
+            or _evidence_value(item, "exit_code") == 0
+        )
         for item in verified
     )
     changed = bool(evidence_types & {"code_change", "document_version"})
-    validation = bool(evidence_types & {"build_pass", "command_success", "test_pass"})
+    validation = bool(
+        evidence_types
+        & {"build_pass", "command_success", "comparison_artifact", "test_pass"}
+    )
+    artifact_experiment = (
+        category != "error_resolution"
+        and changed
+        and "comparison_artifact" in evidence_types
+    )
     performance = {
         "performance_before",
         "performance_after",
@@ -163,6 +169,8 @@ def assess_knowledge_value(
         signals.append("verified_failure_change_success")
     if changed and validation:
         signals.append("verified_change_and_validation")
+    if artifact_experiment:
+        signals.append("verified_artifact_experiment")
     if performance:
         signals.append("measured_before_after_with_cause")
     if recovery:
@@ -198,6 +206,12 @@ def assess_knowledge_value(
         "presentation_only_change_without_reusable_decision" in blockers
     ):
         tier = "activity_only"
+    elif artifact_experiment:
+        # A completed A/B or review-board run is reusable experiment knowledge
+        # even when it is not an incident and has no root cause.  The artifact
+        # verifier proves only execution and board membership; the editor must
+        # keep any preference or winner as reported context.
+        tier = "promote"
     elif category == "error_resolution":
         tier = "promote" if lifecycle and structured else "needs_review"
         if tier != "promote":
@@ -302,19 +316,30 @@ def evaluate_gate(session: Session, candidate: KnowledgeCandidate) -> str:
     )
     verified_types = {item.evidence_type for item in evidence if item.verified}
     failed_command = any(
-        item.verified and item.exit_code is not None and item.exit_code != 0 for item in evidence
+        item.verified
+        and item.evidence_type in _EXECUTION_EVIDENCE_TYPES
+        and item.exit_code is not None
+        and item.exit_code != 0
+        for item in evidence
     )
-    successful_command = any(item.verified and item.exit_code == 0 for item in evidence)
+    successful_execution = any(
+        item.verified
+        and item.evidence_type
+        in {"build_pass", "command_success", "recovery_success", "test_pass"}
+        and item.exit_code == 0
+        for item in evidence
+    )
     passed = False
     if candidate.category == "error_resolution":
         passed = (
             failed_command
-            and successful_command
+            and successful_execution
             and bool(verified_types & {"code_change", "document_version"})
         )
     elif candidate.category in {"implementation", "custom_success"}:
         passed = bool(verified_types & {"code_change", "document_version"}) and bool(
-            verified_types & {"test_pass", "build_pass", "command_success"}
+            verified_types
+            & {"test_pass", "build_pass", "command_success", "comparison_artifact"}
         )
     elif candidate.category == "performance":
         passed = {
@@ -334,7 +359,12 @@ def evaluate_gate(session: Session, candidate: KnowledgeCandidate) -> str:
                 bool(verified_types & {"code_change", "document_version"})
                 and bool(
                     verified_types
-                    & {"test_pass", "build_pass", "command_success"}
+                    & {
+                        "test_pass",
+                        "build_pass",
+                        "command_success",
+                        "comparison_artifact",
+                    }
                 )
             )
         )

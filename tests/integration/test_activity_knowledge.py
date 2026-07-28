@@ -932,7 +932,10 @@ def test_observed_project_change_creates_journal_without_publishing_case(
             changed_files=[],
             reported_result=(
                 "Completed the pipeline and configuration update. "
-                "The next generation run will validate model output quality."
+                "The dataset preparation script and its configuration now share "
+                "one output layout so that later generation runs cannot read the "
+                "old directory by mistake. The changed files were observed, but "
+                "model output quality still requires a separate generation run."
             ),
             verification_status="VERIFIED",
         )
@@ -945,7 +948,7 @@ def test_observed_project_change_creates_journal_without_publishing_case(
         )
 
         assert counts["journal_recorded"] == 1
-        assert counts["candidates"] == 0
+        assert counts["candidates"] == 1
         journal = session.scalar(
             select(ProjectJournalEntry).where(
                 ProjectJournalEntry.source_stop_activity_id == stop.id
@@ -958,9 +961,18 @@ def test_observed_project_change_creates_journal_without_publishing_case(
             "file_change_observed_without_test_or_build"
         )
         assert "multi_artifact_change" in journal.significance_reasons
-        assert stop.metadata_json["knowledge_pipeline"]["reason"] == (
-            "no_successful_validation"
+        candidate = session.scalar(
+            select(KnowledgeCandidate).where(
+                KnowledgeCandidate.metadata_json["source_stop_activity_id"].astext
+                == str(stop.id)
+            )
         )
+        assert candidate is not None
+        assert candidate.status == "candidate"
+        assert candidate.evidence_gate_status == "NEEDS_EVIDENCE"
+        assert candidate.metadata_json["promotion_hold"]["reasons"] == [
+            "no_successful_validation"
+        ]
         assert session.scalar(select(func.count()).select_from(KnowledgeCase)) == 0
         session.rollback()
 
@@ -1037,6 +1049,198 @@ def test_historical_activity_only_project_change_is_reassessed(
         assert journal.project_key == "historical-project"
         assert journal.verification_status == "OBSERVED_CHANGE"
         assert stop.metadata_json["project_journal"]["state"] == "recorded"
+        session.rollback()
+
+
+def test_failed_command_plus_file_change_is_not_recovery_success(
+    database_url: str,
+    tmp_path: Path,
+):
+    engine = create_engine(database_url)
+    session_id = f"no-recovery-{uuid.uuid4()}"
+    now = datetime.now(timezone.utc)
+    common = {
+        "session_id": session_id,
+        "turn_id": "turn-no-recovery",
+        "project_key": "wedding_picture",
+        "cwd": r"C:\Dev\Repos\wedding_picture",
+        "document_version_ids": [],
+        "metadata_json": {},
+    }
+    with Session(engine) as session:
+        session.add_all(
+            [
+                ActivityEvent(
+                    **common,
+                    event_key=f"failure-{uuid.uuid4()}",
+                    event_type="PostToolUse",
+                    occurred_at=now,
+                    tool_name="Bash",
+                    command="python scripts/prepare_dataset.py",
+                    exit_code=1,
+                    changed_files=[],
+                    verification_status="VERIFIED",
+                ),
+                ActivityEvent(
+                    **common,
+                    event_key=f"change-{uuid.uuid4()}",
+                    event_type="PostToolUse",
+                    occurred_at=now + timedelta(seconds=1),
+                    tool_name="apply_patch",
+                    command="*** Update File: scripts/prepare_dataset.py",
+                    exit_code=0,
+                    changed_files=[
+                        r"C:\Dev\Repos\wedding_picture\scripts\prepare_dataset.py"
+                    ],
+                    verification_status="VERIFIED",
+                ),
+            ]
+        )
+        stop = ActivityEvent(
+            **{
+                **common,
+                "metadata_json": {
+                    "verified_artifacts": [
+                        {
+                            "verifier_version": "local-artifact-verifier-v1",
+                            "evidence_type": "comparison_artifact",
+                            "host_path": (
+                                "E:/AI/Assets/Working/wedding_picture/failed/"
+                                "review-board.html"
+                            ),
+                            "size_bytes": 1024,
+                            "modified_at": now.isoformat(),
+                            "sha256": "b" * 64,
+                            "referenced_asset_count": 2,
+                        }
+                    ]
+                },
+            },
+            event_key=f"stop-{uuid.uuid4()}",
+            event_type="Stop",
+            occurred_at=now + timedelta(seconds=2),
+            changed_files=[],
+            instruction="Repair the dataset preparation failure.",
+            reported_result=(
+                "원인: 출력 디렉터리 선택 로직이 이전 레이아웃을 가리켰습니다.\n"
+                "조치: 준비 스크립트의 경로 선택을 현재 레이아웃으로 변경했습니다. "
+                "파일 변경은 관측됐지만 수정 후 명령을 다시 실행하지 않았으므로 "
+                "복구 성공은 아직 검증되지 않았습니다."
+            ),
+            verification_status="VERIFIED",
+        )
+        session.add(stop)
+        session.flush()
+
+        finalize_pending_stops(
+            session,
+            Settings(database_url=database_url, vault_dir=tmp_path / "vault"),
+        )
+        candidate = session.scalar(
+            select(KnowledgeCandidate).where(
+                KnowledgeCandidate.metadata_json["source_stop_activity_id"].astext
+                == str(stop.id)
+            )
+        )
+        assert candidate is not None
+        assert candidate.category == "error_resolution"
+        assert candidate.evidence_gate_status == "NEEDS_EVIDENCE"
+        assert candidate.status == "candidate"
+        session.rollback()
+
+
+def test_verified_ab_board_is_domain_validation_without_auto_publish(
+    database_url: str,
+    tmp_path: Path,
+):
+    engine = create_engine(database_url)
+    session_id = f"visual-ab-{uuid.uuid4()}"
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add(
+            ActivityEvent(
+                event_key=f"change-{uuid.uuid4()}",
+                session_id=session_id,
+                turn_id="turn-visual-ab",
+                event_type="PostToolUse",
+                occurred_at=now,
+                project_key="wedding_picture",
+                cwd=r"C:\Dev\Repos\wedding_picture",
+                tool_name="apply_patch",
+                command="*** Update File: scripts/build_review_board.py",
+                exit_code=0,
+                changed_files=[
+                    r"C:\Dev\Repos\wedding_picture\scripts\build_review_board.py"
+                ],
+                document_version_ids=[],
+                verification_status="VERIFIED",
+                metadata_json={},
+            )
+        )
+        stop = ActivityEvent(
+            event_key=f"stop-{uuid.uuid4()}",
+            session_id=session_id,
+            turn_id="turn-visual-ab",
+            event_type="Stop",
+            occurred_at=now + timedelta(seconds=1),
+            project_key="wedding_picture",
+            cwd=r"C:\Dev\Repos\wedding_picture",
+            instruction="Compare two checkpoints with the same prompts and seeds.",
+            changed_files=[],
+            document_version_ids=[],
+            reported_result=(
+                "동일한 프롬프트와 seed로 두 체크포인트를 비교했습니다. "
+                "검수 보드에는 A/B 이미지가 나란히 들어 있으며, 이번 단계에서는 "
+                "보드 생성 사실만 검증하고 어느 쪽이 더 낫다는 판단은 보고 맥락으로 남깁니다."
+            ),
+            verification_status="VERIFIED",
+            metadata_json={
+                "verified_artifacts": [
+                    {
+                        "verifier_version": "local-artifact-verifier-v1",
+                        "evidence_type": "comparison_artifact",
+                        "host_path": (
+                            "E:/AI/Assets/Working/wedding_picture/ab/review-board.html"
+                        ),
+                        "size_bytes": 1024,
+                        "modified_at": now.isoformat(),
+                        "sha256": "a" * 64,
+                        "referenced_asset_count": 6,
+                    }
+                ]
+            },
+        )
+        session.add(stop)
+        session.flush()
+
+        finalize_pending_stops(
+            session,
+            Settings(database_url=database_url, vault_dir=tmp_path / "vault"),
+        )
+        candidate = session.scalar(
+            select(KnowledgeCandidate).where(
+                KnowledgeCandidate.metadata_json["source_stop_activity_id"].astext
+                == str(stop.id)
+            )
+        )
+        assert candidate is not None
+        assert candidate.evidence_gate_status == "VERIFIED"
+        assert candidate.status != "published"
+        assert candidate.metadata_json["knowledge_value"]["tier"] == "promote"
+        assert (
+            "verified_artifact_experiment"
+            in candidate.metadata_json["knowledge_value"]["signals"]
+        )
+        assert session.scalar(
+            select(func.count())
+            .select_from(EvidenceRecord)
+            .where(
+                EvidenceRecord.candidate_id == candidate.id,
+                EvidenceRecord.evidence_type == "comparison_artifact",
+                EvidenceRecord.verified.is_(True),
+            )
+        ) == 1
+        assert session.scalar(select(func.count()).select_from(KnowledgeCase)) == 0
         session.rollback()
 
 

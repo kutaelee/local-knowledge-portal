@@ -136,6 +136,57 @@ def test_value_harness_requires_measured_performance_evidence():
     assert measured["tier"] == "promote"
 
 
+def test_value_harness_promotes_verified_artifact_experiment_without_incident_story():
+    result = assess_knowledge_value(
+        category="operations",
+        problem="세 가지 생성 조건을 비교한다.",
+        root_cause="Observed implementation in wedding_picture: generation settings changed.",
+        solution="Changed artifacts: generate_variants.py and review-board.html.",
+        evidence=[
+            {
+                "evidence_type": "code_change",
+                "verified": True,
+                "locator": "generate_variants.py",
+                "exit_code": 0,
+            },
+            {
+                "evidence_type": "comparison_artifact",
+                "verified": True,
+                "locator": "E:/AI/Assets/Working/review-board.html",
+            },
+        ],
+        metadata={"auto_generated": True, "structured_knowledge": False},
+    )
+    assert result["tier"] == "promote"
+    assert "verified_artifact_experiment" in result["signals"]
+
+
+def test_value_harness_does_not_treat_comparison_artifact_as_error_recovery():
+    result = assess_knowledge_value(
+        category="error_resolution",
+        problem="생성 명령이 실패했다.",
+        root_cause="실패 원인은 아직 확인되지 않았다.",
+        solution="비교 보드가 남아 있다고 보고됐다.",
+        evidence=[
+            {"evidence_type": "command_failure", "verified": True, "exit_code": 1},
+            {
+                "evidence_type": "code_change",
+                "verified": True,
+                "locator": "generate.py",
+                "exit_code": 0,
+            },
+            {
+                "evidence_type": "comparison_artifact",
+                "verified": True,
+                "locator": "E:/AI/Assets/Working/review-board.html",
+            },
+        ],
+        metadata={"auto_generated": True, "structured_knowledge": True},
+    )
+    assert result["tier"] == "needs_review"
+    assert "verified_artifact_experiment" not in result["signals"]
+
+
 def test_value_harness_never_reopens_previously_quarantined_activity():
     result = assess_knowledge_value(
         category="implementation",
@@ -471,6 +522,31 @@ def test_payload_assigns_separate_reported_and_verified_namespaces():
     assert payload["verified_evidence"][0]["id"] == "E1"
     assert source_map["R1"].startswith("작업자가")
     assert "exit_code=0" in source_map["E1"]
+
+
+def test_payload_marks_comparison_output_as_artifact_backed_experiment():
+    candidate = SimpleNamespace(
+        category="operations",
+        title="생성 조건 비교",
+        problem="세 조건을 비교한다.",
+        symptom="비교 결과가 필요하다.",
+        root_cause="실험 조건은 작업 보고에 있다.",
+        solution="비교 보드를 생성했다.",
+        reported_result="세 조건을 생성해 비교 보드에 모았다고 보고했다.",
+        metadata_json={},
+    )
+    evidence = [
+        SimpleNamespace(
+            evidence_type="comparison_artifact",
+            claim="비교 보드와 참조 이미지가 확인됐다.",
+            verified_value="referenced_assets=3",
+            locator="E:/AI/Assets/Working/review-board.html",
+            exit_code=None,
+        )
+    ]
+    payload, _source_map = _payload(candidate, evidence)
+    assert payload["knowledge_shape"] == "artifact_backed_experiment"
+    assert "visual-quality winner" in payload["shape_rule"]
 
 
 def test_summary_and_paragraph_numbers_must_exist_in_verified_evidence():

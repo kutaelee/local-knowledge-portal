@@ -4,10 +4,10 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 env_file="${LKP_ENV_FILE:-/mnt/c/Docker/local-knowledge-portal/.env}"
 expected_size="17106773120"
-default_model="/mnt/e/AI/Models/HuggingFace/hub/local-shared-models/unsloth_Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
+default_model="/home/kutae/models/huggingface/hub/local-shared-models/unsloth_Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
 default_runtime="/home/kutae/.local/share/local-voice-agent/runtimes/vllm-0.25.1"
-default_config="/mnt/e/Data/LocalKnowledgePortal/cache/model-configs/Qwen3.6-27B-text/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
-default_tokenizer="/mnt/e/AI/Models/HuggingFace/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
+default_config="/home/kutae/models/huggingface/configs/Qwen3.6-27B-text/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
+default_tokenizer="/home/kutae/models/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
 
 read_env() {
   local key="$1"

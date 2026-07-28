@@ -14,11 +14,11 @@ read_env() {
 runtime="$(read_env LKP_REPOSITORY_VLLM_RUNTIME)"
 runtime="${runtime:-/home/kutae/.local/share/local-voice-agent/runtimes/vllm-0.25.1}"
 model_file="$(read_env LKP_REPOSITORY_VLLM_MODEL_FILE)"
-model_file="${model_file:-/mnt/e/AI/Models/HuggingFace/hub/local-shared-models/unsloth_Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf}"
+model_file="${model_file:-/home/kutae/models/huggingface/hub/local-shared-models/unsloth_Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf}"
 config_path="$(read_env LKP_REPOSITORY_VLLM_CONFIG_PATH)"
-config_path="${config_path:-/mnt/e/Data/LocalKnowledgePortal/cache/model-configs/Qwen3.6-27B-text/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9}"
+config_path="${config_path:-/home/kutae/models/huggingface/configs/Qwen3.6-27B-text/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9}"
 tokenizer_path="$(read_env LKP_REPOSITORY_VLLM_TOKENIZER_PATH)"
-tokenizer_path="${tokenizer_path:-/mnt/e/AI/Models/HuggingFace/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9}"
+tokenizer_path="${tokenizer_path:-/home/kutae/models/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9}"
 port="$(read_env LKP_REPOSITORY_VLLM_PORT)"
 port="${port:-18000}"
 max_model_len="${LKP_REPOSITORY_VLLM_MAX_MODEL_LEN:-}"
@@ -43,7 +43,7 @@ if [[ -z "$kv_cache_memory_bytes" ]]; then
   kv_cache_memory_bytes="$(read_env LKP_REPOSITORY_VLLM_KV_CACHE_MEMORY_BYTES)"
 fi
 hf_root="$(read_env LKP_HF_MODEL_ROOT)"
-hf_root="${hf_root:-/mnt/e/AI/Models/HuggingFace}"
+hf_root="${hf_root:-/home/kutae/models/huggingface}"
 
 export HF_HOME="$hf_root"
 export HF_HUB_CACHE="$HF_HOME/hub"
