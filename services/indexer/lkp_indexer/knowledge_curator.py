@@ -549,7 +549,288 @@ def _qualification_payloads() -> list[tuple[str, dict[str, Any], str]]:
         (
             "supported_implementation",
             {
-                "candidat…2810 tokens truncated…ate.updated_at = datetime.now(timezone.utc)
+                "candidate": {
+                    "current_category": "implementation",
+                    "title": "재시작 후 마운트 검증 추가",
+                    "problem": "빈 bind mount로 서비스가 잘못 준비 상태가 됐다.",
+                    "symptom": "API는 준비 상태였지만 데이터 경로가 비어 있었다.",
+                    "root_cause": "필수 경로의 존재만 검사하고 파일 여부는 검사하지 않았다.",
+                    "solution": "sentinel 파일과 소스 파일을 시작 시 확인하도록 바꿨다.",
+                },
+                "reported_result_not_evidence": "문제가 완전히 해결됐다.",
+                "verified_evidence": [
+                    {
+                        "id": "E1",
+                        "type": "incident_observation",
+                        "claim": "the readiness probe accepted an incomplete mount",
+                        "verified_value": (
+                            "reproduction returned HTTP 200 while a required "
+                            "sentinel file was absent"
+                        ),
+                        "locator": "mount-guard reproduction",
+                        "exit_code": None,
+                    },
+                    {
+                        "id": "E2",
+                        "type": "code_change",
+                        "claim": "startup mount validation changed",
+                        "verified_value": (
+                            "settings.yaml and source-roots.yaml must both exist "
+                            "before the service starts"
+                        ),
+                        "locator": "service_runtime.py",
+                        "exit_code": None,
+                    },
+                    {
+                        "id": "E3",
+                        "type": "test_pass",
+                        "claim": "mount guard unit tests passed",
+                        "verified_value": "42 tests passed",
+                        "locator": "pytest",
+                        "exit_code": 0,
+                    },
+                    {
+                        "id": "E4",
+                        "type": "integration_test",
+                        "claim": (
+                            "both the rejected incomplete mount and accepted "
+                            "complete mount paths were exercised"
+                        ),
+                        "verified_value": "2 integration scenarios passed",
+                        "locator": "mount guard integration fixture",
+                        "exit_code": 0,
+                    },
+                    {
+                        "id": "E5",
+                        "type": "scope_limit",
+                        "claim": "long-duration suspend and resume was not tested",
+                        "verified_value": (
+                            "suspend and resume endurance is excluded from the "
+                            "current validation scope"
+                        ),
+                        "locator": "validation-report.md",
+                        "exit_code": None,
+                    },
+                ],
+                "deterministic_value_assessment": {
+                    "revision": "knowledge-value-v1",
+                    "tier": "promote",
+                    "publication_eligible": True,
+                    "signals": [
+                        "verified_change_and_validation",
+                        "reusable_explanation_present",
+                    ],
+                    "blockers": [],
+                },
+            },
+            "publish",
+        ),
+        (
+            "reported_only",
+            {
+                "candidate": {
+                    "current_category": "implementation",
+                    "title": "성능을 크게 개선했다는 보고",
+                    "problem": "느린 검색",
+                    "symptom": "느리다고 보고됨",
+                    "root_cause": "확인되지 않음",
+                    "solution": "캐시를 추가했다고 보고됨",
+                },
+                "reported_result_not_evidence": "검색이 10배 빨라졌다.",
+                "verified_evidence": [],
+                "deterministic_value_assessment": {
+                    "revision": "knowledge-value-v1",
+                    "tier": "activity_only",
+                    "publication_eligible": False,
+                    "signals": [],
+                    "blockers": ["no_verified_evidence"],
+                },
+            },
+            "held",
+        ),
+        (
+            "unmeasured_performance",
+            {
+                "candidate": {
+                    "current_category": "performance",
+                    "title": "부하를 낮췄다는 보고",
+                    "problem": "CPU 부하",
+                    "symptom": "높은 CPU라고 보고됨",
+                    "root_cause": "원인 미측정",
+                    "solution": "설정을 변경했다고 보고됨",
+                },
+                "reported_result_not_evidence": "부하가 크게 감소했다.",
+                "verified_evidence": [
+                    {
+                        "id": "E1",
+                        "type": "code_change",
+                        "claim": "configuration changed",
+                        "verified_value": "file hash changed",
+                        "locator": "compose.yaml",
+                        "exit_code": None,
+                    }
+                ],
+                "deterministic_value_assessment": {
+                    "revision": "knowledge-value-v1",
+                    "tier": "needs_review",
+                    "publication_eligible": False,
+                    "signals": [],
+                    "blockers": ["before_after_and_load_cause_required"],
+                },
+            },
+            "held",
+        ),
+    ]
+
+
+def qualify_provider(
+    provider: GenerationProvider,
+    settings: Settings,
+) -> dict[str, Any]:
+    results = []
+    for name, payload, expected in _qualification_payloads():
+        value_assessment = payload.get("deterministic_value_assessment") or {}
+        if value_assessment.get("tier") != "promote":
+            results.append(
+                {
+                    "name": name,
+                    "expected": expected,
+                    "actual": "held",
+                    "passed": expected == "held",
+                    "reasons": list(value_assessment.get("blockers") or []),
+                    "decision": "deterministic_harness_hold",
+                    "article_chars": 0,
+                }
+            )
+            continue
+        try:
+            draft, _digest = provider.curate(
+                payload,
+                language=settings.knowledge_content_language,
+                prompt_version=settings.generation_prompt_version,
+            )
+        except ValidationError as exc:
+            results.append(
+                {
+                    "name": name,
+                    "expected": expected,
+                    "actual": "invalid_structured_output",
+                    "passed": False,
+                    "reasons": ["pydantic_validation_failed"],
+                    "validation_error_count": exc.error_count(),
+                }
+            )
+            continue
+        evidence_map = {
+            item["id"]: " ".join(
+                str(value)
+                for value in [
+                    item.get("claim"),
+                    item.get("verified_value"),
+                    item.get("locator"),
+                    (
+                        f"exit_code={item.get('exit_code')}"
+                        if item.get("exit_code") is not None
+                        else ""
+                    ),
+                ]
+                if value
+            )
+            for item in payload["verified_evidence"]
+        }
+        validation, reasons, article = validate_draft(draft, evidence_map, settings)
+        actual = "publish" if validation == "PASS" else "held"
+        results.append(
+            {
+                "name": name,
+                "expected": expected,
+                "actual": actual,
+                "passed": actual == expected,
+                "reasons": reasons,
+                "article_chars": len(article),
+                "decision": draft.decision,
+                "decision_reason": draft.decision_reason,
+                "article_markdown": article,
+                "style_warnings": style_warnings(article),
+            }
+        )
+    passed = all(item["passed"] for item in results)
+    return {"status": "PASS" if passed else "FAIL", "results": results}
+
+
+def _qualification_key(
+    model: str,
+    digest: str,
+    prompt_version: str,
+    generation_parameters: dict[str, Any],
+) -> str:
+    identity = hashlib.sha256(
+        json.dumps(
+            {
+                "harness_version": _CURATION_HARNESS_VERSION,
+                "model": model,
+                "digest": digest,
+                "prompt_version": prompt_version,
+                "generation_parameters": generation_parameters,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()[:24]
+    return f"knowledge_curator.qualification.{identity}"
+
+
+def curate_candidate(
+    session: Session,
+    candidate: KnowledgeCandidate,
+    provider: GenerationProvider,
+    settings: Settings,
+    model_digest: str,
+) -> tuple[str, str | None]:
+    evidence = _evidence_rows(session, candidate)
+    metadata = dict(candidate.metadata_json or {})
+    value_assessment = assess_knowledge_value(
+        category=candidate.category,
+        problem=candidate.problem,
+        root_cause=candidate.root_cause,
+        solution=candidate.solution,
+        evidence=evidence,
+        metadata=metadata,
+    )
+    metadata["knowledge_value"] = value_assessment
+    candidate.metadata_json = metadata
+    journal_editorial_path = bool(
+        value_assessment["tier"] == "needs_review"
+        and metadata.get("journal_backed")
+    )
+    if value_assessment["tier"] != "promote" and not journal_editorial_path:
+        value_hash = hashlib.sha256(
+            json.dumps(
+                value_assessment,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        previous_curation = dict(metadata.get("curation") or {})
+        if (
+            previous_curation.get("validation_status") == "VALUE_HARNESS_REJECTED"
+            and previous_curation.get("value_hash") == value_hash
+            and previous_curation.get("prompt_version") == settings.generation_prompt_version
+        ):
+            return "UNCHANGED", None
+        candidate.status = (
+            "activity_only" if value_assessment["tier"] == "activity_only" else "needs_review"
+        )
+        metadata["curation"] = {
+            "state": candidate.status,
+            "validation_status": "VALUE_HARNESS_REJECTED",
+            "validation_reasons": value_assessment["blockers"],
+            "prompt_version": settings.generation_prompt_version,
+            "value_hash": value_hash,
+        }
+        candidate.metadata_json = metadata
+        candidate.updated_at = datetime.now(timezone.utc)
         return (
             "ACTIVITY_ONLY"
             if candidate.status == "activity_only"
