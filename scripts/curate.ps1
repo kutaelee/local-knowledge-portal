@@ -9,9 +9,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$workload = "local-knowledge-portal-curate-cases-and-project-articles"
 Import-Module (Join-Path $PSScriptRoot "curation-queue.psm1") -Force
 $curation = Invoke-RestMethod -Uri "http://127.0.0.1:8010/api/v1/knowledge/curation/status" -TimeoutSec 5
+$modelName = if ($curation.model) { [string]$curation.model } else { "model-unresolved" }
+$modelSlug = $modelName -replace '[^A-Za-z0-9._-]', '-'
+$workload = "local-knowledge-portal-curate-cases-and-project-articles-model-$modelSlug"
 if (-not $curation.enabled -and -not $curation.project_article_enabled) {
     Write-Host "Knowledge curation and project article editing are disabled; no GPU workload submitted."
     exit 0
@@ -33,7 +35,11 @@ $status = Invoke-RestMethod -Uri "http://127.0.0.1:8790/api/status" -TimeoutSec 
 $existing = @(
     Get-CurationQueueEntries `
         -Status $status `
-        -Workload @($workload, "local-knowledge-portal-curation")
+        -Workload @(
+            $workload,
+            "local-knowledge-portal-curate-cases-and-project-articles",
+            "local-knowledge-portal-curation"
+        )
 )
 if ($existing.Count -gt 0) {
     Write-Host "Curation is already queued or active: $($existing[0].id)"

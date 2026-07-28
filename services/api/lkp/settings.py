@@ -123,6 +123,13 @@ class Settings(BaseSettings):
     hook_claim_stale_seconds: int = 60
     knowledge_auto_publish: bool = False
     knowledge_content_language: Literal["ko", "en"] = "ko"
+    developer_feed_enabled: bool = True
+    developer_feed_poll_seconds: int = Field(default=300, ge=30, le=3600)
+    developer_feed_daily_hour: int = Field(default=18, ge=0, le=23)
+    developer_feed_timezone: str = "Asia/Seoul"
+    developer_feed_initial_lookback_hours: int = Field(default=72, ge=1, le=720)
+    developer_feed_max_sources_per_run: int = Field(default=12, ge=1, le=100)
+    developer_feed_persona_version: str = "workstation-developer-v1"
     activity_detail_retention_days: int = Field(default=30, ge=1, le=3650)
     terminal_job_detail_retention_days: int = Field(default=90, ge=1, le=3650)
     ingest_event_detail_retention_days: int = Field(default=90, ge=1, le=3650)

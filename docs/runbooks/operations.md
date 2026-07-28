@@ -167,6 +167,33 @@ The Compose services `ollama`, `ollama-generation`, and `ollama-embedding-batch`
 behind the disabled `legacy-ollama` profile. Do not start them during normal operation. A rollback
 must stop Windows Ollama first and preserve both model stores; never delete the shared model root.
 
+### Evidence-bound developer feed
+
+`developer-feed` is a CPU-only default-profile service. Every five minutes it looks for verified
+project journal entries whose changed files have a current `chunk_embedding` in the configured
+embedding revision. The global `source_embedding_to` cursor means an activity is posted only when
+its evidence was embedded after the last activity post. A delayed embedding can therefore be
+picked up on a later poll without replaying an already published journal.
+
+Each activity is stored as a bilingual X-style thread. Korean posts are limited to 140 Unicode
+code points and English posts to 280. Content beyond either limit is preserved in ordered replies,
+not truncated. The UI defaults to Korean and switches without regenerating content.
+The source manifest records journal, document, version, embedding revision/time, and passing
+execution-check counts. Raw conversation text is never copied into the feed.
+
+At 18:00 `Asia/Seoul`, the service creates the idempotent `daily:YYYY-MM-DD` summary. If it restarts
+after 18:00, the same-day summary is caught up once. A day with no new embedded verified work still
+gets a transparent no-progress closeout.
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8010/api/v1/developer-feed/status
+Invoke-RestMethod 'http://127.0.0.1:8010/api/v1/developer-feed?language=ko'
+```
+
+Rollback is application-safe: stop `developer-feed` and redeploy the prior API/web image. Existing
+feed rows are derived, non-authoritative records and may remain unread by the prior version. Do not
+downgrade the database during an ordinary rollback.
+
 ### Current GPU-queued evidence editor
 
 The qualified production editor is `qwen3.5:9b-q4_K_M`, digest
@@ -199,6 +226,10 @@ The curator freezes eligible candidate IDs immediately after acquiring its Postg
 lock. It attempts the complete frozen set, records processed/unchanged/failed counts, and isolates
 each candidate with a savepoint so one malformed model response cannot block later candidates.
 Candidates created or updated after the cutoff are intentionally handled by the next run.
+Journal-backed candidates previously held in `needs_review` are retried once per curator harness
+revision. A failed deterministic claim/citation validation is sent through exactly one constrained
+repair request; a second failure remains fail-closed in `needs_review`. The harness revision marker
+prevents repeated model loads for unchanged failed candidates.
 The external one-shot schedule is the retry clock, so each invocation probes the GPU again even
 when the previous run recorded an internal backoff timestamp. Only the optional persistent loop
 honors `next_attempt_at` between its own polls.

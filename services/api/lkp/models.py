@@ -7,6 +7,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -392,6 +393,54 @@ class ProjectJournalEntry(Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DeveloperFeedPost(Base):
+    """Evidence-bound, bilingual developer feed derived from embedded work."""
+
+    __tablename__ = "developer_feed_post"
+    __table_args__ = (
+        UniqueConstraint("publication_key", name="uq_developer_feed_publication_key"),
+        CheckConstraint(
+            "char_length(content_ko) <= 140",
+            name="ck_developer_feed_content_ko_140",
+        ),
+        CheckConstraint(
+            "char_length(content_en) <= 280",
+            name="ck_developer_feed_content_en_280",
+        ),
+        Index("ix_developer_feed_created", "created_at", "id"),
+        Index("ix_developer_feed_project_created", "project_key", "created_at"),
+        Index("ix_developer_feed_thread", "thread_root_id", "sequence"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    publication_key: Mapped[str] = mapped_column(String(300))
+    project_key: Mapped[str] = mapped_column(String(200))
+    post_type: Mapped[str] = mapped_column(String(32))
+    thread_root_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("developer_feed_post.id", ondelete="CASCADE")
+    )
+    reply_to_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("developer_feed_post.id", ondelete="CASCADE")
+    )
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+    content_ko: Mapped[str] = mapped_column(String(280))
+    content_en: Mapped[str] = mapped_column(String(280))
+    source_manifest_json: Mapped[dict[str, Any]] = mapped_column(
+        "source_manifest", JSONB, default=dict
+    )
+    source_embedding_from: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    source_embedding_to: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    persona_version: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
 
 
 class ProjectArticle(Base):

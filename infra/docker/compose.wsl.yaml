@@ -258,6 +258,16 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  developer-feed:
+    <<: *app
+    command: ["python", "-m", "lkp_indexer.developer_feed"]
+    cpus: "${LKP_DEVELOPER_FEED_CPUS:-0.25}"
+    mem_limit: 384m
+    pids_limit: 96
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   knowledge-curator:
     <<: *app
     profiles: ["manual-curation"]
