@@ -9,9 +9,10 @@ from lkp.settings import Settings
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .ignore import IgnoreRules
+from .ignore import IgnoreRules, IncludeRules
 from .paths import idempotency_key
 from .queue import enqueue
+from .repository_freshness import reconcile_repository_snapshots
 from .scanner import scan_root
 
 
@@ -22,6 +23,9 @@ class ReconcileStats:
     missing: int = 0
     ignored: int = 0
     errors: int = 0
+    repositories_checked: int = 0
+    repositories_stale: int = 0
+    repository_jobs_queued: int = 0
 
 
 def reconcile_root(session: Session, source_root: SourceRoot, settings: Settings) -> ReconcileStats:
@@ -33,6 +37,7 @@ def reconcile_root(session: Session, source_root: SourceRoot, settings: Settings
     )
     root_path = Path(source_root.canonical_path)
     ignore_rules = IgnoreRules(root_path, source_root.exclude_patterns)
+    include_rules = IncludeRules(source_root.include_patterns)
     documents = session.scalars(
         select(Document).where(
             Document.source_root_id == source_root.id,
@@ -45,7 +50,7 @@ def reconcile_root(session: Session, source_root: SourceRoot, settings: Settings
             relative = path.relative_to(root_path).as_posix()
         except ValueError:
             continue
-        if ignore_rules.matches(relative):
+        if ignore_rules.matches(relative) or not include_rules.matches(relative):
             document.state = DocumentState.ignored
             document.last_seen_at = datetime.now(timezone.utc)
             stats.ignored += 1
@@ -80,6 +85,11 @@ def reconcile_root(session: Session, source_root: SourceRoot, settings: Settings
         ):
             stats.queued += 1
         stats.missing += 1
+    repository_stats = reconcile_repository_snapshots(session, source_root)
+    stats.repositories_checked = repository_stats.checked
+    stats.repositories_stale = repository_stats.stale
+    stats.repository_jobs_queued = repository_stats.queued
+    stats.errors += repository_stats.errors
     source_root.last_reconciled_at = datetime.now(timezone.utc)
     session.add(
         IngestEvent(
@@ -92,6 +102,9 @@ def reconcile_root(session: Session, source_root: SourceRoot, settings: Settings
                 "missing": stats.missing,
                 "ignored": stats.ignored,
                 "errors": stats.errors,
+                "repositories_checked": stats.repositories_checked,
+                "repositories_stale": stats.repositories_stale,
+                "repository_jobs_queued": stats.repository_jobs_queued,
             },
         )
     )

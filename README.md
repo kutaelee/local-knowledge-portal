@@ -154,6 +154,15 @@ Codex requires a human trust review for non-managed hooks. Start a new session, 
 approve the displayed commands. Until then the installation status is
 `MANUAL_APPROVAL_REQUIRED`; no script attempts to bypass this boundary.
 
+Local-model conversations use a different intake path from Codex. A client that has completed an
+Ollama turn calls `POST /api/v1/local-llm/hooks/chat`, or invokes
+`scripts/capture-local-llm-chat.ps1`. The API only redacts and atomically writes the bounded
+envelope to `/data/ingest/local-llm-spool`; the collector later imports it idempotently with
+`activity_source=local_llm_chat`. Ollama itself has no global post-response hook, so a chat client
+must configure this callback/adapter. These turns appear under **Local model chats**, carry an
+explicit project key, remain separate from Codex activity, and are never treated as verified
+execution evidence merely because a model said something.
+
 ### Local evidence editor
 
 Ingestion, activity capture, evidence gates, and keyword search do not require an LLM. Long-form
@@ -161,13 +170,18 @@ case editing is isolated behind a provider interface:
 
 ```dotenv
 LKP_GENERATION_PROVIDER=ollama
-LKP_GENERATION_BASE_URL=http://ollama-generation:11434
+LKP_GENERATION_BASE_URL=http://host.docker.internal:11434
 LKP_GENERATION_MODEL=qwen3.5:9b-q4_K_M
 LKP_GENERATION_MODEL_DIGEST=6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7
 LKP_KNOWLEDGE_CURATION_ENABLED=true
 ```
 
-The editor uses a private, GPU-enabled Ollama service separate from CPU-bounded embedding.
+Hermes, portal embedding, and the evidence editor use the single Windows Ollama daemon at
+`127.0.0.1:11434` and the single active model store
+`E:\AI\Models\Ollama\generation\models`. Portal containers reach that loopback-only daemon through
+Docker Desktop's `host.docker.internal` gateway. Legacy Compose Ollama services are kept behind the
+`legacy-ollama` profile for rollback only and must not run concurrently with the workstation
+daemon.
 `qwen3.5:9b-q4_K_M` is the qualified production editor because the available smaller model did not
 reliably satisfy the structured evidence contract. The model only edits verified inputs into
 readable Korean prose; deterministic code owns publication state, deduplication, revisions, tags,
@@ -186,8 +200,12 @@ queued portal curation workload, and never exposes the scheduler mutation token 
 Each run freezes the eligible candidate IDs at its start and attempts that complete snapshot.
 Candidates created or made eligible while the run is active are deferred to the next hourly run.
 One candidate failure is recorded without preventing the remaining snapshot from being attempted.
-`/gpu-queue` is a read-only Korean/English view of GPU capacity, active/queued/completed jobs,
-effective priority, and scheduling notes. See
+`/gpu-queue` is a Korean/English view of GPU capacity, observed external use,
+active/queued/completed jobs, effective priority, and scheduling notes. It can
+request a safe stop only for a scheduler-managed child process and can persist a
+complete drag-and-drop queued order. The browser never receives the host control
+token; the API uses a server-side token configured with
+`scripts/configure-gpu-queue-control.ps1`. See
 [ADR 0013](docs/adr/0013-local-llm-evidence-editor.md).
 
 Install the hourly, non-overlapping submission task after the GPU scheduler is available:
@@ -206,10 +224,10 @@ Production embedding uses Ollama `qwen3-embedding:0.6b`, digest
 digest mismatch fails closed. Model changes require a new revision; vectors are never silently
 mixed. Tests use a separate deterministic revision.
 
-The WSL2 runtime keeps embedding thermally bounded: Ollama has a half-CPU Docker quota; worker and
-API have one CPU; watcher, hook collector, and web each have half a CPU. Model concurrency is one,
-and requests use bounded small batches. Query embeddings use a bounded revision-aware cache, the
-model is prewarmed and kept loaded, and search SQL has a bounded execution time. Multi-term keyword
+The WSL2 runtime keeps ingestion thermally bounded: worker and API have one CPU; watcher, hook
+collector, and web each have half a CPU. Embedding requests use bounded small batches and the
+runtime may be set to `deferred_gpu_recovery` while another GPU reservation is active. Query
+embeddings use a bounded revision-aware cache and search SQL has a bounded execution time. Multi-term keyword
 fallback stays on the GIN-backed text vector and requires at least two matching terms; expensive
 trigram fuzzy matching is bounded to short single-term typo recovery. Semantic and lexical
 jobs have separate cooldown/burst policies, so an initial code catalog scan drains without calling
@@ -231,12 +249,25 @@ Integration and retrieval tests refuse to target the production database. Unit/i
 use a deterministic revision; retrieval evaluation uses the real configured Ollama model against
 a dedicated bilingual/code corpus.
 
+Run the integration suite from WSL with a fresh private-network database:
+
+```bash
+sh scripts/run-isolated-integration-tests.sh
+```
+
+The runner generates a new `lkp_test_verify_*` database, refuses to reuse one,
+mounts the repository read-only into a one-off test container, and drops only
+the database it created in its exit trap. It never connects the tests to the
+production database.
+
 ## API surface
 
 Implemented endpoints include keyword/hybrid/semantic search, RAG context, documents, versions,
 backlinks, projects, tree, jobs and auditable retry, workers, timeline, summary metrics, Prometheus
 text metrics, split live/readiness health, indexed knowledge facets, source/managed catalog
-boundaries, and `/api/v1/system/services`. The latter checks the persistent WSL/Docker services
+boundaries, `/api/v1/system/services`, and `/api/v1/embedding/recovery`. The recovery endpoint
+reports only the portal-owned semantic-recovery reservation and scheduler decision; it exposes no
+scheduler mutation path or command arguments. The service catalog checks the persistent WSL/Docker services
 without exposing the Docker socket. A bounded Windows collector runs every 30 seconds and
 atomically writes `E:\Data\LocalKnowledgePortal\runtime\docker-services.json`; Compose projects
 added later appear automatically. The UI groups results as Local Knowledge Portal, project
@@ -247,9 +278,14 @@ Project knowledge uses the same `project → work type → newest record` tree f
 held candidates, and project journal entries. Filters are applied server-side so pagination totals
 remain accurate.
 
-The read-only GPU scheduler integration exposes only `GET /api/v1/gpu-queue/health`,
-`GET /api/v1/gpu-queue/status`, and `GET /api/v1/gpu-queue/jobs/{uuid}`. The upstream host URL is
-restricted to loopback or `host.docker.internal`; POST and credentials are not proxied.
+The GPU scheduler integration exposes bounded health/status/job GETs plus a
+server-side safe-stop request and complete queued-order update. The upstream
+host URL is restricted to loopback or `host.docker.internal`. The browser
+cannot call the host scheduler directly and never receives its token.
+
+`/api/v1/knowledge/dedup/status` reports pending non-exact candidates and rebuildable dedup-vector
+coverage. The optional low-priority Windows task `\LocalKnowledgePortal\DeduplicateKnowledge`
+submits a GPU-reserved worker only while that count is nonzero; see the operations runbook.
 
 Every retrieval result includes document, version, chunk, source root, canonical/relative path, source lines, content hash, indexed time, retrieval score, and match reason.
 

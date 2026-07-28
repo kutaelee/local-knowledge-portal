@@ -8,9 +8,14 @@ from alembic import command
 from alembic.config import Config
 from lkp.models import (
     ActivityEvent,
+    Document,
+    DocumentLink,
+    DocumentState,
     EvidenceRecord,
     GeneratedPage,
+    IngestEvent,
     IngestJob,
+    JobStatus,
     KnowledgeCandidate,
     KnowledgeCase,
     KnowledgeCaseRelation,
@@ -20,9 +25,14 @@ from lkp.models import (
     SourceRoot,
 )
 from lkp.settings import Settings
-from lkp_indexer.activity_knowledge import finalize_pending_stops, finalize_stop
-from lkp_indexer.activity_retention import roll_up_activity_details
+from lkp_indexer.activity_knowledge import (
+    finalize_pending_stops,
+    finalize_stop,
+)
+from lkp_indexer.activity_retention import roll_up_activity_details, roll_up_operational_details
 from lkp_indexer.case_pages import materialize_case
+from lkp_indexer.document_link_backfill import backfill_document_links
+from lkp_indexer.document_links import resolve_links_for_target, sync_document_links
 from lkp_indexer.generation import CuratedKnowledgeArticle, EvidenceBoundParagraph
 from lkp_indexer.hook_collector import collect_file, envelope_to_activity
 from lkp_indexer.hook_spool import spool
@@ -30,9 +40,11 @@ from lkp_indexer.knowledge import (
     create_candidate,
     evaluate_gate,
     invalidate_misclassified_execution_evidence,
+    knowledge_key_terms,
     publish_candidate,
 )
 from lkp_indexer.knowledge_curator import GpuSnapshot, curate_candidate, run_once
+from lkp_indexer.knowledge_dedup import run_once as run_knowledge_dedup
 from lkp_indexer.knowledge_quality import review_low_quality_auto_cases
 from lkp_indexer.paths import idempotency_key
 from lkp_indexer.queue import enqueue
@@ -74,7 +86,7 @@ class FakeEvidenceEditor:
 
     def curate(self, _payload, *, language, prompt_version):
         assert language == "ko"
-        assert prompt_version == "evidence-blog-v9"
+        assert prompt_version.startswith("evidence-blog-v")
         section = [
             EvidenceBoundParagraph(
                 text=(
@@ -107,6 +119,23 @@ class FakeEvidenceEditor:
             ),
             self.model_digest(),
         )
+
+
+class FakeDedupEmbedder:
+    provider = "deterministic-test"
+    model = "dedup-test"
+    digest = "test-dedup-v1"
+    dimension = 1024
+
+    def embed(self, values):
+        # Candidate/case pairs containing the same durable term intentionally
+        # share one normalized vector; unrelated terms take an orthogonal axis.
+        result = []
+        for value in values:
+            vector = [0.0] * self.dimension
+            vector[0 if "fixture" in value.casefold() else 1] = 1.0
+            result.append(vector)
+        return result
 
 
 def candidate(session: Session, **overrides):
@@ -185,6 +214,60 @@ def test_local_editor_publishes_only_after_deterministic_validation(
         )
         assert overview.exists()
         assert "## 최근 검증 사례" in overview.read_text(encoding="utf-8")
+        session.rollback()
+
+
+def test_journal_backed_operational_change_can_be_published_only_after_editorial_citations(
+    database_url: str, tmp_path: Path
+):
+    """A verified config change reaches the editor but does not bypass its gate."""
+
+    engine = create_engine(database_url)
+    settings = Settings(
+        database_url=database_url,
+        vault_dir=tmp_path / "vault",
+        knowledge_content_language="ko",
+        knowledge_curation_auto_publish=True,
+    )
+    with Session(engine) as session:
+        row = create_candidate(
+            session,
+            category="operations",
+            title="portal operation configuration update",
+            problem="The service operation configuration needed a verified update.",
+            symptom="The existing deployment behaviour did not describe the new guard.",
+            root_cause="Observed implementation in portal: configuration and scripts changed.",
+            solution=(
+                "Changed artifacts: compose.yaml and start.ps1. "
+                "Observed validation: build command."
+            ),
+            reported_result="The operational update was completed.",
+            verified_result="build exit 0",
+            evidence=evidence(("code_change", 0), ("build_pass", 0)),
+            metadata={
+                "auto_generated": True,
+                "extractor": "deterministic-activity-v1",
+                "structured_knowledge": False,
+                "project": "local-knowledge-portal",
+                "journal_backed": True,
+                "journal_reassessment": {"version": "journal-backed-editorial-v1"},
+            },
+        )
+        assert evaluate_gate(session, row) == "VERIFIED"
+
+        outcome, case_id = curate_candidate(
+            session,
+            row,
+            FakeEvidenceEditor(),
+            settings,
+            "sha256:test-e4b",
+        )
+
+        assert outcome == "CREATED_CANONICAL"
+        assert case_id is not None
+        assert row.status == "published"
+        assert row.metadata_json["editorial_value_resolution"]["approved"] is True
+        assert row.metadata_json["curation"]["state"] == "published"
         session.rollback()
 
 
@@ -490,6 +573,7 @@ def test_global_activity_turns_become_evidence_gated_cases(database_url: str, tm
             changed_files=[
                 r"C:\Dev\Repos\sample-project\services\worker.py",
                 r"C:\Dev\Repos\sample-project\tests\test_worker.py",
+                r"C:\Docker\local-knowledge-portal\compose.override.yaml",
             ],
             document_version_ids=[],
             verified_result="observed exit_code=0",
@@ -570,7 +654,7 @@ def test_global_activity_turns_become_evidence_gated_cases(database_url: str, tm
             )
         )
         assert generated is not None
-        assert generated.status == "needs_review"
+        assert generated.status == "candidate"
         assert generated.metadata_json["reported_result_is_evidence"] is False
         assert (
             "local_llm_evidence_validation_required"
@@ -604,6 +688,14 @@ def test_global_activity_turns_become_evidence_gated_cases(database_url: str, tm
         assert journal.verification_status == "VERIFIED"
         assert journal.metadata_json["reported_result_is_evidence"] is False
         assert "multi_artifact_change" in journal.significance_reasons
+        assert journal.changed_files == [
+            r"C:\Dev\Repos\sample-project\services\worker.py",
+            r"C:\Dev\Repos\sample-project\tests\test_worker.py",
+        ]
+        assert journal.metadata_json["related_operational_files"] == [
+            r"C:\Docker\local-knowledge-portal\compose.override.yaml"
+        ]
+        assert journal.title == "[sample-project] worker 재시작 시 중복 처리를 방지합니다."
         journal_page = (
             tmp_path
             / "vault"
@@ -618,10 +710,104 @@ def test_global_activity_turns_become_evidence_gated_cases(database_url: str, tm
         entry_pages = list((journal_page.parent / "Journal").glob("*.md"))
         assert len(entry_pages) == 1
         entry_content = entry_pages[0].read_text(encoding="utf-8")
-        assert "## [sample-project] 구현 완료" in entry_content
+        assert (
+            "## [sample-project] worker 재시작 시 중복 처리를 방지합니다."
+            in entry_content
+        )
+        assert "구현 완료\n\n목표:" not in entry_content
         assert "지식베이스 참조" in entry_content
 
         assert finalize_pending_stops(session, settings)["considered"] == 0
+        session.rollback()
+
+
+def test_generic_verified_completion_is_journal_only(database_url: str, tmp_path: Path):
+    """A journal entry is useful, but a generic completion is not a KB case."""
+
+    engine = create_engine(database_url)
+    session_id = f"generic-journal-{uuid.uuid4()}"
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                ActivityEvent(
+                    event_key=f"generic-change-{uuid.uuid4()}",
+                    session_id=session_id,
+                    turn_id="turn-generic",
+                    event_type="PostToolUse",
+                    occurred_at=now,
+                    project_key="thread-folder",
+                    cwd=r"C:\Dev\Repos\sample-project",
+                    tool_name="apply_patch",
+                    command="*** Update File: services/worker.py",
+                    exit_code=0,
+                    changed_files=[r"C:\Dev\Repos\sample-project\services\worker.py"],
+                    document_version_ids=[],
+                    verified_result="observed exit_code=0",
+                    verification_status="VERIFIED",
+                    metadata_json={},
+                ),
+                ActivityEvent(
+                    event_key=f"generic-test-{uuid.uuid4()}",
+                    session_id=session_id,
+                    turn_id="turn-generic",
+                    event_type="PostToolUse",
+                    occurred_at=now + timedelta(seconds=1),
+                    project_key="thread-folder",
+                    cwd=r"C:\Dev\Repos\sample-project",
+                    tool_name="Bash",
+                    command="pytest -q tests/test_worker.py",
+                    exit_code=0,
+                    changed_files=[],
+                    document_version_ids=[],
+                    verified_result="observed exit_code=0",
+                    verification_status="VERIFIED",
+                    metadata_json={},
+                ),
+                ActivityEvent(
+                    event_key=f"generic-stop-{uuid.uuid4()}",
+                    session_id=session_id,
+                    turn_id="turn-generic",
+                    event_type="Stop",
+                    occurred_at=now + timedelta(seconds=2),
+                    project_key="thread-folder",
+                    cwd=r"C:\Dev\Repos\sample-project",
+                    instruction="worker 변경을 검증해",
+                    changed_files=[],
+                    document_version_ids=[],
+                    reported_result="수정 완료했습니다.\n테스트 실행은 성공했습니다.",
+                    verified_result="pytest exit=0",
+                    verification_status="VERIFIED",
+                    metadata_json={},
+                ),
+            ]
+        )
+        session.flush()
+        counts = finalize_pending_stops(
+            session,
+            Settings(database_url=database_url, vault_dir=tmp_path / "vault"),
+        )
+        assert counts["journal_recorded"] == 1
+        assert counts["candidates"] == 0
+        stop = session.scalar(
+            select(ActivityEvent).where(
+                ActivityEvent.session_id == session_id,
+                ActivityEvent.event_type == "Stop",
+            )
+        )
+        assert stop is not None
+        assert stop.metadata_json["knowledge_pipeline"]["state"] == "activity_only"
+        assert (
+            stop.metadata_json["knowledge_pipeline"]["reason"]
+            == "reusable_explanation_missing"
+        )
+        journal = session.scalar(
+            select(ProjectJournalEntry).where(
+                ProjectJournalEntry.source_stop_activity_id == stop.id
+            )
+        )
+        assert journal is not None
+        assert journal.title.startswith("[sample-project] ")
         session.rollback()
 
 
@@ -700,6 +886,157 @@ def test_legacy_patch_validation_evidence_is_retracted_without_deleting_history(
             "non_execution_tool_misclassified_as_command"
         )
         assert session.get(ActivityEvent, activity.id) is activity
+        session.rollback()
+
+
+def test_observed_project_change_creates_journal_without_publishing_case(
+    database_url: str,
+    tmp_path: Path,
+):
+    engine = create_engine(database_url)
+    session_id = f"observed-journal-{uuid.uuid4()}"
+    now = datetime.now(timezone.utc)
+    common = {
+        "session_id": session_id,
+        "turn_id": "turn-observed",
+        "cwd": r"C:\Dev\Repos\parent-project\tools\renderer",
+        "document_version_ids": [],
+        "metadata_json": {},
+    }
+    with Session(engine) as session:
+        session.add(
+            ActivityEvent(
+                **common,
+                event_key=f"change-{uuid.uuid4()}",
+                event_type="PostToolUse",
+                occurred_at=now,
+                project_key="renderer",
+                tool_name="apply_patch",
+                command="*** Update File: C:\\Dev\\Repos\\wedding-picture\\src\\pipeline.py",
+                exit_code=0,
+                changed_files=[
+                    r"C:\Dev\Repos\wedding-picture\src\pipeline.py",
+                    r"C:\Dev\Repos\wedding-picture\config\pipeline.json",
+                ],
+                verified_result="observed exit_code=0",
+                verification_status="VERIFIED",
+            )
+        )
+        stop = ActivityEvent(
+            **common,
+            event_key=f"stop-{uuid.uuid4()}",
+            event_type="Stop",
+            occurred_at=now + timedelta(seconds=1),
+            project_key="renderer",
+            instruction="Update the wedding image pipeline and its configuration.",
+            changed_files=[],
+            reported_result=(
+                "Completed the pipeline and configuration update. "
+                "The next generation run will validate model output quality."
+            ),
+            verification_status="VERIFIED",
+        )
+        session.add(stop)
+        session.flush()
+
+        counts = finalize_pending_stops(
+            session,
+            Settings(database_url=database_url, vault_dir=tmp_path / "vault"),
+        )
+
+        assert counts["journal_recorded"] == 1
+        assert counts["candidates"] == 0
+        journal = session.scalar(
+            select(ProjectJournalEntry).where(
+                ProjectJournalEntry.source_stop_activity_id == stop.id
+            )
+        )
+        assert journal is not None
+        assert journal.project_key == "wedding-picture"
+        assert journal.verification_status == "OBSERVED_CHANGE"
+        assert journal.metadata_json["validation_state"] == (
+            "file_change_observed_without_test_or_build"
+        )
+        assert "multi_artifact_change" in journal.significance_reasons
+        assert stop.metadata_json["knowledge_pipeline"]["reason"] == (
+            "no_successful_validation"
+        )
+        assert session.scalar(select(func.count()).select_from(KnowledgeCase)) == 0
+        session.rollback()
+
+
+def test_historical_activity_only_project_change_is_reassessed(
+    database_url: str,
+    tmp_path: Path,
+):
+    engine = create_engine(database_url)
+    session_id = f"historical-journal-{uuid.uuid4()}"
+    now = datetime.now(timezone.utc)
+    common = {
+        "session_id": session_id,
+        "turn_id": "turn-historical",
+        "cwd": r"C:\Dev\Repos\historical-project\tools",
+        "document_version_ids": [],
+    }
+    with Session(engine) as session:
+        session.add(
+            ActivityEvent(
+                **common,
+                event_key=f"change-{uuid.uuid4()}",
+                event_type="PostToolUse",
+                occurred_at=now,
+                project_key="historical-project",
+                tool_name="apply_patch",
+                command="*** Update File: C:\\Dev\\Repos\\historical-project\\worker.py",
+                exit_code=0,
+                changed_files=[
+                    r"C:\Dev\Repos\historical-project\worker.py",
+                    r"C:\Dev\Repos\historical-project\config\worker.json",
+                ],
+                verified_result="observed exit_code=0",
+                verification_status="VERIFIED",
+                metadata_json={},
+            )
+        )
+        stop = ActivityEvent(
+            **common,
+            event_key=f"stop-{uuid.uuid4()}",
+            event_type="Stop",
+            occurred_at=now + timedelta(seconds=1),
+            project_key="tools",
+            instruction="Implement the historical worker change.",
+            changed_files=[],
+            reported_result="Completed the worker and configuration implementation.",
+            verification_status="VERIFIED",
+            metadata_json={
+                "project_journal": {
+                    "state": "activity_only",
+                    "reason": "not_a_significant_verified_project_change",
+                },
+                "knowledge_pipeline": {
+                    "state": "activity_only",
+                    "reason": "no_successful_validation",
+                },
+            },
+        )
+        session.add(stop)
+        session.flush()
+
+        counts = finalize_pending_stops(
+            session,
+            Settings(database_url=database_url, vault_dir=tmp_path / "vault"),
+        )
+
+        assert counts["journal_reassessment_reopened"] >= 1
+        journal = session.scalar(
+            select(ProjectJournalEntry).where(
+                ProjectJournalEntry.source_stop_activity_id == stop.id
+            )
+        )
+        assert journal is not None
+        assert journal.project_key == "historical-project"
+        assert journal.verification_status == "OBSERVED_CHANGE"
+        assert stop.metadata_json["project_journal"]["state"] == "recorded"
         session.rollback()
 
 
@@ -785,6 +1122,257 @@ def test_late_tool_evidence_reopens_activity_only_stop(database_url: str, tmp_pa
         assert candidate is not None
         assert candidate.status == "needs_review"
         assert outcome == "NEEDS_REVIEW"
+        session.rollback()
+
+
+def test_natural_language_failure_report_becomes_editorial_candidate(
+    database_url: str,
+    tmp_path: Path,
+):
+    engine = create_engine(database_url)
+    session_id = f"natural-report-{uuid.uuid4()}"
+    now = datetime.now(timezone.utc)
+    settings = Settings(database_url=database_url, vault_dir=tmp_path / "vault")
+    common = {
+        "session_id": session_id,
+        "turn_id": "turn-1",
+        "project_key": "worker-project",
+        "cwd": "/home/kutae/src/worker-project",
+        "document_version_ids": [],
+        "metadata_json": {},
+    }
+    with Session(engine) as session:
+        session.add_all(
+            [
+                ActivityEvent(
+                    **common,
+                    event_key=f"failure-{uuid.uuid4()}",
+                    event_type="PostToolUse",
+                    occurred_at=now,
+                    tool_name="Bash",
+                    command="pytest -q tests/test_worker.py",
+                    exit_code=1,
+                    changed_files=[],
+                    verification_status="VERIFIED",
+                ),
+                ActivityEvent(
+                    **common,
+                    event_key=f"change-{uuid.uuid4()}",
+                    event_type="PostToolUse",
+                    occurred_at=now + timedelta(seconds=1),
+                    tool_name="apply_patch",
+                    exit_code=0,
+                    changed_files=["/home/kutae/src/worker-project/worker.py"],
+                    verification_status="VERIFIED",
+                ),
+                ActivityEvent(
+                    **common,
+                    event_key=f"success-{uuid.uuid4()}",
+                    event_type="PostToolUse",
+                    occurred_at=now + timedelta(seconds=2),
+                    tool_name="Bash",
+                    command="pytest -q tests/test_worker.py",
+                    exit_code=0,
+                    changed_files=[],
+                    verification_status="VERIFIED",
+                ),
+            ]
+        )
+        stop = ActivityEvent(
+            **common,
+            event_key=f"stop-{uuid.uuid4()}",
+            event_type="Stop",
+            occurred_at=now + timedelta(seconds=3),
+            instruction="worker 재시도 오류를 수정하고 검증해",
+            changed_files=[],
+            reported_result=(
+                "재시도 중 lease가 갱신되지 않아 다른 worker가 같은 작업을 가져갔습니다.\n\n"
+                "heartbeat와 같은 트랜잭션에서 lease 만료 시각을 연장하도록 바꿨고, "
+                "실패하던 회귀 테스트와 전체 worker 테스트가 통과했습니다."
+            ),
+            verification_status="VERIFIED",
+        )
+        session.add(stop)
+        session.flush()
+
+        candidate, outcome = finalize_stop(session, stop, settings)
+
+        assert candidate is not None
+        assert outcome == "EDITORIAL_ASSESSMENT_PENDING"
+        assert candidate.category == "error_resolution"
+        assert candidate.status == "candidate"
+        assert candidate.metadata_json["extractor"] == "deterministic-activity-v2"
+        assert candidate.metadata_json["reported_sources"][0]["kind"] == "final_report"
+        assert candidate.metadata_json["reported_result_is_evidence"] is False
+        session.rollback()
+
+
+def test_local_llm_chat_is_separate_unverified_project_activity(
+    database_url: str,
+    tmp_path: Path,
+):
+    from lkp.local_chat_capture import spool_local_chat
+    from lkp.schemas import LocalChatCapture
+
+    engine = create_engine(database_url)
+    request = LocalChatCapture(
+        session_id=f"ollama-{uuid.uuid4()}",
+        turn_id="turn-1",
+        project_key="sample-project",
+        model="qwen3.5:9b-q4_K_M",
+        user_message="이 프로젝트의 lease 갱신 방식을 설명해 주세요.",
+        assistant_message=(
+            "현재 설계는 heartbeat와 lease 갱신을 같은 흐름에서 처리한다고 설명합니다."
+        ),
+    )
+    event_id, path = spool_local_chat(request, tmp_path / "local-llm-spool")
+    with Session(engine) as session:
+        assert collect_file(session, path)
+        activity = session.scalar(
+            select(ActivityEvent).where(ActivityEvent.event_key == event_id)
+        )
+        assert activity is not None
+        assert activity.event_type == "LocalChat"
+        assert activity.project_key == "sample-project"
+        assert activity.verification_status == "UNVERIFIED"
+        assert activity.metadata_json["activity_source"] == "local_llm_chat"
+        assert activity.metadata_json["reported_result_is_evidence"] is False
+        session.rollback()
+
+
+def test_markdown_links_resolve_late_targets_and_keep_dangling_state(
+    database_url: str,
+):
+    engine = create_engine(database_url)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        root = SourceRoot(
+            name=f"links-{uuid.uuid4()}",
+            canonical_path=f"/tmp/links-{uuid.uuid4()}",
+            source_type="obsidian",
+            data_scope="validation",
+            read_only=True,
+            enabled=True,
+        )
+        session.add(root)
+        session.flush()
+        source = Document(
+            source_root_id=root.id,
+            canonical_path=f"{root.canonical_path}/Home.md",
+            relative_path="Home.md",
+            filename="Home.md",
+            extension=".md",
+            mime_type="text/markdown",
+            project_key="sample-project",
+            project_relative_path="Home.md",
+            parent_path=".",
+            size_bytes=100,
+            modified_at_fs=now,
+            state=DocumentState.active,
+        )
+        session.add(source)
+        session.flush()
+
+        assert sync_document_links(
+            session,
+            source,
+            "[[Runbooks/Recovery]]\n[missing](missing.md)",
+        ) == 2
+        assert session.scalar(
+            select(func.count()).select_from(DocumentLink).where(
+                DocumentLink.target_document_id.is_(None)
+            )
+        ) == 2
+
+        target = Document(
+            source_root_id=root.id,
+            canonical_path=f"{root.canonical_path}/Runbooks/Recovery.md",
+            relative_path="Runbooks/Recovery.md",
+            filename="Recovery.md",
+            extension=".md",
+            mime_type="text/markdown",
+            project_key="sample-project",
+            project_relative_path="Runbooks/Recovery.md",
+            parent_path="Runbooks",
+            size_bytes=50,
+            modified_at_fs=now,
+            state=DocumentState.active,
+        )
+        session.add(target)
+        session.flush()
+
+        assert resolve_links_for_target(session, target) == 1
+        resolved = session.scalar(
+            select(DocumentLink).where(DocumentLink.target_document_id == target.id)
+        )
+        assert resolved is not None and resolved.link_type == "wikilink"
+        assert session.scalar(
+            select(func.count()).select_from(DocumentLink).where(
+                DocumentLink.target_document_id.is_(None)
+            )
+        ) == 1
+        session.rollback()
+
+
+def test_document_link_backfill_reads_sources_without_embedding(
+    database_url: str,
+    tmp_path: Path,
+):
+    engine = create_engine(database_url)
+    root_path = tmp_path / f"link-backfill-{uuid.uuid4()}"
+    root_path.mkdir()
+    source_path = root_path / "Home.md"
+    target_path = root_path / "Guide.md"
+    source_path.write_text("[[Guide]]\n", encoding="utf-8")
+    target_path.write_text("# Guide\n", encoding="utf-8")
+    with Session(engine) as session:
+        root = SourceRoot(
+            name=f"backfill-{uuid.uuid4()}",
+            canonical_path=str(root_path),
+            source_type="obsidian",
+            data_scope="validation",
+            read_only=True,
+            enabled=True,
+        )
+        session.add(root)
+        session.flush()
+        source = Document(
+            source_root_id=root.id,
+            canonical_path=str(source_path),
+            relative_path="Home.md",
+            filename="Home.md",
+            extension=".md",
+            mime_type="text/markdown",
+            project_key="backfill",
+            parent_path=".",
+            size_bytes=source_path.stat().st_size,
+            modified_at_fs=datetime.now(timezone.utc),
+            state=DocumentState.active,
+        )
+        target = Document(
+            source_root_id=root.id,
+            canonical_path=str(target_path),
+            relative_path="Guide.md",
+            filename="Guide.md",
+            extension=".md",
+            mime_type="text/markdown",
+            project_key="backfill",
+            parent_path=".",
+            size_bytes=target_path.stat().st_size,
+            modified_at_fs=datetime.now(timezone.utc),
+            state=DocumentState.active,
+        )
+        session.add_all([source, target])
+        session.flush()
+
+        result = backfill_document_links(session, max_file_bytes=1024 * 1024)
+
+        link = session.scalar(
+            select(DocumentLink).where(DocumentLink.source_document_id == source.id)
+        )
+        assert result["documents_synced"] >= 2
+        assert link is not None
+        assert link.target_document_id == target.id
         session.rollback()
 
 
@@ -877,6 +1465,13 @@ def test_qualified_error_case_dedup_and_different_cause_relation(database_url: s
                 "structured_knowledge": True,
                 "approval_policy": "local_llm_evidence_bound",
                 "curation_validation_status": "PASS",
+                # This test exercises exact duplicate occurrence and
+                # same-symptom relation after the separate GPU vector
+                # worker has already cleared the candidate.
+                "semantic_dedup": {
+                    "state": "verified_no_semantic_duplicate",
+                    "policy": "key_terms_then_pgvector-v1",
+                },
             }
             return publish_candidate(session, candidate)
 
@@ -979,9 +1574,10 @@ def test_generic_auto_case_is_retracted_without_deleting_history(database_url: s
         applied = review_low_quality_auto_cases(session, vault_dir=tmp_path / "vault", apply=True)
         assert any(item["case_id"] == str(case.id) for item in applied)
         assert case.status == "retired"
-        assert auto.status == "needs_review"
+        assert auto.status == "activity_only"
         assert auto.evidence_gate_status == "VERIFIED"
-        assert auto.metadata_json["quality_gate_status"] == "NEEDS_REVIEW"
+        assert auto.metadata_json["quality_gate_status"] == "ACTIVITY_ONLY"
+        assert auto.metadata_json["candidate_quarantine"]["reversible"] is True
         session.rollback()
 
 
@@ -1024,4 +1620,151 @@ def test_activity_detail_rollup_preserves_failures_and_evidence(database_url: st
         assert old_success.metadata_json["retention_state"] == "rolled_up"
         assert "retention_state" not in old_failure.metadata_json
         assert roll_up_activity_details(session, retention_days=30, now=now) == 0
+        session.rollback()
+
+
+def test_operational_rollup_hides_only_routine_terminal_history(database_url: str):
+    engine = create_engine(database_url)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        root = SourceRoot(
+            name=f"retention-{uuid.uuid4()}",
+            canonical_path=f"/tmp/retention-{uuid.uuid4()}",
+            source_type="repositories",
+            read_only=True,
+            enabled=True,
+            include_patterns=[],
+            exclude_patterns=[],
+        )
+        session.add(root)
+        session.flush()
+        routine = IngestJob(
+            idempotency_key=f"routine-{uuid.uuid4()}",
+            source_root_id=root.id,
+            canonical_path="/tmp/routine.md",
+            job_type="index",
+            status=JobStatus.succeeded,
+            finished_at=now - timedelta(days=91),
+            error_details={},
+        )
+        dead = IngestJob(
+            idempotency_key=f"dead-{uuid.uuid4()}",
+            source_root_id=root.id,
+            canonical_path="/tmp/dead.md",
+            job_type="index",
+            status=JobStatus.dead_letter,
+            finished_at=now - timedelta(days=91),
+            error_details={},
+        )
+        indexed = IngestEvent(
+            event_type="indexed",
+            path="/tmp/routine.md",
+            created_at=now - timedelta(days=91),
+            details={},
+        )
+        deleted = IngestEvent(
+            event_type="deleted",
+            path="/tmp/dead.md",
+            created_at=now - timedelta(days=91),
+            details={},
+        )
+        session.add_all([routine, dead, indexed, deleted])
+        session.flush()
+        result = roll_up_operational_details(
+            session,
+            terminal_job_retention_days=90,
+            ingest_event_retention_days=90,
+            now=now,
+        )
+        assert result == {"jobs": 1, "events": 1}
+        assert routine.error_details["retention_state"] == "rolled_up"
+        assert "retention_state" not in dead.error_details
+        assert indexed.details["retention_state"] == "rolled_up"
+        assert "retention_state" not in deleted.details
+        session.rollback()
+
+
+def test_gpu_vector_dedup_marks_near_case_for_review(database_url: str):
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        original = candidate(
+            session,
+            problem="fixture worker lease failure",
+            symptom="fixture worker lease failure",
+            root_cause="fixture omitted the lease expiry field",
+            solution="add the required lease expiry field",
+        )
+        case, outcome = publish_candidate(session, original)
+        assert case is not None and outcome == "CREATED_CANONICAL"
+        pending = candidate(
+            session,
+            problem="fixture worker lease timeout",
+            symptom="fixture worker lease timeout",
+            root_cause="fixture omitted the expiry configuration",
+            solution="configure the expiry field before the worker starts",
+            metadata={
+                "auto_generated": True,
+                "semantic_dedup": {
+                    "state": "pending_gpu_vector_check",
+                    "key_terms": knowledge_key_terms(
+                        "fixture worker lease timeout",
+                        "fixture omitted the expiry configuration",
+                    ),
+                },
+            },
+        )
+        pending.evidence_gate_status = "VERIFIED"
+        session.flush()
+        result = run_knowledge_dedup(
+            session,
+            Settings(
+                database_url=database_url,
+                embedding_revision="test-dedup-v1",
+                embedding_model_digest="test-dedup-v1",
+                knowledge_dedup_similarity_threshold=0.8,
+            ),
+            FakeDedupEmbedder(),
+        )
+        assert result["needs_review"] == 1
+        assert pending.status == "needs_review"
+        assert pending.metadata_json["semantic_dedup"]["matches"][0]["case_id"] == str(case.id)
+        session.rollback()
+
+
+def test_gpu_vector_dedup_blocks_candidates_without_evidence(database_url: str):
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        pending = candidate(
+            session,
+            problem="fixture reported change without execution evidence",
+            symptom="fixture report only",
+            root_cause="reported cause",
+            solution="reported solution",
+            metadata={
+                "auto_generated": True,
+                "semantic_dedup": {
+                    "state": "pending_gpu_vector_check",
+                    "key_terms": ["fixture", "reported"],
+                },
+            },
+        )
+        pending.evidence_gate_status = "NEEDS_EVIDENCE"
+        session.flush()
+
+        result = run_knowledge_dedup(
+            session,
+            Settings(
+                database_url=database_url,
+                embedding_revision="test-dedup-v1",
+                embedding_model_digest="test-dedup-v1",
+            ),
+            FakeDedupEmbedder(),
+        )
+
+        assert result["considered"] == 0
+        assert result["blocked_by_evidence"] == 1
+        assert (
+            pending.metadata_json["semantic_dedup"]["state"]
+            == "blocked_by_evidence_gate"
+        )
         session.rollback()

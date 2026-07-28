@@ -9,10 +9,32 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$workload = "local-knowledge-portal-curation"
+$workload = "local-knowledge-portal-curate-cases-and-project-articles"
+Import-Module (Join-Path $PSScriptRoot "curation-queue.psm1") -Force
+$curation = Invoke-RestMethod -Uri "http://127.0.0.1:8010/api/v1/knowledge/curation/status" -TimeoutSec 5
+if (-not $curation.enabled -and -not $curation.project_article_enabled) {
+    Write-Host "Knowledge curation and project article editing are disabled; no GPU workload submitted."
+    exit 0
+}
+$articleDue = if ($null -ne $curation.project_articles) {
+    [int]$curation.project_articles.due
+}
+elseif ($curation.project_article_enabled) {
+    1
+}
+else {
+    0
+}
+if ([int]$curation.eligible_candidates -le 0 -and $articleDue -le 0) {
+    Write-Host "No knowledge cases or project articles require editing; no GPU workload submitted."
+    exit 0
+}
 $status = Invoke-RestMethod -Uri "http://127.0.0.1:8790/api/status" -TimeoutSec 3
-$existing = @($status.jobs.active) + @($status.jobs.queued) |
-    Where-Object { $_.workload_key -eq $workload }
+$existing = @(
+    Get-CurationQueueEntries `
+        -Status $status `
+        -Workload @($workload, "local-knowledge-portal-curation")
+)
 if ($existing.Count -gt 0) {
     Write-Host "Curation is already queued or active: $($existing[0].id)"
     exit 0
@@ -29,12 +51,7 @@ $command = @(
     "--workload", $workload,
     "--",
     "wsl.exe", "-d", "Ubuntu", "--",
-    "docker", "compose",
-    "--env-file", "/mnt/c/Docker/local-knowledge-portal/.env",
-    "-f", "/mnt/c/Docker/local-knowledge-portal/compose.yaml",
-    "--profile", "manual-curation",
-    "run", "--rm", "--no-deps",
-    "knowledge-curator"
+    "bash", "/home/kutae/src/local-knowledge-portal/scripts/run-gpu-curation.sh"
 )
 
 & $gpuq.Source @command

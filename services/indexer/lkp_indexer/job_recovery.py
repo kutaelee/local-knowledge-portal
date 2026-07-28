@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .file_safety import source_file_rejection_reason
-from .ignore import IgnoreRules
+from .ignore import IgnoreRules, IncludeRules
 
 
 def resolve_non_retryable_dead_letters(
@@ -39,6 +39,8 @@ def resolve_non_retryable_dead_letters(
         reason: str | None = None
         if IgnoreRules(root_path, root.exclude_patterns).matches(relative):
             reason = "ignore_rule"
+        elif not IncludeRules(root.include_patterns).matches(relative):
+            reason = "outside_include_patterns"
         elif path.is_file():
             try:
                 reason = source_file_rejection_reason(path, max_file_bytes)

@@ -6,6 +6,7 @@ import pytest
 from lkp.settings import Settings
 from lkp_indexer.generation import (
     OllamaGenerationProvider,
+    _normalize_project_article_flat_payload,
     build_generation_provider,
 )
 
@@ -20,8 +21,18 @@ def test_global_codex_homes_and_local_model_guard():
         codex_additional_homes="C:/WSL/Ubuntu/codex;D:/isolated-codex",
     )
     assert len(settings.codex_home_list) == 3
+    assert (
+        Settings(ollama_base_url="http://ollama-embedding-batch:11434").ollama_base_url
+        == "http://ollama-embedding-batch:11434"
+    )
+    assert (
+        Settings(generation_base_url="http://host.docker.internal:11434/").generation_base_url
+        == "http://host.docker.internal:11434"
+    )
     with pytest.raises(ValueError, match="localhost"):
         Settings(generation_base_url="https://remote-model.example")
+    with pytest.raises(ValueError, match="base URL"):
+        Settings(ollama_base_url="http://host.docker.internal:11434/api/tags")
 
 
 def test_ollama_generation_uses_structured_output_and_records_digest():
@@ -236,3 +247,159 @@ def test_ollama_curator_drops_uncited_paragraph_without_guessing_an_id():
     )
     assert calls == 1
     assert draft.context == []
+
+
+def test_project_article_editor_returns_complete_sentence_cited_document():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "qwen3.5:9b", "digest": "sha256:qwen"}]},
+            )
+        payload = json.loads(request.content)
+        system = payload["messages"][0]["content"]
+        assert "one canonical project document" in system
+        assert (
+            "phase is evidence_digest, consolidation, synthesis, "
+            "or coverage_repair"
+        ) in system
+        assert "one complete updated article, not a patch" in system
+        assert "Every standfirst sentence and claim" in system
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "title": "현재 프로젝트 안내서",
+                            "standfirst": [
+                                {
+                                    "text": "프로젝트의 현재 구조를 설명한다.",
+                                    "source_ids": ["D:1:0"],
+                                }
+                            ],
+                            "claims": [
+                                {
+                                    "section_key": "architecture",
+                                    "section_title": "현재 구조",
+                                    "text": "작업 큐는 PostgreSQL을 사용한다.",
+                                    "source_ids": ["D:1:0"],
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                }
+            },
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "qwen3.5:9b",
+        "unresolved",
+        5,
+        transport=httpx.MockTransport(handler),
+    )
+    draft, digest = provider.curate_project_article(
+        {
+            "project": "portal",
+            "phase": "evidence_digest",
+            "previous_article": None,
+            "source_catalog": [{"id": "D:1:0"}],
+            "changed_sources": [{"id": "D:1:0", "body": "PostgreSQL queue"}],
+            "removed_source_ids": [],
+        },
+        language="ko",
+        prompt_version="project-test-v1",
+    )
+
+    assert digest == "sha256:qwen"
+    assert draft.sections[0].paragraphs[0].sentences[0].source_ids == ["D:1:0"]
+
+
+def test_project_article_flat_normalizer_reuses_repeated_section_label_only():
+    draft = _normalize_project_article_flat_payload(
+        {
+            "title": "현재 프로젝트",
+            "standfirst": [{"text": "현재 상태다.", "source_ids": ["S0001"]}],
+            "claims": [
+                {
+                    "section_key": "operations",
+                    "section_title": "운영 방식",
+                    "text": "첫 설명이다.",
+                    "source_ids": ["S0001"],
+                },
+                {
+                    "section_key": "operations",
+                    "section_title": "",
+                    "text": "둘째 설명이다.",
+                    "source_ids": ["S0002", "J:copied-from-source"],
+                },
+                {
+                    "section_key": "operations",
+                    "section_title": "",
+                    "text": "허용 근거가 없는 설명이다.",
+                    "source_ids": ["J:copied-from-source"],
+                },
+            ],
+        },
+        allowed_source_ids={"S0001", "S0002"},
+    )
+
+    assert draft.claims[1].section_title == "운영 방식"
+    assert draft.claims[1].source_ids == ["S0002"]
+    assert len(draft.claims) == 2
+
+
+def test_project_article_flat_normalizer_turns_model_markdown_into_plain_claims():
+    draft = _normalize_project_article_flat_payload(
+        {
+            "title": "현재 프로젝트",
+            "standfirst": [
+                {
+                    "text": "# 요약\n- 현재 문서를 통합한다.",
+                    "source_ids": ["S0001"],
+                }
+            ],
+            "claims": [
+                {
+                    "section_key": "architecture",
+                    "section_title": "구조",
+                    "text": "# 구조\n- PostgreSQL이 큐를 관리한다.\n"
+                    "- 워커는 lease를 갱신한다.",
+                    "source_ids": ["S0001"],
+                }
+            ],
+        },
+        allowed_source_ids={"S0001"},
+    )
+
+    assert draft.standfirst[0].text == "현재 문서를 통합한다."
+    assert [item.text for item in draft.claims] == [
+        "PostgreSQL이 큐를 관리한다.",
+        "워커는 lease를 갱신한다.",
+    ]
+
+
+def test_project_article_flat_normalizer_compacts_only_same_evidence_group():
+    lines = "\n".join(f"- 근거 행 {index}" for index in range(87))
+    draft = _normalize_project_article_flat_payload(
+        {
+            "title": "현재 프로젝트",
+            "standfirst": [{"text": "현재 상태다.", "source_ids": ["S0001"]}],
+            "claims": [
+                {
+                    "section_key": "architecture",
+                    "section_title": "구조",
+                    "text": lines,
+                    "source_ids": ["S0001"],
+                }
+            ],
+        },
+        allowed_source_ids={"S0001"},
+    )
+
+    assert len(draft.claims) < 80
+    assert all(item.source_ids == ["S0001"] for item in draft.claims)
+    assert "근거 행 0" in draft.claims[0].text
+    assert "근거 행 86" in draft.claims[-1].text

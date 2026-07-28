@@ -17,6 +17,9 @@ source_roots:
       - "**/*"
     exclude_patterns:
       - "local-knowledge-portal/**"
+    # Semantic-only policy: files remain indexed for lexical/path retrieval.
+    semantic_exclude_patterns:
+      - "docs/evidence/**"
 
   - id: managed-vault
     name: Managed fallback vault

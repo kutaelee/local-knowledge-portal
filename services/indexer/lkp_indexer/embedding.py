@@ -22,6 +22,8 @@ class Embedder(Protocol):
 
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 
+    def close(self) -> None: ...
+
 
 class OllamaEmbedder:
     provider = "ollama"
@@ -33,17 +35,23 @@ class OllamaEmbedder:
         digest: str,
         dimension: int,
         timeout_seconds: float = 120,
+        keep_alive: str | int = 0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.digest = digest
         self.dimension = dimension
         self.timeout_seconds = timeout_seconds
+        self.keep_alive = keep_alive
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         response = httpx.post(
             f"{self.base_url}/api/embed",
-            json={"model": self.model, "input": texts},
+            json={
+                "model": self.model,
+                "input": texts,
+                "keep_alive": self.keep_alive,
+            },
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
@@ -55,6 +63,18 @@ class OllamaEmbedder:
                 "reindex required"
             )
         return vectors
+
+    def close(self) -> None:
+        """Best-effort explicit unload; never mask the completed workload."""
+        try:
+            response = httpx.post(
+                f"{self.base_url}/api/generate",
+                json={"model": self.model, "keep_alive": 0},
+                timeout=min(self.timeout_seconds, 10),
+            )
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return
 
 
 class RateLimitedEmbedder:
@@ -85,10 +105,33 @@ class RateLimitedEmbedder:
         vectors: list[list[float]] = []
         for offset in range(0, len(texts), self.batch_size):
             batch = texts[offset : offset + self.batch_size]
-            vectors.extend(self.delegate.embed(batch))
+            vectors.extend(self._embed_batch(batch))
             if offset + self.batch_size < len(texts) and self.cooldown_seconds:
                 self.sleep(self.cooldown_seconds)
         return vectors
+
+    def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Retry only a timed-out multi-input request as smaller requests.
+
+        Ollama can cancel a whole batched request while CPU-constrained. A
+        bounded binary split salvages independent chunks without retrying an
+        already failed single input forever. Single inputs still propagate the
+        timeout to the durable queue, which applies bounded backoff/dead-letter
+        handling.
+        """
+
+        try:
+            return self.delegate.embed(texts)
+        except httpx.TimeoutException:
+            if len(texts) == 1:
+                raise
+            middle = len(texts) // 2
+            return self._embed_batch(texts[:middle]) + self._embed_batch(texts[middle:])
+
+    def close(self) -> None:
+        close = getattr(self.delegate, "close", None)
+        if close is not None:
+            close()
 
 
 class CachedEmbedder:
@@ -171,6 +214,11 @@ class CachedEmbedder:
                         self._cache.popitem(last=False)
             return [vector for vector in results if vector is not None]
 
+    def close(self) -> None:
+        close = getattr(self.delegate, "close", None)
+        if close is not None:
+            close()
+
 
 class DeterministicTestEmbedder:
     provider = "deterministic-test"
@@ -189,3 +237,6 @@ class DeterministicTestEmbedder:
             norm = math.sqrt(sum(item * item for item in vector)) or 1
             result.append([item / norm for item in vector])
         return result
+
+    def close(self) -> None:
+        return None

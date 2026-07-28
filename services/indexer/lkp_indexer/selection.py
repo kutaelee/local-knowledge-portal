@@ -1,3 +1,4 @@
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from lkp.models import SourceRoot
@@ -27,6 +28,28 @@ CODE_EXTENSIONS = {
 }
 SEMANTIC_DOCUMENT_EXTENSIONS = {".md", ".mdx"}
 REPOSITORY_SOURCE_TYPES = {"repositories", "repository_collection"}
+SEMANTIC_POLICY_VERSION = "purpose-aware-v3"
+
+
+def _semantic_exclusion_reason(path: Path, source_root: SourceRoot) -> str | None:
+    """Match configured semantic-only exclusions against a root-relative path.
+
+    This is deliberately separate from scanner ignore rules. A matched file is
+    still versioned, chunked and available to exact/path/lexical retrieval; it
+    merely does not consume scarce embedding capacity.
+    """
+
+    try:
+        relative = path.resolve(strict=False).relative_to(
+            Path(source_root.canonical_path).resolve(strict=False)
+        ).as_posix()
+    except ValueError:
+        return "semantic_path_outside_root"
+    for configured in source_root.semantic_exclude_patterns or []:
+        pattern = str(configured).replace("\\", "/").lstrip("./")
+        if pattern and fnmatchcase(relative, pattern):
+            return "semantic_exclude_pattern"
+    return None
 
 
 def semantic_policy(
@@ -36,6 +59,9 @@ def semantic_policy(
     repository_mode: str,
 ) -> tuple[bool, str | None]:
     extension = path.suffix.casefold()
+    exclusion_reason = _semantic_exclusion_reason(path, source_root)
+    if exclusion_reason:
+        return False, exclusion_reason
     if source_root.source_type == "obsidian":
         return extension in SEMANTIC_DOCUMENT_EXTENSIONS, (
             None

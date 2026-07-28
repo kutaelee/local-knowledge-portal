@@ -51,8 +51,6 @@ revision=$(docker compose --env-file "$env_file" -f "$compose_file" exec -T post
   "select version_num from alembic_version")
 database_version=$(docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
   psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "show server_version")
-model=$(docker compose --env-file "$env_file" -f "$compose_file" exec -T ollama \
-  ollama list | awk 'NR==2 {print $1 " " $2 " " $3}')
 embedding_provider=$(sed -n 's/^LKP_EMBEDDING_PROVIDER=//p' "$env_file" | tr -d '\r')
 embedding_model=$(sed -n 's/^LKP_EMBEDDING_MODEL=//p' "$env_file" | tr -d '\r')
 embedding_model_digest=$(sed -n 's/^LKP_EMBEDDING_MODEL_DIGEST=//p' "$env_file" | tr -d '\r')
@@ -62,6 +60,7 @@ pipeline_version=$(sed -n 's/^LKP_PIPELINE_VERSION=//p' "$env_file" | tr -d '\r'
 generation_provider=$(sed -n 's/^LKP_GENERATION_PROVIDER=//p' "$env_file" | tr -d '\r')
 generation_model=$(sed -n 's/^LKP_GENERATION_MODEL=//p' "$env_file" | tr -d '\r')
 generation_model_digest=$(sed -n 's/^LKP_GENERATION_MODEL_DIGEST=//p' "$env_file" | tr -d '\r')
+model="$embedding_model $embedding_model_digest; $generation_model $generation_model_digest"
 generation_prompt_version=$(sed -n 's/^LKP_GENERATION_PROMPT_VERSION=//p' "$env_file" | tr -d '\r')
 generation_prompt_version=${generation_prompt_version:-evidence-blog-v9}
 generation_temperature=$(sed -n 's/^LKP_GENERATION_TEMPERATURE=//p' "$env_file" | tr -d '\r')

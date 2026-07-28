@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .activity_knowledge import finalize_pending_stops, project_from_paths
-from .activity_retention import roll_up_activity_details
+from .activity_retention import roll_up_activity_details, roll_up_operational_details
 from .service_runtime import assert_mount_guards, service_pid
 
 _LOW_SIGNAL_PROMPTS = {
@@ -54,6 +54,13 @@ _REUSABLE_INSTRUCTION = re.compile(
     r"파이프라인|설정|운영)"
 )
 _MUTATING_TOOLS = {"apply_patch", "write_file", "edit_file"}
+_AMBIENT_CONTEXT = re.compile(
+    r"(?is)<(?:in-app-browser-context|environment_context|permissions\s+instructions|"
+    r"apps_instructions|plugins_instructions|skills_instructions|recommended_plugins)\b[^>]*>.*?"
+    r"</(?:in-app-browser-context|environment_context|permissions\s+instructions|"
+    r"apps_instructions|plugins_instructions|skills_instructions|recommended_plugins)>"
+)
+_REQUEST_MARKER = re.compile(r"(?is)^\s*##\s*My request for Codex:\s*")
 _last_retention_check = 0.0
 _collector_started_at = datetime.now(timezone.utc)
 
@@ -62,6 +69,14 @@ def _parse_time(value: str | None) -> datetime:
     if not value:
         return datetime.now(timezone.utc)
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _clean_instruction(value: str | None) -> str | None:
+    """Exclude desktop-injected UI context from the activity's user intent."""
+
+    cleaned = _AMBIENT_CONTEXT.sub("", value or "").strip()
+    cleaned = _REQUEST_MARKER.sub("", cleaned).strip()
+    return cleaned[:16000] or None
 
 
 def _nested(payload: dict[str, Any], *names: str) -> Any:
@@ -76,16 +91,39 @@ def _nested(payload: dict[str, Any], *names: str) -> Any:
     return None
 
 
-_EXIT_CODE_LINE = re.compile(r"(?im)^\s*Exit code:\s*(-?\d+)\s*$")
+_EXIT_CODE_LINE = re.compile(
+    r"(?im)^\s*(?:exit(?:[ _-]?code|\s+status)|return[ _-]?code)\s*[:=]\s*(-?\d+)\s*$"
+)
 _PATCH_FILE_LINE = re.compile(r"(?m)^\*{3}\s+(?:Add|Update|Delete) File:\s+(.+?)\s*$")
 _CHANGE_STATUS_LINE = re.compile(r"(?m)^\s*[AMD]\s+(.+?)\s*$")
 
 
 def _response_text(payload: dict[str, Any]) -> str:
-    value = payload.get("tool_response") or payload.get("toolResponse")
+    """Return only a bounded tool-result representation.
+
+    Codex hook payloads have used both ``tool_response`` and ``tool_output``
+    spellings across surfaces.  The collector does not treat a final assistant
+    message as execution evidence: only the post-tool result is considered.
+    """
+
+    value = next(
+        (
+            payload.get(name)
+            for name in (
+                "tool_response",
+                "toolResponse",
+                "tool_output",
+                "toolOutput",
+                "tool_result",
+                "toolResult",
+            )
+            if payload.get(name) is not None
+        ),
+        None,
+    )
     if isinstance(value, str):
         return value[:1_000_000]
-    if isinstance(value, dict):
+    if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)[:1_000_000]
     return ""
 
@@ -185,7 +223,7 @@ def _transcript_turn_instruction(
             messages.append(message.strip())
     if not messages:
         return None
-    return "\n\n".join(messages)[:16000]
+    return _clean_instruction("\n\n".join(messages))
 
 
 def _transcript_turn_result(
@@ -246,17 +284,51 @@ def _transcript_turn_result(
     return None
 
 
-def _exit_code(payload: dict[str, Any], sessions_root: Path | None = None) -> int | None:
-    value = _nested(payload, "exit_code", "exitCode", "status_code")
+def _exit_code_with_source(
+    payload: dict[str, Any], sessions_root: Path | None = None
+) -> tuple[int | None, str | None]:
+    """Extract an observed command exit code without trusting prose output.
+
+    Direct structured fields win.  A bounded tool result and then the local
+    Codex transcript are fallbacks for hook schemas that omit the field from
+    the event envelope.  This deliberately returns no value for an assistant
+    report, so a reported success/failure can never become verification.
+    """
+
+    value = _nested(
+        payload,
+        "exit_code",
+        "exitCode",
+        "exit_status",
+        "exitStatus",
+        "status_code",
+        "statusCode",
+        "return_code",
+        "returnCode",
+        "returncode",
+    )
     if isinstance(value, int):
-        return value
+        return value, "payload_field"
     if isinstance(value, str) and value.lstrip("-").isdigit():
-        return int(value)
-    for output in (_response_text(payload), _transcript_tool_output(payload, sessions_root)):
-        match = _EXIT_CODE_LINE.search(output)
+        return int(value), "payload_field"
+    response = _response_text(payload)
+    if response:
+        match = _EXIT_CODE_LINE.search(response)
         if match:
-            return int(match.group(1))
-    return None
+            return int(match.group(1)), "tool_response"
+    transcript_output = _transcript_tool_output(payload, sessions_root)
+    if transcript_output:
+        match = _EXIT_CODE_LINE.search(transcript_output)
+        if match:
+            return int(match.group(1)), "transcript"
+    return None, None
+
+
+def _exit_code(payload: dict[str, Any], sessions_root: Path | None = None) -> int | None:
+    """Compatibility helper for callers and focused collector tests."""
+
+    value, _ = _exit_code_with_source(payload, sessions_root)
+    return value
 
 
 def _changed_files(payload: dict[str, Any], tool_name: str | None = None) -> list[str]:
@@ -304,7 +376,7 @@ def _instruction(payload: dict[str, Any], event_name: str) -> str | None:
     if event_name != "UserPromptSubmit":
         return None
     value = _nested(payload, "prompt", "user_prompt", "message")
-    return value[:16000] if isinstance(value, str) else None
+    return _clean_instruction(value) if isinstance(value, str) else None
 
 
 def _reported_result(payload: dict[str, Any], event_name: str) -> str | None:
@@ -354,6 +426,12 @@ def activity_signal(
         if len(reported) >= 12:
             return True, ["reported_outcome"]
         return False, ["empty_or_short_outcome"]
+    if event_name == "LocalChatCompleted":
+        user_message = str(payload.get("user_message") or "").strip()
+        assistant_message = str(payload.get("assistant_message") or "").strip()
+        if len(user_message) >= 12 and len(assistant_message) >= 12:
+            return True, ["local_llm_chat_turn"]
+        return False, ["empty_or_short_local_chat"]
     return False, ["unsupported_activity_signal"]
 
 
@@ -382,8 +460,36 @@ def envelope_to_activity(
     existing = session.scalar(select(ActivityEvent).where(ActivityEvent.event_key == event_id))
     if existing:
         return existing
+    if event_name == "LocalChatCompleted":
+        project_key = str(payload.get("project_key") or "unassigned")[:200]
+        activity = ActivityEvent(
+            event_key=event_id,
+            session_id=str(envelope.get("session_id") or ""),
+            turn_id=envelope.get("turn_id"),
+            event_type="LocalChat",
+            occurred_at=_parse_time(
+                str(payload.get("timestamp") or envelope.get("received_at") or "")
+            ),
+            project_key=project_key,
+            cwd=None,
+            instruction=str(payload.get("user_message") or "")[:16000] or None,
+            changed_files=[],
+            document_version_ids=[],
+            reported_result=str(payload.get("assistant_message") or "")[:16000] or None,
+            verification_status="UNVERIFIED",
+            metadata_json={
+                "activity_source": "local_llm_chat",
+                "model": payload.get("model"),
+                "payload_hash": envelope.get("payload_hash"),
+                "reported_result_is_evidence": False,
+                "source_metadata": payload.get("metadata") or {},
+            },
+        )
+        session.add(activity)
+        session.flush()
+        return activity
     tool_name = _tool_name(envelope, payload)
-    exit_code = _exit_code(payload, sessions_root)
+    exit_code, exit_evidence_source = _exit_code_with_source(payload, sessions_root)
     changed_files = _changed_files(payload, tool_name)
     cwd = str(envelope.get("cwd") or payload.get("cwd") or "") or None
     turn_id = envelope.get("turn_id")
@@ -445,6 +551,7 @@ def envelope_to_activity(
             "permission_mode": payload.get("permission_mode"),
             "model": payload.get("model"),
             "payload_hash": envelope.get("payload_hash"),
+            "exit_evidence_source": exit_evidence_source,
         },
     )
     session.add(activity)
@@ -598,7 +705,14 @@ def collect_once(settings: Settings) -> dict[str, int]:
                     session,
                     retention_days=settings.activity_detail_retention_days,
                 )
+                operational_rollup = roll_up_operational_details(
+                    session,
+                    terminal_job_retention_days=settings.terminal_job_detail_retention_days,
+                    ingest_event_retention_days=settings.ingest_event_detail_retention_days,
+                )
                 _last_retention_check = now_monotonic
+            else:
+                operational_rollup = {"jobs": 0, "events": 0}
             heartbeat = session.get(WorkerHeartbeat, "hook-collector")
             now = datetime.now(timezone.utc)
             if heartbeat is None:
@@ -626,6 +740,11 @@ def collect_once(settings: Settings) -> dict[str, int]:
                 "service": "hook-collector",
                 "spool_root_count": len(settings.hook_spool_roots),
                 "last_poll": counts,
+                "retention_rollup": {
+                    "activity_details": rolled_up,
+                    "terminal_jobs": operational_rollup["jobs"],
+                    "ingest_events": operational_rollup["events"],
+                },
             }
             session.commit()
         counts.update({f"knowledge_{key}": value for key, value in knowledge_counts.items()})

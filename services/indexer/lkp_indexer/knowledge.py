@@ -35,6 +35,10 @@ _EXECUTION_EVIDENCE_TYPES = {
 }
 _PRESENTATION_ONLY_SUFFIXES = {".css", ".less", ".sass", ".scss"}
 _VALUE_HARNESS_REVISION = "knowledge-value-v1"
+_DEDUP_STOPWORDS = {
+    "and", "are", "for", "from", "that", "the", "this", "with",
+    "그리고", "대한", "에서", "으로", "작업", "변경", "검증", "완료",
+}
 
 
 def _normalize(value: str) -> str:
@@ -56,6 +60,27 @@ def dedup_key(category: str, problem: str, root_cause: str, solution: str) -> st
 
 def similarity_key(symptom: str) -> str:
     return _hash(symptom)
+
+
+def knowledge_key_terms(*values: str, limit: int = 24) -> list[str]:
+    """Return stable, language-neutral candidate terms for vector prefiltering.
+
+    The terms narrow the database vector lookup; they do not decide that two
+    cases are equal. Korean is deliberately preserved as complete Unicode
+    tokens rather than forced through an unavailable morphology plugin.
+    """
+
+    counts: dict[str, int] = {}
+    for value in values:
+        for token in re.findall(r"[\w-]+", value.casefold(), flags=re.UNICODE):
+            normalized = token.strip("_-")
+            if len(normalized) < 2 or normalized in _DEDUP_STOPWORDS:
+                continue
+            counts[normalized] = counts.get(normalized, 0) + 1
+    return [
+        token
+        for token, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
 
 
 def _evidence_value(item: Any, name: str, default: Any = None) -> Any:
@@ -157,7 +182,16 @@ def assess_knowledge_value(
         metadata.get("quality_gate_status") == "ACTIVITY_ONLY"
         or (metadata.get("curation") or {}).get("state") == "activity_only"
     )
-    if previously_quarantined:
+    # A historical generic completion normally remains activity-only.  The
+    # one exception is a verified, material project-operation journal that is
+    # deliberately reopened for an evidence-bound editorial assessment.  It
+    # is *not* publication approval: the local editor still has to cite the
+    # observed change and validation evidence before it can become a case.
+    journal_reassessment = bool(
+        metadata.get("journal_backed")
+        and (metadata.get("journal_reassessment") or {}).get("version")
+    )
+    if previously_quarantined and not journal_reassessment:
         blockers.append("previously_quarantined_activity")
         tier = "activity_only"
     elif "no_verified_evidence" in blockers or (
@@ -179,7 +213,7 @@ def assess_knowledge_value(
     elif category == "operations":
         tier = "promote" if recovery else "needs_review"
         if tier != "promote":
-            blockers.append("incident_and_recovery_evidence_required")
+            blockers.append("incident_recovery_or_editorial_operation_assessment_required")
     else:
         tier = "needs_review"
         blockers.append("unsupported_knowledge_category")
@@ -289,14 +323,40 @@ def evaluate_gate(session: Session, candidate: KnowledgeCandidate) -> str:
             "load_cause",
         }.issubset(verified_types)
     elif candidate.category == "operations":
-        passed = {"incident_failure", "recovery_success"}.issubset(verified_types)
+        # A configuration/operating-model change may be verified by a real
+        # code/config mutation plus an execution check even when it was not an
+        # outage.  It remains editorially held until a local model produces an
+        # evidence-cited article; an incident still needs both failure and
+        # recovery evidence.
+        passed = (
+            {"incident_failure", "recovery_success"}.issubset(verified_types)
+            or (
+                bool(verified_types & {"code_change", "document_version"})
+                and bool(
+                    verified_types
+                    & {"test_pass", "build_pass", "command_success"}
+                )
+            )
+        )
     if not passed:
         candidate.evidence_gate_status = "NEEDS_EVIDENCE"
         candidate.status = "candidate"
+        metadata = dict(candidate.metadata_json or {})
+        semantic = dict(metadata.get("semantic_dedup") or {})
+        if semantic.get("state") == "pending_gpu_vector_check":
+            semantic["state"] = "blocked_by_evidence_gate"
+            metadata["semantic_dedup"] = semantic
+            candidate.metadata_json = metadata
         candidate.updated_at = datetime.now(timezone.utc)
         return candidate.evidence_gate_status
     candidate.evidence_gate_status = "VERIFIED"
     candidate.status = "verified"
+    metadata = dict(candidate.metadata_json or {})
+    semantic = dict(metadata.get("semantic_dedup") or {})
+    if semantic.get("state") == "blocked_by_evidence_gate":
+        semantic["state"] = "pending_gpu_vector_check"
+        metadata["semantic_dedup"] = semantic
+        candidate.metadata_json = metadata
     candidate.updated_at = datetime.now(timezone.utc)
     return candidate.evidence_gate_status
 
@@ -386,7 +446,16 @@ def evaluate_quality(candidate: KnowledgeCandidate) -> tuple[str, list[str]]:
     if metadata.get("auto_generated") and not metadata.get("structured_knowledge"):
         reasons.append("auto_report_missing_reusable_structure")
     value_assessment = metadata.get("knowledge_value") or {}
-    if value_assessment and value_assessment.get("tier") != "promote":
+    editorial_resolution = metadata.get("editorial_value_resolution") or {}
+    editorially_promoted = bool(
+        editorial_resolution.get("approved")
+        and metadata.get("curation_validation_status") == "PASS"
+    )
+    if (
+        value_assessment
+        and value_assessment.get("tier") != "promote"
+        and not editorially_promoted
+    ):
         reasons.append("knowledge_value_harness_not_promotable")
 
     curation_validated = (
@@ -640,6 +709,17 @@ def publish_candidate(
             }
         candidate.status = "published"
         return exact, "MERGED_OCCURRENCE"
+
+    semantic_dedup = (candidate.metadata_json or {}).get("semantic_dedup") or {}
+    if semantic_dedup.get("state") == "pending_gpu_vector_check":
+        # Exact duplicate occurrences are merged above without a model call.
+        # A new canonical case must first pass the GPU worker's key-term scoped
+        # pgvector comparison so near-duplicates never become silent noise.
+        return None, "PENDING_SEMANTIC_DEDUP"
+    if semantic_dedup.get("state") == "needs_review":
+        candidate.status = "needs_review"
+        candidate.evidence_gate_status = "NEEDS_REVIEW"
+        return None, "NEEDS_REVIEW"
 
     cases = list(session.scalars(select(KnowledgeCase).where(KnowledgeCase.status == "verified")))
     candidate_text = " ".join([candidate.problem, candidate.root_cause, candidate.solution])

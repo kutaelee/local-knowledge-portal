@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "services": [
+    {
+      "id": "example-compose-project",
+      "label": "Example project",
+      "category": "projects",
+      "description": "A pre-approved Docker Compose project.",
+      "kind": "docker_compose",
+      "control": true,
+      "warning": "Stopping this group interrupts every listed component.",
+      "config": {
+        "runner": "windows",
+        "project": "example-project",
+        "config_file": "C:\\Dev\\Repos\\example-project\\compose.yaml",
+        "services": []
+      }
+    }
+  ]
+}

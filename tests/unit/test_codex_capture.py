@@ -112,9 +112,13 @@ def test_managed_page_is_idempotent_and_protected(tmp_path: Path):
 
 
 def test_redact_common_secret_shapes():
-    value = redact_text("Authorization: Bearer abcdefghijklmnopqrstuvwxyz sk-abcdefghijklmnop")
+    value = redact_text(
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz "
+        "sk-abcdefghijklmnop pairing token: example-pairing-value-123456"
+    )
     assert "abcdefghijklmnopqrstuvwxyz" not in value
     assert "sk-abcdefghijklmnop" not in value
+    assert "example-pairing-value-123456" not in value
 
 
 def test_enrichment_is_separate_and_identifies_local_model(tmp_path: Path):

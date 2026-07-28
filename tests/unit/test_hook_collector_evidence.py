@@ -1,9 +1,10 @@
 import json
 from pathlib import Path
 
-from lkp_indexer.activity_knowledge import project_from_paths
+from lkp_indexer.activity_knowledge import _reusable_memo_fields, project_from_paths
 from lkp_indexer.hook_collector import (
     _changed_files,
+    _clean_instruction,
     _exit_code,
     _transcript_turn_instruction,
     _transcript_turn_result,
@@ -21,6 +22,11 @@ def test_apply_patch_response_extracts_exit_code_and_changed_files():
     }
     assert _exit_code(payload) == 0
     assert _changed_files(payload, "apply_patch") == ["src/app.py"]
+
+
+def test_tool_output_and_return_code_variants_are_execution_evidence():
+    assert _exit_code({"tool_output": {"return_code": "17"}}) == 17
+    assert _exit_code({"toolOutput": "exit status = 3"}) == 3
 
 
 def test_read_only_image_path_does_not_become_a_changed_file():
@@ -87,6 +93,27 @@ def test_korean_development_instruction_is_selected():
         assert reasons == ["reusable_work_instruction"]
 
 
+def test_instruction_strips_desktop_context_without_removing_user_request():
+    raw = (
+        '<in-app-browser-context source="ambient-ui-state">private state</in-app-browser-context>\n'
+        "## My request for Codex:\n"
+        "GPU 스케줄러 재기동 문제를 수정하고 검증해"
+    )
+    assert _clean_instruction(raw) == "GPU 스케줄러 재기동 문제를 수정하고 검증해"
+
+
+def test_optional_reusable_memo_is_structured_but_not_execution_evidence():
+    assert _reusable_memo_fields(
+        "재사용 메모: 상황 — worker lease timeout | 원인 — expiry field missing | "
+        "조치 — add lease expiry | 검증 — pytest exit 0"
+    ) == {
+        "goal": "worker lease timeout",
+        "cause": "expiry field missing",
+        "solution": "add lease expiry",
+        "verification": "pytest exit 0",
+    }
+
+
 def test_project_is_derived_from_changed_repository_path():
     assert (
         project_from_paths(
@@ -98,6 +125,15 @@ def test_project_is_derived_from_changed_repository_path():
     assert (
         project_from_paths(
             ["/home/kutae/src/local-knowledge-portal/README.md"],
+            None,
+        )
+        == "local-knowledge-portal"
+    )
+    assert (
+        project_from_paths(
+            [
+                r"\\wsl.localhost\Ubuntu\home\kutae\src\local-knowledge-portal\README.md"
+            ],
             None,
         )
         == "local-knowledge-portal"

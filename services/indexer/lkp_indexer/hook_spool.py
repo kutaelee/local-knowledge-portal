@@ -4,16 +4,15 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from lkp.redaction import redact_value
+
 MAX_INPUT_BYTES = 1_048_576
-MAX_STRING_CHARS = 16_384
-MAX_COLLECTION_ITEMS = 200
 ALLOWED_EVENTS = {
     "SessionStart",
     "UserPromptSubmit",
@@ -22,47 +21,16 @@ ALLOWED_EVENTS = {
     "SubagentStart",
     "SubagentStop",
 }
-_SECRET_KEY = re.compile(
-    r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie|private[_-]?key)"
-)
-_SECRET_TEXT = (
-    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}"),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
-    re.compile(r"(?i)\b(password|secret|token|api[_-]?key)\b(\s*[:=]\s*)([^\s,;]{8,})"),
-)
 
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def redact_text(value: str) -> str:
-    value = _SECRET_TEXT[0].sub("Bearer [REDACTED]", value)
-    value = _SECRET_TEXT[1].sub("[REDACTED API KEY]", value)
-    value = _SECRET_TEXT[2].sub(r"\1\2[REDACTED]", value)
-    if len(value) > MAX_STRING_CHARS:
-        omitted = len(value) - MAX_STRING_CHARS
-        return value[:MAX_STRING_CHARS] + f"\n[TRUNCATED {omitted} chars]"
-    return value
-
-
 def sanitize(value: Any, *, key: str = "", depth: int = 0) -> Any:
-    if depth > 12:
-        return "[MAX_DEPTH]"
-    if _SECRET_KEY.search(key):
-        return "[REDACTED]"
-    if isinstance(value, str):
-        return redact_text(value)
-    if isinstance(value, dict):
-        return {
-            str(item_key)[:200]: sanitize(item_value, key=str(item_key), depth=depth + 1)
-            for item_key, item_value in list(value.items())[:MAX_COLLECTION_ITEMS]
-        }
-    if isinstance(value, list):
-        return [sanitize(item, depth=depth + 1) for item in value[:MAX_COLLECTION_ITEMS]]
-    if isinstance(value, (bool, int, float)) or value is None:
-        return value
-    return redact_text(str(value))
+    # Keep the legacy public helper, but use the same recursive display policy
+    # as transcript capture and API serialization.
+    return redact_value(value, key=key, depth=depth)
 
 
 def _event_identity(payload: dict[str, Any], payload_hash: str) -> str:

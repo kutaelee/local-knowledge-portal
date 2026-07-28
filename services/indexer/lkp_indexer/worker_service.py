@@ -18,6 +18,7 @@ from sqlalchemy import select, update
 
 from .cli import get_embedder
 from .queue import cancel_if_superseded, lease
+from .repository_analysis.jobs import process_repository_analysis_job
 from .selection import semantic_policy
 from .service_runtime import assert_mount_guards, service_pid
 from .worker import heartbeat, process_job
@@ -51,6 +52,12 @@ def _resource_policy(settings) -> dict:
     return {
         "embedding_batch_size": settings.embedding_batch_size,
         "embedding_batch_cooldown_seconds": settings.embedding_batch_cooldown_seconds,
+        "embedding_request_timeout_seconds": settings.embedding_request_timeout_seconds,
+        "embedding_input_max_chars": settings.embedding_input_max_chars,
+        "embedding_timeout_circuit_threshold": settings.embedding_timeout_circuit_threshold,
+        "embedding_timeout_circuit_window_seconds": (
+            settings.embedding_timeout_circuit_window_seconds
+        ),
         "job_cooldown_seconds": settings.worker_job_cooldown_seconds,
         "burst_jobs": settings.worker_burst_jobs,
         "burst_cooldown_seconds": settings.worker_burst_cooldown_seconds,
@@ -179,7 +186,9 @@ def run(deterministic: bool = False, once: bool = False) -> int:
                 resource_class = "semantic"
                 if job is not None:
                     root = session.get(SourceRoot, job.source_root_id)
-                    if root is not None:
+                    if job.job_type == "repository_analysis":
+                        resource_class = "lexical"
+                    elif root is not None:
                         semantic_allowed, _ = semantic_policy(
                             Path(job.canonical_path),
                             root,
@@ -243,7 +252,20 @@ def run(deterministic: bool = False, once: bool = False) -> int:
                     current = session.get(IngestJob, job.id)
                     if current:
                         try:
-                            process_job(session, current, settings, embedder, worker_id)
+                            if current.job_type == "repository_analysis":
+                                process_repository_analysis_job(
+                                    session,
+                                    current,
+                                    worker_id,
+                                )
+                            else:
+                                process_job(
+                                    session,
+                                    current,
+                                    settings,
+                                    embedder,
+                                    worker_id,
+                                )
                         except Exception:
                             session.commit()
                         else:

@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -92,3 +93,29 @@ class CandidateCreate(BaseModel):
 class CandidatePublish(BaseModel):
     confirmation: Literal["HUMAN_APPROVED"]
     reviewer: str = Field(default="local-user", min_length=1, max_length=100)
+
+
+class GpuQueueReorderRequest(BaseModel):
+    """Complete, optimistic-concurrency queue order from the local portal."""
+
+    job_ids: list[UUID] = Field(min_length=1, max_length=1000)
+
+
+class ServiceControlRequest(BaseModel):
+    confirmed: Literal[True]
+    confirmation_token: str = Field(min_length=20, max_length=128)
+
+
+class LocalChatCapture(BaseModel):
+    session_id: str = Field(min_length=1, max_length=100)
+    turn_id: str = Field(min_length=1, max_length=100)
+    project_key: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    model: str = Field(min_length=1, max_length=200)
+    user_message: str = Field(min_length=1, max_length=32_000)
+    assistant_message: str = Field(min_length=1, max_length=32_000)
+    occurred_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

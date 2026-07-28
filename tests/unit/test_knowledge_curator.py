@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from lkp.settings import Settings
 from lkp_indexer.generation import (
     CuratedKnowledgeArticle,
@@ -7,6 +9,7 @@ from lkp_indexer.generation import (
 from lkp_indexer.knowledge import assess_knowledge_value, case_tags
 from lkp_indexer.knowledge_curator import (
     GpuSnapshot,
+    _payload,
     busy_retry_seconds,
     gpu_is_available,
     qualify_provider,
@@ -150,6 +153,28 @@ def test_value_harness_never_reopens_previously_quarantined_activity():
     )
     assert result["tier"] == "activity_only"
     assert "previously_quarantined_activity" in result["blockers"]
+
+
+def test_value_harness_allows_only_reassessed_operational_journals_to_reach_editor():
+    result = assess_knowledge_value(
+        category="operations",
+        problem="A verified service configuration was changed.",
+        root_cause="Observed implementation in portal: config and scripts changed.",
+        solution="Changed artifacts: compose.yaml. Observed validation: build command.",
+        evidence=[
+            {"evidence_type": "code_change", "verified": True, "exit_code": 0},
+            {"evidence_type": "build_pass", "verified": True, "exit_code": 0},
+        ],
+        metadata={
+            "auto_generated": True,
+            "structured_knowledge": False,
+            "journal_backed": True,
+            "journal_reassessment": {"version": "journal-backed-editorial-v1"},
+            "quality_gate_status": "ACTIVITY_ONLY",
+        },
+    )
+    assert result["tier"] == "needs_review"
+    assert "previously_quarantined_activity" not in result["blockers"]
 
 
 def test_case_tags_are_project_scoped_and_multi_dimensional():
@@ -350,6 +375,102 @@ def test_renderer_owns_citations_and_invalid_evidence_ids_are_held():
     assert "context_invalid_citation" in reasons
     assert "[invented-label]" not in _article_text
     assert "[E1]" in _article_text
+
+
+def test_reported_sources_preserve_context_but_cannot_verify_results():
+    draft = _article(
+        standfirst="작업자는 lease 중복 처리 원인을 보고했고 테스트 통과를 관측했다.",
+        standfirst_evidence_ids=["R1", "E2"],
+        cause_or_decision=[
+            EvidenceBoundParagraph(
+                text="lease 갱신 누락이 중복 처리 원인이었다고 작업 결과가 설명한다.",
+                evidence_ids=["R1"],
+            )
+        ],
+        implementation=[
+            EvidenceBoundParagraph(
+                text="lease 갱신 로직을 수정했다고 보고했고 파일 변경이 관측됐다.",
+                evidence_ids=["R1", "E1"],
+            )
+        ],
+        verification=[
+            EvidenceBoundParagraph(
+                text="회귀 테스트 실행이 성공했다.",
+                evidence_ids=["E2"],
+            )
+        ],
+    )
+    status, reasons, article = validate_draft(
+        draft,
+        {
+            "R1": "lease 갱신 누락이 원인이며 갱신 로직을 수정했다고 작업자가 보고함",
+            "E1": "worker.py changed exit_code=0",
+            "E2": "pytest passed exit_code=0",
+        },
+        Settings(),
+    )
+    assert status == "PASS"
+    assert reasons == []
+    assert "작업 보고:" in article
+    assert "[R1]" in article
+
+
+def test_reported_source_is_rejected_as_verification():
+    draft = _article(
+        verification=[
+            EvidenceBoundParagraph(
+                text="테스트가 통과했다고 작업자가 보고했다.",
+                evidence_ids=["R1"],
+            )
+        ]
+    )
+    status, reasons, _rendered_article = validate_draft(
+        draft,
+        {
+            "R1": "테스트가 통과했다고 보고함",
+            "E1": "worker.py changed exit_code=0",
+            "E2": "pytest passed exit_code=0",
+        },
+        Settings(),
+    )
+    assert status == "NEEDS_REVIEW"
+    assert "verification_missing_verified_evidence" in reasons
+    assert "verification_reported_source_not_allowed" in reasons
+
+
+def test_payload_assigns_separate_reported_and_verified_namespaces():
+    candidate = SimpleNamespace(
+        category="implementation",
+        title="lease 갱신",
+        problem="중복 처리",
+        symptom="동일 작업 실행",
+        root_cause="보고된 lease 누락",
+        solution="lease 갱신",
+        reported_result="작업자가 원인과 조치를 보고했다.",
+        metadata_json={
+            "reported_sources": [
+                {
+                    "kind": "final_report",
+                    "text": "작업자가 원인과 조치를 보고했다.",
+                    "verification": "REPORTED_NOT_VERIFIED",
+                }
+            ]
+        },
+    )
+    evidence = [
+        SimpleNamespace(
+            evidence_type="test_pass",
+            claim="pytest passed",
+            verified_value="exit_code=0",
+            locator="pytest",
+            exit_code=0,
+        )
+    ]
+    payload, source_map = _payload(candidate, evidence)
+    assert payload["reported_sources"][0]["id"] == "R1"
+    assert payload["verified_evidence"][0]["id"] == "E1"
+    assert source_map["R1"].startswith("작업자가")
+    assert "exit_code=0" in source_map["E1"]
 
 
 def test_summary_and_paragraph_numbers_must_exist_in_verified_evidence():

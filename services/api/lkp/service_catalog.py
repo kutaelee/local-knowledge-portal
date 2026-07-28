@@ -151,3 +151,78 @@ def load_docker_groups(
             else "healthy"
         )
     return inventory, groups
+
+
+def load_gpu_embedding_reaper(
+    path: Path,
+    *,
+    now: datetime,
+    stale_after_seconds: int,
+) -> dict[str, Any]:
+    """Load the host-side GPU batch cleanup snapshot without contacting the host.
+
+    The reaper deliberately writes an atomic, bounded JSON status file on the
+    Windows host.  Reading that file keeps the API read-only and makes a
+    missing or stale guard visible rather than silently treating it as healthy.
+    """
+    missing = {
+        "key": "gpu-embedding-reaper",
+        "label": "GPU embedding cleanup guard",
+        "state": "offline",
+        "detail": "reaper snapshot is not available",
+    }
+    if not path.is_file():
+        return missing
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {**missing, "state": "error", "detail": "reaper snapshot is malformed"}
+    if not isinstance(payload, dict):
+        return {**missing, "state": "error", "detail": "reaper snapshot has invalid shape"}
+
+    checked_at = _timestamp(payload.get("checked_at"))
+    if checked_at is None:
+        return {**missing, "state": "error", "detail": "reaper snapshot has no valid timestamp"}
+    age_seconds = max(0, int((now - checked_at).total_seconds()))
+    if age_seconds > stale_after_seconds:
+        return {
+            **missing,
+            "state": "stale",
+            "detail": f"reaper snapshot is {age_seconds}s old",
+            "last_seen_at": checked_at,
+        }
+
+    raw_state = str(payload.get("state") or "unknown")
+    if payload.get("error") or raw_state in {"check_failed", "scheduler_unhealthy"}:
+        return {
+            **missing,
+            "state": "error",
+            "detail": str(payload.get("error") or raw_state),
+            "last_seen_at": checked_at,
+        }
+    if payload.get("scheduler_ok") is not True:
+        return {
+            **missing,
+            "state": "offline",
+            "detail": "GPU scheduler health was not confirmed",
+            "last_seen_at": checked_at,
+        }
+
+    action = str(payload.get("action") or "none")
+    detail = {
+        "no_batch_container": "no temporary GPU embedding batch is running",
+        "active_batch_retained": "scheduled GPU embedding batch is active",
+        "orphan_batch": "orphan GPU embedding batch was detected",
+    }.get(raw_state, raw_state)
+    if action == "stopped_orphan_batch":
+        detail = "orphan GPU embedding batch was stopped safely"
+    healthy_states = {"no_batch_container", "active_batch_retained"}
+    resolved = raw_state in healthy_states or (
+        raw_state == "orphan_batch" and action == "stopped_orphan_batch"
+    )
+    return {
+        **missing,
+        "state": "healthy" if resolved else "error",
+        "detail": detail,
+        "last_seen_at": checked_at,
+    }

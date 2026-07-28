@@ -106,10 +106,22 @@ def fail(session: Session, job: IngestJob, exc: Exception) -> None:
 
 
 def finish(session: Session, job: IngestJob) -> None:
+    finished_at = datetime.now(timezone.utc)
+    if job.error_type or job.error_message:
+        job.error_details = {
+            **(job.error_details or {}),
+            "recovered_error": {
+                "type": job.error_type,
+                "message": job.error_message,
+                "recovered_at": finished_at.isoformat(),
+            },
+        }
     job.status = JobStatus.succeeded
-    job.finished_at = datetime.now(timezone.utc)
+    job.error_type = None
+    job.error_message = None
+    job.finished_at = finished_at
     job.lease_expires_at = None
-    job.updated_at = job.finished_at
+    job.updated_at = finished_at
 
 
 def cancel_if_superseded(session: Session, job: IngestJob) -> bool:

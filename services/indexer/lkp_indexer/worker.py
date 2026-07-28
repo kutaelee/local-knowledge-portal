@@ -6,10 +6,12 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from lkp.models import (
     ChunkEmbedding,
     Document,
     DocumentChunk,
+    DocumentLink,
     DocumentState,
     DocumentTag,
     DocumentVersion,
@@ -20,17 +22,19 @@ from lkp.models import (
     WorkerHeartbeat,
 )
 from lkp.settings import Settings
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.orm import Session
 
 from .chunking import chunk_document
+from .document_links import resolve_links_for_target, sync_document_links
 from .embedding import Embedder
+from .embedding_runtime import timeout_circuit_reason
 from .file_safety import source_file_rejection_reason
-from .ignore import IgnoreRules
+from .ignore import IgnoreRules, IncludeRules
 from .paths import canonicalize
 from .projects import project_identity
 from .queue import fail, finish
-from .selection import semantic_policy
+from .selection import SEMANTIC_POLICY_VERSION, semantic_policy
 
 
 def _utcnow() -> datetime:
@@ -46,6 +50,26 @@ LOW_VALUE_EMBEDDING_NAMES = {
     "cargo.lock",
     "go.sum",
 }
+
+
+def bounded_embedding_input(content: str, *, max_chars: int) -> tuple[str, bool]:
+    """Produce a deterministic bounded representation without changing source chunks.
+
+    Full chunk text remains in PostgreSQL for citations and lexical retrieval.
+    The vector receives the beginning and end of an overlong chunk, including
+    its heading/context, so a slow local model cannot hold a worker lease for
+    minutes on one large Markdown section.
+    """
+
+    if len(content) <= max_chars:
+        return content, False
+    marker = "\n\n[… bounded embedding input …]\n\n"
+    usable = max_chars - len(marker)
+    if usable < 2:
+        raise ValueError("embedding input max chars is too small")
+    head = (usable * 3) // 4
+    tail = usable - head
+    return f"{content[:head]}{marker}{content[-tail:]}", True
 
 
 def _frontmatter_tags(metadata: dict) -> list[str]:
@@ -170,7 +194,7 @@ def _embed_missing(
                 **version.metadata_json,
                 "embedding_status": "skipped_policy",
                 "embedding_skip_reason": policy_reason,
-                "embedding_policy": "purpose-aware-v2",
+                "embedding_policy": SEMANTIC_POLICY_VERSION,
                 "embedding_chunk_count": len(chunks),
                 "embedding_character_count": sum(len(chunk.content) for chunk in chunks),
             }
@@ -190,7 +214,40 @@ def _embed_missing(
             "embedding_character_count": sum(len(chunk.content) for chunk in chunks),
         }
         return
-    vectors = embedder.embed([chunk.content for chunk in missing])
+    runtime_reason = timeout_circuit_reason(session, settings)
+    if runtime_reason:
+        version.metadata_json = {
+            **version.metadata_json,
+            "embedding_status": "deferred_runtime",
+            "embedding_defer_reason": runtime_reason,
+            "embedding_revision": None,
+            "embedding_policy": SEMANTIC_POLICY_VERSION,
+            "embedding_chunk_count": len(chunks),
+            "embedding_character_count": sum(len(chunk.content) for chunk in chunks),
+        }
+        return
+    embedding_inputs: list[str] = []
+    truncated_chunks = 0
+    for chunk in missing:
+        embedding_input, truncated = bounded_embedding_input(
+            chunk.content,
+            max_chars=settings.embedding_input_max_chars,
+        )
+        embedding_inputs.append(embedding_input)
+        truncated_chunks += int(truncated)
+    try:
+        vectors = embedder.embed(embedding_inputs)
+    except httpx.TimeoutException:
+        version.metadata_json = {
+            **version.metadata_json,
+            "embedding_status": "deferred_runtime",
+            "embedding_defer_reason": "embedding_request_timeout",
+            "embedding_revision": None,
+            "embedding_policy": SEMANTIC_POLICY_VERSION,
+            "embedding_input_max_chars": settings.embedding_input_max_chars,
+            "embedding_input_truncated_chunks": truncated_chunks,
+        }
+        return
     if any(len(vector) != settings.embedding_dimension for vector in vectors):
         raise RuntimeError("embedding dimension mismatch; pipeline stopped fail-closed")
     for chunk, vector in zip(missing, vectors, strict=True):
@@ -209,6 +266,8 @@ def _embed_missing(
         **version.metadata_json,
         "embedding_revision": settings.embedding_revision,
         "embedding_status": "complete",
+        "embedding_input_max_chars": settings.embedding_input_max_chars,
+        "embedding_input_truncated_chunks": truncated_chunks,
         "indexed_at": _utcnow().isoformat(),
     }
 
@@ -265,6 +324,16 @@ def process_job(
                 existing.state = DocumentState.deleted
                 existing.last_seen_at = _utcnow()
                 job.document_id = existing.id
+                session.execute(
+                    delete(DocumentLink).where(
+                        DocumentLink.source_document_id == existing.id
+                    )
+                )
+                session.execute(
+                    update(DocumentLink)
+                    .where(DocumentLink.target_document_id == existing.id)
+                    .values(target_document_id=None)
+                )
                 session.add(
                     IngestEvent(
                         source_root_id=root.id,
@@ -280,7 +349,13 @@ def process_job(
         info = canonical.stat()
         relative = canonical.relative_to(root_path).as_posix()
         identity = project_identity(canonical, root_path)
-        if IgnoreRules(root_path, root.exclude_patterns).matches(relative):
+        ignored_by_exclusion = IgnoreRules(
+            root_path, root.exclude_patterns
+        ).matches(relative)
+        ignored_by_inclusion = not IncludeRules(root.include_patterns).matches(
+            relative
+        )
+        if ignored_by_exclusion or ignored_by_inclusion:
             if existing:
                 existing.state = DocumentState.ignored
                 existing.last_seen_at = _utcnow()
@@ -291,7 +366,14 @@ def process_job(
                     document_id=existing.id if existing else None,
                     event_type="ignored",
                     path=str(canonical),
-                    details={"reason": "ignore_rule", "relative_path": relative},
+                    details={
+                        "reason": (
+                            "ignore_rule"
+                            if ignored_by_exclusion
+                            else "outside_include_patterns"
+                        ),
+                        "relative_path": relative,
+                    },
                 )
             )
             finish(session, job)
@@ -380,6 +462,8 @@ def process_job(
         ):
             existing.project_key = managed_project.strip()[:200]
         _sync_document_tags(session, existing, parsed_metadata)
+        link_count = sync_document_links(session, existing, content)
+        resolved_link_count = resolve_links_for_target(session, existing)
         if existing.current_content_hash == digest:
             if embedder and existing.current_version_id:
                 current_version = session.get(DocumentVersion, existing.current_version_id)
@@ -417,12 +501,31 @@ def process_job(
         )
         embedding_allowed = policy_allowed and cost_allowed
         embedding_skip_reason = policy_reason if not policy_allowed else cost_reason
-        should_embed = bool(embedder and chunks and embedding_allowed)
-        vectors = embedder.embed([chunk.content for chunk in chunks]) if should_embed else []
+        runtime_reason = timeout_circuit_reason(session, settings)
+        embedding_deferred = bool(embedding_allowed and runtime_reason)
+        should_embed = bool(embedder and chunks and embedding_allowed and not runtime_reason)
+        embedding_inputs: list[str] = []
+        truncated_chunks = 0
+        if should_embed:
+            for chunk in chunks:
+                embedding_input, truncated = bounded_embedding_input(
+                    chunk.content,
+                    max_chars=settings.embedding_input_max_chars,
+                )
+                embedding_inputs.append(embedding_input)
+                truncated_chunks += int(truncated)
+        timed_out = False
+        try:
+            vectors = embedder.embed(embedding_inputs) if should_embed else []
+        except httpx.TimeoutException:
+            vectors = []
+            timed_out = True
         if should_embed and any(len(vector) != settings.embedding_dimension for vector in vectors):
             raise RuntimeError("embedding dimension mismatch; pipeline stopped fail-closed")
         embedding_status = (
-            "complete"
+            "deferred_runtime"
+            if embedding_deferred or timed_out
+            else "complete"
             if should_embed
             else "skipped_policy"
             if chunks and not policy_allowed
@@ -446,11 +549,24 @@ def process_job(
                 "embedding_revision": settings.embedding_revision if should_embed else None,
                 "embedding_status": embedding_status,
                 "embedding_skip_reason": embedding_skip_reason,
+                "embedding_defer_reason": (
+                    runtime_reason
+                    if embedding_deferred
+                    else "embedding_request_timeout"
+                    if timed_out
+                    else None
+                ),
                 "embedding_chunk_count": len(chunks),
                 "embedding_character_count": sum(len(chunk.content) for chunk in chunks),
-                "embedding_policy": "purpose-aware-v2",
+                "embedding_policy": SEMANTIC_POLICY_VERSION,
+                "embedding_input_max_chars": (
+                    settings.embedding_input_max_chars if should_embed else None
+                ),
+                "embedding_input_truncated_chunks": truncated_chunks,
                 "project_key": existing.project_key,
                 "project_relative_path": identity.relative_path,
+                "outgoing_link_count": link_count,
+                "resolved_incoming_link_count": resolved_link_count,
                 "indexed_at": _utcnow().isoformat(),
             },
             previous_version_id=existing.current_version_id,

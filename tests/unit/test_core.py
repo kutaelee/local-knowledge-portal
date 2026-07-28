@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pytest
 from lkp.models import SourceRoot
 from lkp_indexer.chunking import chunk_code, chunk_markdown
-from lkp_indexer.ignore import IgnoreRules
+from lkp_indexer.embedding import OllamaEmbedder
+from lkp_indexer.ignore import IgnoreRules, IncludeRules
 from lkp_indexer.paths import UnsafePathError, canonicalize, content_hash, idempotency_key
 from lkp_indexer.projects import project_identity
 from lkp_indexer.queue import retry_delay
@@ -33,6 +34,16 @@ def test_ignore_defaults(tmp_path: Path):
     assert not rules.matches("docs/readme.md")
 
 
+def test_include_patterns_are_allowlist_not_metadata_only():
+    rules = IncludeRules(["*.md", "**/*.md", "**/*.rst"])
+
+    assert rules.matches("README.md")
+    assert rules.matches("docs/runbook.md")
+    assert rules.matches("docs/design.rst")
+    assert not rules.matches("scripts/bootstrap.ps1")
+    assert not rules.matches("services/api/main.py")
+
+
 def test_hash_and_idempotency_stable(tmp_path: Path):
     path = tmp_path / "a.txt"
     path.write_text("same", encoding="utf-8")
@@ -43,6 +54,37 @@ def test_hash_and_idempotency_stable(tmp_path: Path):
 def test_retry_backoff_is_bounded():
     assert [retry_delay(i) for i in range(1, 5)] == [2, 4, 8, 16]
     assert retry_delay(100) == 300
+
+
+def test_ollama_embedding_request_is_nonresident_and_close_unloads(monkeypatch):
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"embeddings": [[0.25, 0.75]]}
+
+    def post(url, *, json, timeout):
+        calls.append((url, json, timeout))
+        return Response()
+
+    monkeypatch.setattr("lkp_indexer.embedding.httpx.post", post)
+    embedder = OllamaEmbedder(
+        "http://127.0.0.1:11434",
+        "qwen3-embedding:0.6b",
+        "digest",
+        2,
+        keep_alive="0",
+    )
+
+    assert embedder.embed(["query"]) == [[0.25, 0.75]]
+    embedder.close()
+
+    assert calls[0][1]["keep_alive"] == "0"
+    assert calls[1][0].endswith("/api/generate")
+    assert calls[1][1] == {"model": "qwen3-embedding:0.6b", "keep_alive": 0}
 
 
 def test_markdown_heading_lines():

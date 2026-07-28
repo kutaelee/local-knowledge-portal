@@ -66,3 +66,14 @@ class IgnoreRules:
         if is_dir:
             normalized += "/"
         return self.spec.match_file(normalized)
+
+
+class IncludeRules:
+    def __init__(self, patterns: list[str] | None = None) -> None:
+        self.spec = pathspec.PathSpec.from_lines(
+            "gitwildmatch",
+            patterns or ["**/*"],
+        )
+
+    def matches(self, relative_path: str) -> bool:
+        return self.spec.match_file(relative_path.replace("\\", "/"))

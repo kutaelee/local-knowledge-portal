@@ -26,6 +26,35 @@ _GENERIC_CAUSE_PREFIXES = (
     "Observed implementation in ",
     "관측된 파일 변경만 확인됐으며",
 )
+_GENERIC_CAUSE_MARKERS = (
+    "재사용 가능한 원인이나 구현 결정은 아직 구조화되지 않았습니다",
+)
+
+
+def _is_generic_auto_candidate(candidate: KnowledgeCandidate) -> bool:
+    """Identify legacy completion reports that are activity, not review work.
+
+    Earlier pipeline versions created a candidate for a verified file change
+    even when the report contained no cause, decision, or reusable method.
+    Those rows retain useful execution audit evidence, but showing them in the
+    review queue trains people to sift through boilerplate.  Current ingestion
+    already routes this shape to activity/journal only; this guard reconciles
+    the historical rows without deleting them.
+    """
+    metadata = dict(candidate.metadata_json or {})
+    if not (
+        metadata.get("auto_generated") is True
+        and metadata.get("extractor") == "deterministic-activity-v1"
+        and not metadata.get("structured_knowledge", False)
+    ):
+        return False
+    root_cause = candidate.root_cause.strip()
+    solution = candidate.solution.strip()
+    return (
+        root_cause.startswith(_GENERIC_CAUSE_PREFIXES)
+        or any(marker in root_cause for marker in _GENERIC_CAUSE_MARKERS)
+        or solution.startswith("Changed artifacts:")
+    )
 
 
 def _is_low_quality_auto_case(case: KnowledgeCase, candidates: list[KnowledgeCandidate]) -> bool:
@@ -143,12 +172,45 @@ def review_low_quality_auto_cases(
         if page is not None:
             page.relative_path = retired_relative.as_posix()
         result["quarantine"] = retired_relative.as_posix()
+    generic_candidate_count = sum(
+        1
+        for candidate in session.scalars(select(KnowledgeCandidate))
+        if candidate.status != "published" and _is_generic_auto_candidate(candidate)
+    )
+    if generic_candidate_count and not apply:
+        results.append(
+            {
+                "kind": "generic_candidate_quarantine",
+                "candidate_count": generic_candidate_count,
+                "applied": False,
+            }
+        )
     if apply:
         reviewed_candidates = 0
+        quarantined_candidates = 0
         auto_candidates = list(session.scalars(select(KnowledgeCandidate)))
         for candidate in auto_candidates:
             metadata = candidate.metadata_json or {}
             if metadata.get("auto_generated") is not True or candidate.status == "published":
+                continue
+            if _is_generic_auto_candidate(candidate):
+                now = datetime.now(timezone.utc)
+                candidate.status = "activity_only"
+                candidate.updated_at = now
+                candidate.metadata_json = {
+                    **metadata,
+                    "quality_gate_status": "ACTIVITY_ONLY",
+                    "quality_gate_reasons": [
+                        "generic_activity_has_no_reusable_explanation",
+                        "historical_candidate_reclassified_activity_only",
+                    ],
+                    "candidate_quarantine": {
+                        "at": now.isoformat(),
+                        "reason": "legacy_generic_completion_is_activity_not_review",
+                        "reversible": True,
+                    },
+                }
+                quarantined_candidates += 1
                 continue
             quality_status, _ = evaluate_quality(candidate)
             if quality_status == "NEEDS_REVIEW":
@@ -217,6 +279,14 @@ def review_low_quality_auto_cases(
                 {
                     "kind": "candidate_quality_sweep",
                     "candidate_count": reviewed_candidates,
+                    "applied": True,
+                }
+            )
+        if quarantined_candidates:
+            results.append(
+                {
+                    "kind": "generic_candidate_quarantine",
+                    "candidate_count": quarantined_candidates,
                     "applied": True,
                 }
             )

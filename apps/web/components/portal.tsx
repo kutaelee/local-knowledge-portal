@@ -7,10 +7,14 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  Background, Controls, MiniMap, ReactFlow, type Edge, type Node,
+} from "@xyflow/react";
+import {
   Activity, AlertTriangle, Blocks, BookOpen, ChevronDown, ChevronRight,
   CircleCheck, Clock3, Command, Database, FileCode2, Files, Folder,
   GitBranch, HeartPulse, LayoutDashboard, Moon, Network, PanelRightClose,
   RefreshCcw, Search, ServerCog, Sun, TerminalSquare, BookCheck, Languages, Cpu,
+  MessageSquareText, Power,
 } from "lucide-react";
 import gsap from "gsap";
 import {
@@ -19,18 +23,26 @@ import {
 import {
   Area, AreaChart, ResponsiveContainer, Tooltip, XAxis,
 } from "recharts";
-import { api, Metrics, SearchResult, TreeItem } from "@/lib/api";
+import { api, EmbeddingRecovery, Metrics, SearchResult, TreeItem } from "@/lib/api";
 import { knowledgeTagLabel } from "@/lib/knowledge-labels";
+import { GpuQueue } from "./gpu-queue";
 import { ActivityHistory, DocumentViewer, KnowledgeCases } from "./knowledge-views";
+import { RepositoryAnalysisConsole } from "./repository-analysis";
+import { ServiceManager } from "./service-manager";
 
 gsap.registerPlugin(useGSAP);
 
 type View = "overview" | "explorer" | "document" | "search" | "activities" |
-  "knowledge" | "operations" | "timeline" | "graph";
+  "localchat" | "knowledge" | "operations" | "timeline" | "graph" |
+  "repositoryAnalysis" | "gpuQueue" | "serviceManager";
 type NavView = Exclude<View, "document">;
+type NavGroupId = "knowledge" | "activity" | "operations";
 type Job = {
   id: string; status: string; job_type: string; path: string; attempt_count: number;
   max_attempts: number; error_type: string | null; error_message: string | null; created_at: string;
+  available_at: string; started_at: string | null; finished_at: string | null; updated_at: string;
+  lease_expires_at: string | null; queue_lead_time_ms: number | null;
+  processing_duration_ms: number | null; age_ms: number | null;
 };
 type SystemService = {
   key: string;
@@ -47,7 +59,7 @@ type SystemService = {
 };
 type SystemServiceGroup = {
   key: string;
-  category: "portal" | "projects" | "infrastructure";
+  category: "portal" | "projects" | "ai" | "infrastructure";
   project: string;
   state: string;
   services: SystemService[];
@@ -66,15 +78,40 @@ type SystemServicesPayload = {
 };
 type Locale = "ko" | "en";
 
-const nav: { id: NavView; icon: React.ComponentType<{ size?: number }> }[] = [
-  { id: "overview", icon: LayoutDashboard },
-  { id: "explorer", icon: Folder },
-  { id: "search", icon: Search },
-  { id: "activities", icon: Activity },
-  { id: "knowledge", icon: BookCheck },
-  { id: "operations", icon: ServerCog },
-  { id: "timeline", icon: Clock3 },
-  { id: "graph", icon: Network },
+const navGroups: {
+  id: NavGroupId;
+  icon: React.ComponentType<{ size?: number }>;
+  items: { id: NavView; icon: React.ComponentType<{ size?: number }> }[];
+}[] = [
+  {
+    id: "knowledge",
+    icon: BookOpen,
+    items: [
+      { id: "explorer", icon: Folder },
+      { id: "search", icon: Search },
+      { id: "knowledge", icon: BookCheck },
+      { id: "graph", icon: Network },
+    ],
+  },
+  {
+    id: "activity",
+    icon: Activity,
+    items: [
+      { id: "activities", icon: TerminalSquare },
+      { id: "localchat", icon: MessageSquareText },
+      { id: "timeline", icon: Clock3 },
+    ],
+  },
+  {
+    id: "operations",
+    icon: ServerCog,
+    items: [
+      { id: "serviceManager", icon: Power },
+      { id: "operations", icon: Database },
+      { id: "gpuQueue", icon: Cpu },
+      { id: "repositoryAnalysis", icon: FileCode2 },
+    ],
+  },
 ];
 
 const translations = {
@@ -82,21 +119,32 @@ const translations = {
     nav: {
       overview: "현황", explorer: "원본 파일", document: "문서",
       search: "통합 검색", activities: "Codex 작업", knowledge: "프로젝트 지식",
+      localchat: "로컬 모델 대화",
       operations: "수집·운영", timeline: "변경 기록", graph: "문서 관계",
       gpuQueue: "GPU 작업 큐",
+      repositoryAnalysis: "레포 분석",
+      serviceManager: "레포·서비스 관리",
     },
     navDescriptions: {
       overview: "최신성·대기열",
       explorer: "저장소·사람 작성 문서",
       search: "파일·코드·지식 검색",
       activities: "원시 작업과 실행 근거",
+      localchat: "Ollama 대화·프로젝트 맥락",
       knowledge: "개발 일지·검증 사례",
       operations: "작업·Worker·백업",
       timeline: "파일 수집 이벤트",
       graph: "문서 링크 시각화",
       gpuQueue: "호스트 GPU 예약 현황",
+      repositoryAnalysis: "구조·흐름·검증",
+      serviceManager: "프로젝트·DB·AI 도구 상태",
     },
     workspace: "작업 공간",
+    navGroups: {
+      knowledge: "지식",
+      activity: "활동",
+      operations: "운영",
+    } as Record<NavGroupId, string>,
     globalSearch: "문서, 경로, 코드 심볼 검색…",
     globalSearchLabel: "전체 검색",
     healthy: "정상",
@@ -118,6 +166,7 @@ const translations = {
       categories: {
         portal: "로컬 지식 포털",
         projects: "프로젝트 웹·API",
+        ai: "AI 도구",
         infrastructure: "공유 인프라",
       },
       projectLabels: {
@@ -128,6 +177,8 @@ const translations = {
         "workstation-edge-ingress": "외부 연결 게이트웨이",
         "workstation-databases": "공유 데이터베이스",
         "interstellar-drift": "Interstellar Drift",
+        "workstation-ai": "AI 도구",
+        "host-control": "호스트 서비스 제어",
         standalone: "독립 Docker 컨테이너",
       },
       dockerRoles: {
@@ -141,6 +192,9 @@ const translations = {
         worker: "인덱서 Worker", watcher: "파일 Watcher",
         reconciler: "전체 대조", "hook-collector": "Codex 훅 수집기",
         "gpu-scheduler": "호스트 GPU 스케줄러",
+        "gpu-embedding-reaper": "GPU 임베딩 정리 보호장치",
+        comfyui: "ComfyUI", "ai-toolkit": "AI-Toolkit",
+        "service-manager": "호스트 서비스 관리자",
       },
     },
     overview: {
@@ -164,6 +218,25 @@ const translations = {
       codeFiles: "코드",
       supportFiles: "설정·데이터",
       semanticCoverage: "의미 검색",
+      semanticDegraded: "의미 검색 지연",
+      semanticGpuRecovery: "GPU 재색인 대기",
+      semanticRecoveryTitle: "의미 검색 복구가 GPU 예약을 기다리고 있습니다.",
+      semanticRecoveryDetail: "원본·키워드 검색은 정상이며, CPU 임베딩은 재발 방지를 위해 중지된 상태입니다.",
+      semanticRecovery: "의미 검색 복구",
+      gpuReservation: "GPU 예약",
+      requestedVram: "요청 VRAM",
+      gpuValidation: "GPU 검색 검증",
+      recoveryBacklog: "남은 벡터 작업",
+      validationWaiting: "재색인 완료 후 대기",
+      validationVerified: "semantic·hybrid 검증됨",
+      validationFailed: "검증 실패",
+      validationInvalid: "검증 상태 읽기 실패",
+      recoveryUnavailable: "GPU 스케줄러 상태를 확인할 수 없습니다.",
+      recoveryStates: {
+        queued: "예약 대기", active: "재색인 실행 중", completed: "재색인 완료",
+        failed: "재색인 실패", canceled: "예약 취소", not_submitted: "예약 없음",
+        unavailable: "스케줄러 연결 확인 필요",
+      },
       initialScan: "초기 스캔",
       liveChanges: "실시간 변경",
       pending: "대기 작업",
@@ -256,7 +329,7 @@ const translations = {
         status: "상태", type: "유형", path: "경로", attempts: "시도",
         error: "오류", worker: "Worker", host: "호스트", mode: "감시 방식",
         guard: "부하 보호", cpu: "CPU", heartbeat: "Heartbeat",
-        processed: "처리", failed: "실패", created: "생성 시각",
+        processed: "처리", failed: "실패", created: "생성 시각", timing: "대기 · 처리 시간 (ms)",
         revision: "리비전", checksum: "SHA-256",
       },
       retry: "재시도",
@@ -284,10 +357,10 @@ const translations = {
     },
     graphView: {
       eyebrow: "문서 관계",
-      title: "지식 그래프",
-      subtitle: "범위를 제한해 브라우저가 무제한 데이터를 한 번에 그리지 않도록 합니다.",
-      emptyTitle: "링크 추출을 위한 그래프 어댑터가 준비되었습니다",
-      emptyDetail: "Markdown 위키링크와 문서 링크가 추출되면 표시됩니다. 기본 탐색은 문서 탐색과 검색을 사용합니다.",
+      title: "문서 연결 지도",
+      subtitle: "문서에 명시적으로 작성된 링크만 보여줍니다. 의미 유사도나 코드 의존성을 추정하지 않습니다.",
+      emptyTitle: "프로젝트를 선택하세요",
+      emptyDetail: "프로젝트별 관계만 제한해서 표시합니다. 문서 탐색과 검색이 기본 이동 수단입니다.",
     },
     statusLabels: {
       healthy: "정상", succeeded: "완료", active: "활성", idle: "대기",
@@ -301,21 +374,32 @@ const translations = {
     nav: {
       overview: "Overview", explorer: "Source files", document: "Document",
       search: "Unified search", activities: "Codex work", knowledge: "Project knowledge",
+      localchat: "Local model chats",
       operations: "Ingest & operations", timeline: "Change history", graph: "Document relations",
       gpuQueue: "GPU queue",
+      repositoryAnalysis: "Repository analysis",
+      serviceManager: "Repositories & services",
     },
     navDescriptions: {
       overview: "Freshness and queue",
       explorer: "Repositories and authored docs",
       search: "Files, code, and knowledge",
       activities: "Raw work and evidence",
+      localchat: "Ollama chats by project",
       knowledge: "Journals and verified cases",
       operations: "Jobs, workers, backups",
       timeline: "Ingest events",
       graph: "Document links",
       gpuQueue: "Host GPU reservations",
+      repositoryAnalysis: "Structure, evidence, snapshots",
+      serviceManager: "Projects, databases, and AI tools",
     },
     workspace: "Workspace",
+    navGroups: {
+      knowledge: "Knowledge",
+      activity: "Activity",
+      operations: "Operations",
+    } as Record<NavGroupId, string>,
     globalSearch: "Search documents, paths, symbols…",
     globalSearchLabel: "Global search",
     healthy: "Healthy",
@@ -337,6 +421,7 @@ const translations = {
       categories: {
         portal: "Local Knowledge Portal",
         projects: "Project web & APIs",
+        ai: "AI tools",
         infrastructure: "Shared infrastructure",
       },
       projectLabels: {
@@ -347,6 +432,8 @@ const translations = {
         "workstation-edge-ingress": "Edge ingress",
         "workstation-databases": "Shared databases",
         "interstellar-drift": "Interstellar Drift",
+        "workstation-ai": "AI tools",
+        "host-control": "Host service control",
         standalone: "Standalone Docker containers",
       },
       dockerRoles: {
@@ -360,6 +447,9 @@ const translations = {
         worker: "Indexer worker", watcher: "File watcher",
         reconciler: "Reconciler", "hook-collector": "Codex hook collector",
         "gpu-scheduler": "Host GPU scheduler",
+        "gpu-embedding-reaper": "GPU embedding cleanup guard",
+        comfyui: "ComfyUI", "ai-toolkit": "AI-Toolkit",
+        "service-manager": "Host service manager",
       },
     },
     overview: {
@@ -383,6 +473,25 @@ const translations = {
       codeFiles: "code",
       supportFiles: "support",
       semanticCoverage: "semantic",
+      semanticDegraded: "semantic deferred",
+      semanticGpuRecovery: "waiting for GPU reindex",
+      semanticRecoveryTitle: "Semantic recovery is waiting for a GPU reservation.",
+      semanticRecoveryDetail: "Source and keyword retrieval remain available; CPU embedding is held to prevent recurrence.",
+      semanticRecovery: "Semantic recovery",
+      gpuReservation: "GPU reservation",
+      requestedVram: "Requested VRAM",
+      gpuValidation: "GPU retrieval proof",
+      recoveryBacklog: "Remaining vector work",
+      validationWaiting: "Waiting for reindex completion",
+      validationVerified: "Semantic and hybrid verified",
+      validationFailed: "Validation failed",
+      validationInvalid: "Validation state unreadable",
+      recoveryUnavailable: "GPU scheduler status is unavailable.",
+      recoveryStates: {
+        queued: "Queued", active: "Reindexing", completed: "Reindex complete",
+        failed: "Reindex failed", canceled: "Reservation cancelled", not_submitted: "Not submitted",
+        unavailable: "Scheduler unavailable",
+      },
       initialScan: "initial scan",
       liveChanges: "live changes",
       pending: "Pending jobs",
@@ -463,7 +572,7 @@ const translations = {
         status: "Status", type: "Type", path: "Path", attempts: "Attempts",
         error: "Error", worker: "Worker", host: "Host", mode: "Mode",
         guard: "Guard", cpu: "CPU", heartbeat: "Heartbeat",
-        processed: "Processed", failed: "Failed", created: "Created",
+        processed: "Processed", failed: "Failed", created: "Created", timing: "Queue · processing (ms)",
         revision: "Revision", checksum: "SHA-256",
       },
       retry: "Retry", enabled: "Enabled", paused: "Paused",
@@ -483,10 +592,10 @@ const translations = {
       },
     },
     graphView: {
-      eyebrow: "Relationships", title: "Knowledge graph",
-      subtitle: "Scoped graph views prevent the browser from rendering an unbounded dataset.",
-      emptyTitle: "Graph adapter is ready for links",
-      emptyDetail: "Markdown wikilinks and document links will appear after link extraction. Explorer and search remain the primary navigation.",
+      eyebrow: "Relationships", title: "Document link map",
+      subtitle: "Only explicit links written in documents are shown. Semantic similarity and code dependencies are not inferred.",
+      emptyTitle: "Choose a project",
+      emptyDetail: "The map is scoped by project. Explorer and search remain the primary navigation.",
     },
     statusLabels: {
       healthy: "Healthy", succeeded: "Succeeded", active: "Active", idle: "Idle",
@@ -535,6 +644,7 @@ function useLocale() {
 export function Portal() {
   const [view, setView] = useState<View>("overview");
   const [contextOpen, setContextOpen] = useState(true);
+  const [openNavGroup, setOpenNavGroup] = useState<NavGroupId | null>(null);
   const [selected, setSelected] = useState<SearchResult | null>(null);
   const [documentId, setDocumentId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -566,14 +676,28 @@ export function Portal() {
     addEventListener("keydown", handler);
     return () => removeEventListener("keydown", handler);
   }, []);
+  useEffect(() => {
+    const activeGroup = navGroups.find((group) =>
+      group.items.some((item) => item.id === view)
+    );
+    if (activeGroup) setOpenNavGroup(activeGroup.id);
+  }, [view]);
 
   const submitGlobal = (event: FormEvent) => {
     event.preventDefault();
     if (query.trim()) setView("search");
   };
+  const healthyServiceCount = services.data?.services.filter((service) =>
+    ["healthy", "running", "idle", "busy"].includes(service.state)
+  ).length ?? 0;
+  const totalServiceCount = services.data?.services.length ?? 0;
 
   return (
-    <div className={`portal ${contextOpen ? "" : "context-collapsed"}`}>
+    <div
+      className={`portal ${view === "overview" ? "overview-view" : ""} ${
+        contextOpen ? "" : "context-collapsed"
+      }`}
+    >
       <header className="topbar">
         <button className="brand" onClick={() => setView("overview")} aria-label={text.nav.overview}>
           <span className="brand-mark"><Blocks size={17} /></span>
@@ -612,22 +736,83 @@ export function Portal() {
       <aside className="sidebar">
         <nav aria-label="Primary navigation">
           <p className="nav-heading">{text.workspace}</p>
-          {nav.map((item) => (
-            <button
-              key={item.id} className={view === item.id ? "active" : ""}
-              onClick={() => setView(item.id)}
-            >
-              <item.icon size={17} /><span><strong>{text.nav[item.id]}</strong>
-                <small>{text.navDescriptions[item.id]}</small></span>
-            </button>
-          ))}
-          <a href="/gpu-queue"><Cpu size={17} /><span><strong>{text.nav.gpuQueue}</strong>
-            <small>{text.navDescriptions.gpuQueue}</small></span></a>
+          <button
+            className={view === "overview" ? "active" : ""}
+            onClick={() => setView("overview")}
+          >
+            <LayoutDashboard size={17} />
+            <span>
+              <strong>{text.nav.overview}</strong>
+              <small>{text.navDescriptions.overview}</small>
+            </span>
+          </button>
+          {navGroups.map((group) => {
+            const GroupIcon = group.icon;
+            const expanded = openNavGroup === group.id;
+            const active = group.items.some((item) => item.id === view);
+            return (
+              <div className={`nav-group ${active ? "active-group" : ""}`} key={group.id}>
+                <button
+                  type="button"
+                  className="nav-group-toggle"
+                  aria-expanded={expanded}
+                  aria-controls={`nav-group-${group.id}`}
+                  onClick={() =>
+                    setOpenNavGroup((current) =>
+                      current === group.id ? null : group.id
+                    )
+                  }
+                >
+                  <GroupIcon size={17} />
+                  <span><strong>{text.navGroups[group.id]}</strong></span>
+                  <ChevronRight
+                    className={expanded ? "nav-group-chevron expanded" : "nav-group-chevron"}
+                    size={14}
+                  />
+                </button>
+                {expanded && (
+                  <div className="nav-submenu" id={`nav-group-${group.id}`}>
+                    {group.items.map((item) => (
+                      <button
+                        type="button"
+                        key={item.id}
+                        className={view === item.id ? "active" : ""}
+                        onClick={() => setView(item.id)}
+                      >
+                        <item.icon size={16} />
+                        <span>
+                          <strong>{text.nav[item.id]}</strong>
+                          <small>{text.navDescriptions[item.id]}</small>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </nav>
         <div className="sidebar-bottom">
-          <p>{text.pipeline}</p>
-          <div><span className="pulse-dot" /> {text.indexingService}</div>
-          <small>{text.localOnly}</small>
+          <button
+            className="sidebar-health"
+            onClick={() => setView("serviceManager")}
+            aria-label={locale === "ko" ? "서비스 연결 상태 열기" : "Open service health"}
+          >
+            <span className="sidebar-health-title">
+              <HeartPulse size={15} />
+              {locale === "ko" ? "서비스 연결 상태" : "Service health"}
+            </span>
+            <strong>
+              {services.isError
+                ? text.offline
+                : `${healthyServiceCount}/${totalServiceCount} ${text.healthy}`}
+            </strong>
+            <small>
+              {locale === "ko"
+                ? "프로젝트·DB·AI 도구 확인"
+                : "Projects, databases, and AI tools"}
+            </small>
+          </button>
         </div>
       </aside>
 
@@ -646,9 +831,14 @@ export function Portal() {
           )}
           {view === "operations" && <Operations locale={locale} />}
           {view === "activities" && <ActivityHistory locale={locale} />}
+          {view === "localchat" &&
+            <ActivityHistory locale={locale} source="local_llm_chat" />}
           {view === "knowledge" && <KnowledgeCases locale={locale} />}
+          {view === "serviceManager" && <ServiceManager locale={locale} embedded />}
           {view === "timeline" && <Timeline locale={locale} />}
           {view === "graph" && <GraphNotice locale={locale} />}
+          {view === "repositoryAnalysis" && <RepositoryAnalysisConsole embedded />}
+          {view === "gpuQueue" && <GpuQueue embedded />}
         </div>
       </main>
 
@@ -682,6 +872,78 @@ function formatDuration(seconds: number, locale: Locale) {
   return locale === "ko" ? `${hours}시간` : `${hours}h`;
 }
 
+function schedulingDecisionLabel(value: string | null | undefined, locale: Locale) {
+  if (!value) return "—";
+  const labels: Record<string, [string, string]> = {
+    "queue-empty": ["현재 예약된 작업 없음", "No work is currently queued"],
+    "head-fits": ["안전 여유 범위에서 실행 가능", "Fits within the safety reserve"],
+    "head-blocked": ["GPU 여유 공간을 기다리는 중", "Waiting for GPU headroom"],
+    "max-parallel": ["동시 실행 한도에 도달", "Parallel limit reached"],
+  };
+  const matched = labels[value];
+  return matched ? matched[locale === "ko" ? 0 : 1] : (
+    locale === "ko" ? "스케줄러가 상태를 확인했습니다" : "Scheduler state checked"
+  );
+}
+
+function jobTypeLabel(value: string, locale: Locale) {
+  const labels: Record<string, [string, string]> = {
+    ingest: ["문서 수집", "Document ingest"],
+    reindex: ["검색 색인 갱신", "Search reindex"],
+    embed: ["의미 검색 색인", "Semantic indexing"],
+    delete: ["삭제 상태 반영", "Deletion sync"],
+    reconcile: ["파일 상태 대조", "Filesystem reconciliation"],
+  };
+  return labels[value]?.[locale === "ko" ? 0 : 1] ??
+    (locale === "ko" ? "문서 처리" : "Document processing");
+}
+
+function workerModeLabel(value: string | undefined, locale: Locale) {
+  if (!value) return "—";
+  const labels: Record<string, [string, string]> = {
+    worker: ["문서 처리", "Document processing"],
+    watcher: ["파일 변경 감지", "Filesystem watch"],
+    reconciler: ["파일 상태 대조", "Filesystem reconciliation"],
+    collector: ["작업 기록 수집", "Activity collection"],
+  };
+  return labels[value]?.[locale === "ko" ? 0 : 1] ??
+    (locale === "ko" ? "백그라운드 처리" : "Background processing");
+}
+
+function errorTypeLabel(value: string | null, locale: Locale) {
+  if (!value) return "—";
+  const labels: Array<[RegExp, [string, string]]> = [
+    [/timeout/i, ["응답 시간 초과", "Response timed out"]],
+    [/connection|connect/i, ["서비스 연결 실패", "Service connection failed"]],
+    [/permission|access/i, ["파일 접근 권한 확인 필요", "File permission needs review"]],
+    [/not.?found/i, ["대상을 찾지 못함", "Target not found"]],
+    [/dimension/i, ["임베딩 규격 불일치", "Embedding dimension mismatch"]],
+  ];
+  const matched = labels.find(([pattern]) => pattern.test(value));
+  return matched
+    ? matched[1][locale === "ko" ? 0 : 1]
+    : (locale === "ko" ? "처리 오류" : "Processing error");
+}
+
+function formatTimestampMs(value: string | null | undefined, locale: Locale) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat(locale === "ko" ? "ko-KR" : "en-GB", {
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    second: "2-digit", fractionalSecondDigits: 3, hour12: false,
+  }).format(date);
+}
+
+function formatMilliseconds(value: number | null, locale: Locale) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  if (value < 1000) return `${value.toLocaleString(locale === "ko" ? "ko-KR" : "en-US")} ms`;
+  const seconds = value / 1000;
+  if (seconds < 60) return `${seconds.toFixed(3)} s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}${locale === "ko" ? "분" : "m"} ${(seconds % 60).toFixed(3)} s`;
+}
+
 function freshnessLevel(value: string | null): "fresh" | "aging" | "stale" {
   if (!value) return "stale";
   const ageMinutes = (Date.now() - Date.parse(value)) / 60000;
@@ -696,6 +958,11 @@ function Overview({ onNavigate, locale }: {
 }) {
   const metrics = useQuery({
     queryKey: ["metrics"], queryFn: () => api<Metrics>("/api/v1/metrics/summary"),
+    refetchInterval: 10_000,
+  });
+  const recovery = useQuery({
+    queryKey: ["embedding-recovery"],
+    queryFn: () => api<EmbeddingRecovery>("/api/v1/embedding/recovery"),
     refetchInterval: 10_000,
   });
   const data = metrics.data;
@@ -737,7 +1004,13 @@ function Overview({ onNavigate, locale }: {
       Blocks,
       data
         ? `${number.format(data.semantic_chunks)} ${text.semanticCoverage} (${
-          Math.round(data.semantic_coverage * 100)}%)`
+          Math.round(data.semantic_coverage * 100)}%)${
+            data.embedding_runtime.open
+              ? ` · ${text.semanticDegraded} (${data.embedding_runtime.reason === "gpu_recovery_pending"
+                ? text.semanticGpuRecovery
+                : number.format(data.embedding_runtime.recent_timeouts)})`
+              : ""
+          }`
         : text.chunksNote,
     ],
     [
@@ -751,6 +1024,21 @@ function Overview({ onNavigate, locale }: {
     ],
   ] as const;
   const throughput = data?.throughput ?? [];
+  const recoveryJob = recovery.data?.reindex;
+  const recoveryState = recovery.isError
+    ? "unavailable"
+    : recoveryJob?.status ?? "not_submitted";
+  const recoveryLabel = text.recoveryStates[
+    recoveryState as keyof typeof text.recoveryStates
+  ] ?? recoveryState;
+  const validationState = recovery.data?.validation?.state;
+  const validationLabel = validationState === "verified"
+    ? text.validationVerified
+    : validationState === "failed"
+      ? text.validationFailed
+      : validationState === "invalid"
+        ? text.validationInvalid
+        : text.validationWaiting;
   return (
     <section>
       <div className="page-title">
@@ -774,6 +1062,30 @@ function Overview({ onNavigate, locale }: {
             : undefined}>{formatRelative(data?.latest_indexed_at, locale, text.never)}</dd></div>
         </dl>
       </div>
+      {data?.embedding_runtime.reason === "gpu_recovery_pending" && <div className="freshness-banner warning semantic-recovery">
+        <div className="freshness-icon"><Cpu size={20} /></div>
+        <div><strong>{text.semanticRecoveryTitle}</strong><p>{text.semanticRecoveryDetail}</p></div>
+        <dl>
+          <div><dt>{text.gpuReservation}</dt><dd>{recoveryLabel}</dd></div>
+          <div><dt>{text.requestedVram}</dt><dd>{recoveryJob?.requested_vram_mb
+            ? `${Math.round(recoveryJob.requested_vram_mb / 1024)} GB`
+            : "—"}</dd></div>
+          <div><dt>{text.semanticRecovery}</dt><dd title={recovery.data?.scheduler_decision ?? undefined}>
+            {recovery.isError
+              ? text.recoveryUnavailable
+              : schedulingDecisionLabel(recovery.data?.scheduler_decision, locale)}</dd></div>
+          <div><dt>{text.gpuValidation}</dt><dd title={recovery.data?.validation?.checked_at ?? undefined}>
+            {validationLabel}</dd></div>
+          <div><dt>{text.recoveryBacklog}</dt><dd>
+            {recovery.data?.progress
+              ? locale === "ko"
+                ? `문서 ${number.format(recovery.data.progress.pending_documents)}건 · 검색 조각 ${
+                  number.format(recovery.data.progress.pending_chunks)}개`
+                : `${number.format(recovery.data.progress.pending_documents)} documents · ${
+                  number.format(recovery.data.progress.pending_chunks)} chunks`
+              : "—"}</dd></div>
+        </dl>
+      </div>}
       <div className="stat-grid">
         {cards.map(([label, value, Icon, note]) => (
           <article className="stat-card" key={label}>
@@ -1172,13 +1484,21 @@ function Operations({ locale }: { locale: Locale }) {
         statusLabels[value as keyof typeof statusLabels] ?? value
       } />;
     } },
-    { accessorKey: "job_type", header: text.headers.type },
+    { accessorKey: "job_type", header: text.headers.type, cell: ({ getValue }) =>
+      jobTypeLabel(String(getValue()), locale) },
     { accessorKey: "path", header: text.headers.path, cell: ({ getValue }) => <span className="table-path">{String(getValue())}</span> },
     { id: "attempts", header: text.headers.attempts, cell: ({ row }) => `${row.original.attempt_count}/${row.original.max_attempts}` },
-    { accessorKey: "error_type", header: text.headers.error, cell: ({ row }) => <span title={row.original.error_message ?? ""}>{row.original.error_type ?? "—"}</span> },
+    { id: "timing", header: text.headers.timing, cell: ({ row }) => <div className="job-timing">
+      <time dateTime={row.original.created_at}>{formatTimestampMs(row.original.created_at, locale)}</time>
+      <small>{locale === "ko" ? "대기" : "queue"} {formatMilliseconds(row.original.queue_lead_time_ms, locale)} · {locale === "ko" ? "처리" : "run"} {formatMilliseconds(row.original.processing_duration_ms, locale)}</small>
+    </div> },
+    { accessorKey: "error_type", header: text.headers.error, cell: ({ row }) =>
+      <span title={`${row.original.error_type ?? ""}: ${row.original.error_message ?? ""}`}>
+        {errorTypeLabel(row.original.error_type, locale)}
+      </span> },
     { id: "action", header: "", cell: ({ row }) => row.original.status === "failed" || row.original.status === "dead_letter"
       ? <button className="retry" onClick={() => retry.mutate(row.original.id)}><RefreshCcw size={13} /> {text.retry}</button> : null },
-  ], [retry, statusLabels, text]);
+  ], [locale, retry, statusLabels, text]);
   const table = useReactTable({ data: jobs.data?.items ?? [], columns, getCoreRowModel: getCoreRowModel() });
   return (
     <section>
@@ -1192,7 +1512,7 @@ function Operations({ locale }: { locale: Locale }) {
         className={tab === "backups" ? "active" : ""}
         onClick={() => { setTab("backups"); setPage(1); }}>{text.tabs.backups}</button></div>
       {tab === "jobs" && <div className="panel table-wrap">
-        <table>
+        <table className="operations-table">
           <thead>{table.getHeaderGroups().map((group) => <tr key={group.id}>{group.headers.map((header) =>
             <th key={header.id}>{flexRender(header.column.columnDef.header, header.getContext())}</th>)}</tr>)}</thead>
           <tbody>{table.getRowModel().rows.map((row) => <tr key={row.id}>{row.getVisibleCells().map((cell) =>
@@ -1210,11 +1530,14 @@ function Operations({ locale }: { locale: Locale }) {
           <th>{text.headers.heartbeat}</th><th>{text.headers.processed}</th>
           <th>{text.headers.failed}</th></tr></thead>
           <tbody>{workers.data?.items.map((worker) => <tr key={worker.worker_id}>
-            <td className="mono">{worker.worker_id}</td><td>{worker.hostname}</td>
+            <td><strong>{workerModeLabel(worker.metadata.watch_mode, locale)}</strong>
+              <small className="table-secondary" title={worker.worker_id}>
+                {worker.worker_id.slice(0, 12)}
+              </small></td><td>{worker.hostname}</td>
             <td><Status value={worker.state} label={
               statusLabels[worker.state as keyof typeof statusLabels] ?? worker.state
             } /></td>
-            <td>{worker.metadata.watch_mode ?? "—"}</td>
+            <td>{workerModeLabel(worker.metadata.watch_mode, locale)}</td>
             <td title={worker.metadata.resource_guard_enabled
               ? `Batch ${worker.metadata.embedding_batch_size ?? "?"}, burst ${worker.metadata.burst_jobs ?? "?"}`
               : undefined}>
@@ -1251,7 +1574,11 @@ function Operations({ locale }: { locale: Locale }) {
               locale === "ko" ? "ko-KR" : "en-US"
             )}</td>
             <td className="table-path">{backup.path}</td>
-            <td className="mono">{backup.manifest.schema_revision ?? "—"}</td>
+            <td title={backup.manifest.schema_revision}>
+              {backup.manifest.schema_revision
+                ? (locale === "ko" ? "기록됨" : "Recorded")
+                : "—"}
+            </td>
             <td className="mono">{backup.manifest.sha256?.slice(0, 12) ?? "—"}</td>
           </tr>)}</tbody></table>
         {!backups.isLoading && !backups.data?.items.length &&
@@ -1289,11 +1616,124 @@ function Timeline({ locale }: { locale: Locale }) {
 
 function GraphNotice({ locale }: { locale: Locale }) {
   const text = translations[locale].graphView;
+  const [project, setProject] = useState("");
+  const [linkType, setLinkType] = useState<"all" | "wikilink" | "markdown">("all");
+  const [resolution, setResolution] = useState<"resolved" | "all">("resolved");
+  const facets = useQuery({
+    queryKey: ["document-graph-facets"],
+    queryFn: () => api<{
+      projects: Array<{ key: string; links: number; resolved: number; unresolved: number }>;
+    }>("/api/v1/graph/facets"),
+  });
+  const graph = useQuery({
+    queryKey: ["document-graph", project, linkType, resolution],
+    queryFn: () => api<{
+      nodes: Array<{
+        id: string; label: string; path: string | null; project: string; state: string;
+      }>;
+      edges: Array<{
+        id: string; source: string; target: string; type: string; resolved: boolean;
+      }>;
+      truncated: boolean;
+      summary: {
+        visible_links: number; visible_documents: number;
+        resolved_links: number; unresolved_links: number;
+      };
+    }>(`/api/v1/graph?limit=40&project=${encodeURIComponent(project)}`
+      + `&link_type=${linkType}&resolution=${resolution}`),
+    enabled: Boolean(project),
+  });
+  const nodes = useMemo<Node[]>(() => (graph.data?.nodes ?? []).map((item, index) => ({
+    id: item.id,
+    position: {
+      x: (index % 4) * 230,
+      y: Math.floor(index / 4) * 125,
+    },
+    data: { label: item.label },
+    className: item.state === "unresolved" ? "graph-node unresolved" : "graph-node",
+    style: {
+      width: 180,
+      border: item.state === "unresolved" ? "1px dashed #d8a657" : "1px solid #3a8fa8",
+      borderRadius: 10,
+      background: "var(--panel)",
+      color: "var(--text)",
+      fontSize: 12,
+      padding: 10,
+    },
+  })), [graph.data]);
+  const edges = useMemo<Edge[]>(() => (graph.data?.edges ?? []).map((item) => ({
+    id: item.id,
+    source: item.source,
+    target: item.target,
+    label: item.type === "wikilink"
+      ? (locale === "ko" ? "위키 링크" : "Wiki link")
+      : (locale === "ko" ? "문서 링크" : "Document link"),
+    animated: false,
+    style: {
+      stroke: item.resolved ? "var(--accent)" : "var(--warning)",
+      strokeDasharray: item.resolved ? undefined : "5 5",
+    },
+  })), [graph.data, locale]);
+  const selectedFacet = facets.data?.projects.find((item) => item.key === project);
   return <section><div className="page-title compact"><div><p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
     <p>{text.subtitle}</p></div></div>
-    <div className="panel graph-placeholder"><Network size={38} /><h2>{text.emptyTitle}</h2>
-      <p>{text.emptyDetail}</p>
-      <div className="fake-nodes"><span /><span /><span /><span /></div></div></section>;
+    <div className="panel graph-toolbar">
+      <label><span>{locale === "ko" ? "프로젝트" : "Project"}</span>
+        <select value={project} onChange={(event) => setProject(event.target.value)}>
+          <option value="">{locale === "ko" ? "프로젝트 선택" : "Choose a project"}</option>
+          {facets.data?.projects.map((item) => <option key={item.key} value={item.key}>
+            {item.key} · {item.links.toLocaleString(locale === "ko" ? "ko-KR" : "en-US")}
+          </option>)}
+        </select>
+      </label>
+      <label><span>{locale === "ko" ? "관계 종류" : "Relationship type"}</span>
+        <select value={linkType} onChange={(event) =>
+          setLinkType(event.target.value as "all" | "wikilink" | "markdown")}>
+          <option value="all">{locale === "ko" ? "모든 명시적 링크" : "All explicit links"}</option>
+          <option value="wikilink">{locale === "ko" ? "Obsidian 위키 링크" : "Obsidian wiki links"}</option>
+          <option value="markdown">{locale === "ko" ? "Markdown 문서 링크" : "Markdown links"}</option>
+        </select>
+      </label>
+      <label><span>{locale === "ko" ? "연결 상태" : "Resolution"}</span>
+        <select value={resolution} onChange={(event) =>
+          setResolution(event.target.value as "resolved" | "all")}>
+          <option value="resolved">{locale === "ko" ? "연결된 문서만" : "Resolved only"}</option>
+          <option value="all">{locale === "ko" ? "미해결 링크 포함" : "Include unresolved"}</option>
+        </select>
+      </label>
+      <div className="graph-scope-summary">
+        <small>{locale === "ko" ? "선택 범위" : "Selected scope"}</small>
+        <strong>{selectedFacet
+          ? `${selectedFacet.resolved.toLocaleString()} / ${selectedFacet.links.toLocaleString()}`
+          : "—"}</strong>
+        <span>{locale === "ko" ? "해결된 링크 / 전체 링크" : "resolved / total links"}</span>
+      </div>
+    </div>
+    <div className="graph-basis panel">
+      <strong>{locale === "ko" ? "관계 기준" : "Relationship basis"}</strong>
+      <span><i className="legend-line wiki" />{locale === "ko" ? "[[문서]] 위키 링크" : "[[document]] wiki link"}</span>
+      <span><i className="legend-line markdown" />{locale === "ko" ? "[이름](상대경로) 문서 링크" : "[label](relative path) link"}</span>
+      <span><i className="legend-node unresolved" />{locale === "ko" ? "점선 노드: 대상을 찾지 못함" : "Dashed node: target not found"}</span>
+    </div>
+    <div className="panel graph-canvas">
+      {graph.isLoading && project && <div className="loading-block">{locale === "ko" ? "관계를 불러오는 중…" : "Loading relations…"}</div>}
+      {!graph.isLoading && !nodes.length && <div className="graph-placeholder">
+        <Network size={38} /><h2>{text.emptyTitle}</h2><p>{text.emptyDetail}</p>
+      </div>}
+      {nodes.length > 0 && <ReactFlow nodes={nodes} edges={edges} fitView nodesDraggable={false}
+        nodesConnectable={false} elementsSelectable minZoom={0.2} maxZoom={1.8}>
+        <Background /><MiniMap pannable zoomable /><Controls showInteractive={false} />
+      </ReactFlow>}
+    </div>
+    {graph.data?.summary && <p className="graph-visible-summary">
+      {locale === "ko"
+        ? `현재 문서 ${graph.data.summary.visible_documents}개 · 관계 ${graph.data.summary.visible_links}개를 표시합니다.`
+        : `Showing ${graph.data.summary.visible_documents} documents and ${graph.data.summary.visible_links} relationships.`}
+    </p>}
+    {graph.data?.truncated && <p className="graph-limit-note">
+      {locale === "ko" ? "가독성을 위해 앞의 40개 관계만 표시합니다. 관계 종류를 좁혀 보세요." : "Showing the first 40 relationships for readability. Narrow the relationship type."}
+    </p>}
+  </section>;
 }
 
 function ContextPanel({ selected, services, locale }: {
@@ -1323,9 +1763,42 @@ function ContextPanel({ selected, services, locale }: {
       ? dockerRoles[service.service] ?? service.label
       : fixedLabels[service.key] ?? service.label;
   };
+  const serviceDetail = (service: SystemService) => {
+    const detail = service.detail?.trim();
+    if (!detail) return "—";
+    if (/^schema\s+/i.test(detail)) {
+      return locale === "ko" ? "데이터 구조 최신" : "Database schema is current";
+    }
+    if (detail === "queue-empty") {
+      return locale === "ko" ? "현재 예약 작업 없음" : "No work is currently queued";
+    }
+    if (/^(healthy|running|ready)$/i.test(detail)) {
+      return locale === "ko" ? "정상 작동 중" : "Operating normally";
+    }
+    const heartbeat = detail.match(/^(\d+)\s+heartbeat\(s\)$/i);
+    if (heartbeat) {
+      return locale === "ko"
+        ? `최근 상태 신호 ${heartbeat[1]}개 확인`
+        : `${heartbeat[1]} recent status signal(s)`;
+    }
+    if (/^Docker healthcheck passed/i.test(detail)) {
+      return locale === "ko" ? "컨테이너 상태 검사 통과" : "Container health check passed";
+    }
+    if (detail === "read-only health") {
+      return locale === "ko" ? "읽기 전용 상태 연결 정상" : "Read-only status connection healthy";
+    }
+    if (detail === "no temporary GPU embedding batch is running") {
+      return locale === "ko" ? "임시 GPU 작업 없음" : "No temporary GPU work is running";
+    }
+    if (detail === "HTTP 200" || /^\d+\.\d+\.\d+$/.test(detail)) {
+      return locale === "ko" ? "응답 확인" : "Response verified";
+    }
+    return detail;
+  };
   const categoryOrder: SystemServiceGroup["category"][] = [
     "portal",
     "projects",
+    "ai",
     "infrastructure",
   ];
   return <div><p className="nav-heading">{text.title}</p>
@@ -1359,7 +1832,7 @@ function ContextPanel({ selected, services, locale }: {
                   : service.key === "gpu-scheduler" ? Cpu : HeartPulse;
                 return <div key={service.key}><Icon size={15} /><span className="service-info">
                   <strong>{serviceLabel(service)}</strong>
-                  <small title={service.detail ?? undefined}>{service.detail ?? "—"}</small>
+                  <small title={service.detail ?? undefined}>{serviceDetail(service)}</small>
                 </span><Status value={service.state} label={stateLabel(service.state)} /></div>;
               })}
             </div>

@@ -1,4 +1,6 @@
 import os
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -15,11 +17,18 @@ from lkp.models import (
     DocumentVersion,
     IngestJob,
     JobStatus,
+    ProjectArticle,
+    ProjectArticleRevision,
     SourceRoot,
     Tag,
 )
 from lkp.settings import Settings
 from lkp_indexer.embedding import DeterministicTestEmbedder
+from lkp_indexer.generation import ProjectArticleDraft
+from lkp_indexer.project_article import (
+    refresh_all_project_articles,
+    refresh_project_article,
+)
 from lkp_indexer.queue import lease
 from lkp_indexer.scanner import scan_root
 from lkp_indexer.worker import process_job
@@ -27,6 +36,61 @@ from sqlalchemy import create_engine, delete, func, select, update
 from sqlalchemy.orm import Session
 
 pytestmark = pytest.mark.integration
+
+
+class _ProjectArticleEditor:
+    provider = "test-editor"
+    model = "test-editor-v1"
+
+    def curate_project_article(self, payload, *, language, prompt_version):
+        assert language == "ko"
+        assert prompt_version.startswith("project-article-v3")
+        if payload["phase"] == "synthesis":
+            return (
+                ProjectArticleDraft.model_validate(payload["editorial_notes"][-1]),
+                "sha256:test-editor-v1",
+            )
+        assert payload["phase"] == "evidence_digest"
+        changed = payload["changed_sources"]
+        source_id = changed[-1]["id"]
+        body = changed[-1]["body"]
+        return (
+            ProjectArticleDraft.model_validate(
+                {
+                    "title": "테스트 프로젝트의 최신 문서",
+                    "standfirst": {
+                        "sentences": [
+                            {
+                                "text": f"현재 문서의 핵심 내용은 {body}입니다.",
+                                "source_ids": [source_id],
+                            }
+                        ]
+                    },
+                    "sections": [
+                        {
+                            "key": "overview",
+                            "title": "현재 상태",
+                            "paragraphs": [
+                                {
+                                    "sentences": [
+                                        {
+                                            "text": f"검증용 원문은 {body}입니다.",
+                                            "source_ids": [source_id],
+                                        }
+                                    ]
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            "sha256:test-editor-v1",
+        )
+
+
+class _FailingProjectArticleEditor(_ProjectArticleEditor):
+    def curate_project_article(self, payload, *, language, prompt_version):
+        raise RuntimeError("editor unavailable")
 
 
 @pytest.fixture
@@ -61,6 +125,9 @@ def test_fixture_pipeline_is_idempotent(database_url: str, tmp_path: Path):
         embedding_provider="deterministic-test",
         embedding_revision="test-d1024-v1",
         embedding_dimension=1024,
+        # This fixture validates deterministic vector persistence, not the
+        # production CPU thermal interlock inherited from an operator .env.
+        embedding_runtime_mode="enabled",
     )
     with Session(engine) as session:
         initial_documents = session.scalar(select(func.count()).select_from(Document))
@@ -192,3 +259,183 @@ def test_fixture_pipeline_is_idempotent(database_url: str, tmp_path: Path):
             session.scalar(select(func.count()).select_from(DocumentVersion))
             == initial_versions + 1
         )
+
+
+def test_project_article_is_revisioned_and_unchanged_sources_are_skipped(
+    database_url: str, tmp_path: Path
+):
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    engine = create_engine(database_url)
+    project = f"article-{uuid.uuid4()}"
+    root_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    settings = Settings(
+        database_url=database_url,
+        vault_dir=tmp_path / "vault",
+        project_article_batch_chars=10_000,
+    )
+    with Session(engine) as session:
+        session.add(
+            SourceRoot(
+                id=root_id,
+                name=project,
+                canonical_path=str(tmp_path / "source"),
+                source_type="repositories",
+                read_only=True,
+                enabled=True,
+                include_patterns=["**/*"],
+                exclude_patterns=[],
+            )
+        )
+        session.flush()
+        session.add(
+            Document(
+                id=document_id,
+                source_root_id=root_id,
+                canonical_path=str(tmp_path / "source" / "README.md"),
+                relative_path="README.md",
+                filename="README.md",
+                extension=".md",
+                mime_type="text/markdown",
+                project_key=project,
+                project_relative_path="README.md",
+                parent_path="",
+                size_bytes=5,
+                modified_at_fs=now,
+                current_content_hash="hash-one",
+                current_version_id=version_id,
+                state="active",
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+        )
+        session.flush()
+        session.add(
+            DocumentVersion(
+                id=version_id,
+                document_id=document_id,
+                content_hash="hash-one",
+                byte_size=5,
+                modified_at_fs=now,
+                detected_at=now,
+                parser_version="test",
+                chunker_version="test",
+                line_count=1,
+                metadata_json={},
+                change_type="created",
+                diff_summary={},
+            )
+        )
+        session.flush()
+        chunk = DocumentChunk(
+            document_version_id=version_id,
+            chunk_index=0,
+            chunk_type="heading",
+            heading_path="개요",
+            start_line=1,
+            end_line=1,
+            content="첫 상태",
+            content_hash="chunk-one",
+            token_estimate=2,
+            metadata_json={},
+        )
+        session.add(chunk)
+        session.commit()
+
+        first = refresh_project_article(
+            session,
+            project=project,
+            provider=_ProjectArticleEditor(),
+            settings=settings,
+        )
+        session.commit()
+        unchanged = refresh_project_article(
+            session,
+            project=project,
+            provider=_ProjectArticleEditor(),
+            settings=settings,
+        )
+        session.commit()
+
+        chunk.content = "둘째 상태"
+        chunk.content_hash = "chunk-two"
+        session.commit()
+        second = refresh_project_article(
+            session,
+            project=project,
+            provider=_ProjectArticleEditor(),
+            settings=settings,
+        )
+        session.commit()
+
+        article = session.scalar(
+            select(ProjectArticle).where(ProjectArticle.project_key == project)
+        )
+        assert article is not None
+        revisions = list(
+            session.scalars(
+                select(ProjectArticleRevision)
+                .where(ProjectArticleRevision.article_id == article.id)
+                .order_by(ProjectArticleRevision.revision_number)
+            )
+        )
+        assert first["revision"] == 1
+        assert unchanged["status"] == "unchanged"
+        assert second["revision"] == 2
+        assert len(revisions) == 2
+        assert revisions[1].previous_revision_id == revisions[0].id
+        assert revisions[1].sources_json[0]["citation_number"] == 1
+        assert "둘째 상태" in revisions[1].standfirst_json["sentences"][0]["text"]
+        article_path = (
+            tmp_path
+            / "vault"
+            / "_generated"
+            / "Projects"
+            / project
+            / "project-overview.md"
+        )
+        assert article_path.read_text(encoding="utf-8").count("[1]") >= 2
+
+        chunk.content = "셋째 상태"
+        chunk.content_hash = "chunk-three"
+        session.commit()
+        failed = refresh_all_project_articles(
+            session,
+            provider=_FailingProjectArticleEditor(),
+            settings=settings,
+            only_project=project,
+        )
+        session.refresh(article)
+        assert failed[0]["status"] == "fallback_updated"
+        assert article.status == "degraded"
+        fallback_revision = session.get(
+            ProjectArticleRevision, article.current_revision_id
+        )
+        assert fallback_revision is not None
+        assert fallback_revision.revision_number == 3
+        assert fallback_revision.provider == "deterministic-fallback"
+        assert (
+            fallback_revision.change_summary_json["preserved_editorial_revision"]
+            == 2
+        )
+        assert (
+            fallback_revision.standfirst_json["sentences"][0]["text"]
+            == revisions[1].standfirst_json["sentences"][0]["text"]
+        )
+        assert fallback_revision.sections_json[:-1] == revisions[1].sections_json
+        assert fallback_revision.sections_json[-1]["key"] == "update_status"
+
+        recovered = refresh_all_project_articles(
+            session,
+            provider=_ProjectArticleEditor(),
+            settings=settings,
+            only_project=project,
+        )
+        session.refresh(article)
+        assert recovered[0]["status"] == "updated"
+        assert recovered[0]["revision"] == 4
+        assert article.status == "current"

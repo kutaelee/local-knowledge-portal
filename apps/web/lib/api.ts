@@ -16,6 +16,15 @@ export type Metrics = {
   chunks: number;
   semantic_chunks: number;
   semantic_coverage: number;
+  embedding_runtime: {
+    open: boolean;
+    mode: "enabled" | "deferred_gpu_recovery";
+    reason: string | null;
+    recent_timeouts: number;
+    threshold: number;
+    window_seconds: number;
+    last_timeout_at: string | null;
+  };
   document_breakdown: {
     knowledge_documents: number;
     code_files: number;
@@ -70,6 +79,47 @@ export type Metrics = {
     p50_ms: number;
     p95_ms: number;
   }>;
+};
+
+export type EmbeddingRecovery = {
+  runtime: Metrics["embedding_runtime"];
+  reindex: null | {
+    id: string;
+    status: string;
+    submitted_at: string | null;
+    started_at: string | null;
+    finished_at: string | null;
+    requested_vram_mb: number | null;
+    estimated_seconds: number | null;
+    priority: number | null;
+    scheduling_note: string | null;
+    error: string | null;
+  };
+  validation: null | {
+    state: "verified" | "failed" | "invalid";
+    checked_at?: string | null;
+    embedding_revision?: string | null;
+    reason?: string | null;
+    error_type?: string | null;
+    semantic?: {
+      result_count?: number | null;
+      vector_result_count?: number | null;
+      best_similarity?: number | null;
+      provenance_complete?: boolean | null;
+    } | null;
+    hybrid?: {
+      result_count?: number | null;
+      vector_result_count?: number | null;
+      best_similarity?: number | null;
+      provenance_complete?: boolean | null;
+    } | null;
+  };
+  progress: {
+    pending_documents: number;
+    pending_chunks: number;
+    embedding_revision: string;
+  };
+  scheduler_decision: string | null;
 };
 
 export type TreeItem = {

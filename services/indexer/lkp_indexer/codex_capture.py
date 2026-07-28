@@ -17,6 +17,7 @@ import frontmatter
 import yaml
 from lkp.db import SessionLocal
 from lkp.models import GeneratedPage, JobStatus
+from lkp.redaction import redact_text as _redact_text
 from lkp.settings import Settings, get_settings
 from sqlalchemy import select
 
@@ -30,16 +31,6 @@ GENERATOR = "local-knowledge-portal"
 CAPTURE_PIPELINE_VERSION = "codex-transcript-v1"
 MANAGED_PREFIX = "_generated/codex-sessions"
 ENRICHMENT_PREFIX = "_generated/codex-summaries"
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b(api[_-]?key|access[_-]?token|secret|password)\b"
-    r"(\s*[:=]\s*)([\"']?)([^\s\"']{8,})([\"']?)"
-)
-_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}")
-_OPENAI_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")
-_PRIVATE_KEY = re.compile(
-    r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
-    re.DOTALL,
-)
 _INJECTED_USER_PREFIXES = (
     "<recommended_plugins>",
     "# AGENTS.md instructions",
@@ -81,12 +72,7 @@ class SyncResult:
 
 
 def redact_text(value: str) -> str:
-    value = _PRIVATE_KEY.sub("[REDACTED PRIVATE KEY]", value)
-    value = _SECRET_ASSIGNMENT.sub(
-        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", value
-    )
-    value = _BEARER.sub("Bearer [REDACTED]", value)
-    return _OPENAI_KEY.sub("[REDACTED API KEY]", value)
+    return _redact_text(value)
 
 
 def _is_injected_user_context(value: str) -> bool:

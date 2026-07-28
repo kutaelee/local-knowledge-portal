@@ -9,6 +9,11 @@ from sqlalchemy.orm import Session
 
 from lkp.models import SearchQueryLog
 
+from .rag_quality import (
+    candidate_limit,
+    infer_query_scope,
+    reward_rerank,
+)
 from .schemas import Provenance, SearchRequest, SearchResponse, SearchResult
 from .settings import Settings
 
@@ -254,7 +259,7 @@ def _params(request: SearchRequest) -> dict:
         "fts_query": request.query,
         "minimum_lexical_rank": 0.0,
         "contains": "%" + request.query + "%",
-        "limit": request.top_k * 3,
+        "limit": candidate_limit(request.top_k),
         "allow_text": request.mode in {"keyword", "hybrid"},
         "allow_path": request.mode in {"keyword", "hybrid", "path"},
         "allow_symbol": request.mode in {"keyword", "hybrid", "symbol"},
@@ -285,13 +290,41 @@ def search(
         text("SELECT set_config('statement_timeout', :timeout, true)"),
         {"timeout": f"{settings.search_statement_timeout_ms}ms"},
     )
+    projects = session.execute(
+        text(
+            """
+            SELECT DISTINCT project_key
+            FROM document
+            WHERE state = 'active' AND project_key IS NOT NULL
+            """
+        )
+    ).scalars()
+    scope = infer_query_scope(request.query, projects)
+    effective_request = (
+        request.model_copy(update={"project": scope.project})
+        if request.project is None and scope.inferred_project
+        else request
+    )
     lexical_rows = []
     vector_rows = []
-    if request.mode in {"keyword", "hybrid", "path", "symbol"}:
-        params = _params(request)
-        relaxed = relaxed_lexical_query(request.query)
+    if effective_request.mode in {"keyword", "hybrid", "path", "symbol"}:
+        params = _params(effective_request)
+        relaxed = relaxed_lexical_query(effective_request.query)
         lexical_rows = list(session.execute(INDEXED_LEXICAL_SQL, params).mappings())
-        if request.mode == "keyword" and not lexical_rows:
+        if (
+            effective_request.mode in {"keyword", "hybrid"}
+            and scope.preferred_tags
+            and not effective_request.tags
+        ):
+            case_request = effective_request.model_copy(
+                update={"tags": list(scope.preferred_tags), "tag_mode": "any"}
+            )
+            case_rows = list(
+                session.execute(INDEXED_LEXICAL_SQL, _params(case_request)).mappings()
+            )
+            seen = {row["chunk_id"] for row in lexical_rows}
+            lexical_rows.extend(row for row in case_rows if row["chunk_id"] not in seen)
+        if effective_request.mode == "keyword" and not lexical_rows:
             if relaxed:
                 lexical_rows = list(
                     session.execute(
@@ -303,17 +336,17 @@ def search(
                         },
                     ).mappings()
                 )
-        if request.mode == "keyword" and not lexical_rows and relaxed is None:
+        if effective_request.mode == "keyword" and not lexical_rows and relaxed is None:
             fallback_rows = list(session.execute(CONTENT_FALLBACK_SQL, params).mappings())
             indexed_chunk_ids = {row["chunk_id"] for row in lexical_rows}
             lexical_rows.extend(
                 row for row in fallback_rows if row["chunk_id"] not in indexed_chunk_ids
             )
         if (
-            request.mode == "keyword"
+            effective_request.mode == "keyword"
             and not lexical_rows
             and relaxed is None
-            and len(request.query) <= 80
+            and len(effective_request.query) <= 80
         ):
             session.execute(text("SET LOCAL pg_trgm.word_similarity_threshold = 0.15"))
             fallback_rows = list(session.execute(FUZZY_FALLBACK_SQL, params).mappings())
@@ -321,15 +354,18 @@ def search(
             lexical_rows.extend(
                 row for row in fallback_rows if row["chunk_id"] not in indexed_chunk_ids
             )
-    if request.mode in {"semantic", "hybrid"} and embedder is not None:
-        vector = embedder.embed([request.query])[0]
+    if effective_request.mode in {"semantic", "hybrid"} and embedder is not None:
+        vector = embedder.embed([effective_request.query])[0]
         vector_rows = list(
             session.execute(
                 VECTOR_SQL,
                 {
-                    **_params(request),
+                    **_params(effective_request),
                     "vector": str(vector),
-                    "revision": request.embedding_revision or settings.embedding_revision,
+                    "revision": (
+                        effective_request.embedding_revision
+                        or settings.embedding_revision
+                    ),
                 },
             ).mappings()
         )
@@ -353,7 +389,7 @@ def search(
             item["why"].append("content fallback")
     for rank, row in enumerate(vector_rows, 1):
         similarity = float(row["vector_similarity"])
-        if similarity < request.minimum_similarity:
+        if similarity < effective_request.minimum_similarity:
             continue
         item = scores.setdefault(
             str(row["chunk_id"]), {"row": row, "fused": 0, "lex": None, "vec": None, "why": []}
@@ -361,7 +397,7 @@ def search(
         item["fused"] += 1 / (rrf_k + rank)
         item["vec"] = similarity
         item["why"].append("semantic similarity")
-    ordered = sorted(scores.values(), key=lambda item: item["fused"], reverse=True)[: request.top_k]
+    ordered = sorted(scores.values(), key=lambda item: item["fused"], reverse=True)
     results = []
     for item in ordered:
         row = item["row"]
@@ -390,6 +426,7 @@ def search(
                 ),
             )
         )
+    results = reward_rerank(results, effective_request, scope)
     elapsed = int((time.perf_counter() - started) * 1000)
     session.add(
         SearchQueryLog(

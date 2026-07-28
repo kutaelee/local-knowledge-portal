@@ -8,27 +8,34 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$source = Join-Path $PSScriptRoot "curate.ps1"
-$target = Join-Path $OperationsRoot "curate.ps1"
-if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-    throw "Curation entrypoint is missing: $source"
-}
 if (-not (Test-Path -LiteralPath $OperationsRoot -PathType Container)) {
     throw "Operational root is missing. Run bootstrap first: $OperationsRoot"
 }
-if (Test-Path -LiteralPath $target -PathType Leaf) {
-    $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
-    $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
-    if ($sourceHash -ne $targetHash) {
-        $stamp = Get-Date -Format "yyyy-MM-ddTHHmmssfff"
-        Copy-Item -LiteralPath $target -Destination "$target.$stamp.bak" -ErrorAction Stop
-    }
-}
-Copy-Item -LiteralPath $source -Destination $target -Force
 
+foreach ($fileName in @("curate.ps1", "curation-queue.psm1")) {
+    $source = Join-Path $PSScriptRoot $fileName
+    $target = Join-Path $OperationsRoot $fileName
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Curation runtime file is missing: $source"
+    }
+    if (Test-Path -LiteralPath $target -PathType Leaf) {
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+        if ($sourceHash -ne $targetHash) {
+            $stamp = Get-Date -Format "yyyy-MM-ddTHHmmssfff"
+            Copy-Item -LiteralPath $target -Destination "$target.$stamp.bak" -ErrorAction Stop
+        }
+    }
+    Copy-Item -LiteralPath $source -Destination $target -Force
+}
+
+# `$target` is the loop's final value (the .psm1 module).  Keep the scheduled
+# task pointed at the executable entrypoint explicitly; otherwise Task
+# Scheduler reports a successful launch while no curation workload is submitted.
+$curateTarget = Join-Path $OperationsRoot "curate.ps1"
 $arguments = (
     "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass " +
-    "-File `"$target`""
+    "-File `"$curateTarget`""
 )
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
 $startAt = (Get-Date).AddMinutes(5)

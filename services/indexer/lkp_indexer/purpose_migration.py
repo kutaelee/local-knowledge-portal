@@ -21,7 +21,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .projects import project_identity
-from .selection import semantic_policy
+from .selection import SEMANTIC_POLICY_VERSION, semantic_policy
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -113,7 +113,7 @@ def migrate_purpose_scope(
             or 0
         ) if chunk_ids else 0
         result: dict[str, Any] = {
-            "policy": "purpose-aware-v2",
+            "policy": SEMANTIC_POLICY_VERSION,
             "status": "planned",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "repository_embedding_mode": repository_mode,
@@ -149,7 +149,7 @@ def migrate_purpose_scope(
                         version.document_id
                     ],
                     "embedding_revision": None,
-                    "embedding_policy": "purpose-aware-v2",
+                    "embedding_policy": SEMANTIC_POLICY_VERSION,
                 }
         session.commit()
         result["status"] = "completed"

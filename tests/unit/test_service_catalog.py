@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-from lkp.service_catalog import load_docker_groups
+from lkp.service_catalog import load_docker_groups, load_gpu_embedding_reaper
 
 
 def _write_snapshot(path, *, checked_at: datetime, containers: list[dict]) -> None:
@@ -106,3 +106,56 @@ def test_stale_snapshot_does_not_report_healthy_containers(tmp_path):
 
     assert inventory["state"] == "stale"
     assert groups[0]["services"][0]["state"] == "stale"
+
+
+def test_gpu_embedding_reaper_requires_a_fresh_scheduler_confirmed_snapshot(tmp_path):
+    now = datetime.now(timezone.utc)
+    snapshot = tmp_path / "gpu-embedding-reaper.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "checked_at": now.isoformat(),
+                "state": "no_batch_container",
+                "scheduler_ok": True,
+                "action": "none",
+                "error": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = load_gpu_embedding_reaper(snapshot, now=now, stale_after_seconds=90)
+
+    assert result["state"] == "healthy"
+    assert "temporary GPU embedding batch" in result["detail"]
+
+
+def test_gpu_embedding_reaper_fails_closed_for_stale_or_malformed_status(tmp_path):
+    now = datetime.now(timezone.utc)
+    snapshot = tmp_path / "gpu-embedding-reaper.json"
+    snapshot.write_text("{not json", encoding="utf-8")
+    assert load_gpu_embedding_reaper(snapshot, now=now, stale_after_seconds=90)["state"] == "error"
+
+    snapshot.write_text(
+        json.dumps(
+            {
+                "checked_at": (now - timedelta(minutes=3)).isoformat(),
+                "state": "no_batch_container",
+                "scheduler_ok": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_gpu_embedding_reaper(snapshot, now=now, stale_after_seconds=90)["state"] == "stale"
+
+    snapshot.write_text(
+        json.dumps(
+            {
+                "checked_at": now.isoformat(),
+                "state": "unrecognized_future_state",
+                "scheduler_ok": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_gpu_embedding_reaper(snapshot, now=now, stale_after_seconds=90)["state"] == "error"

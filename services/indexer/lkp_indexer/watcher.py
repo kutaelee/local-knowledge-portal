@@ -10,7 +10,7 @@ from watchfiles import Change, awatch
 
 from .chunking import SUPPORTED_EXTENSIONS
 from .file_safety import source_file_rejection_reason
-from .ignore import IgnoreRules
+from .ignore import IgnoreRules, IncludeRules
 from .paths import idempotency_key, is_reparse_point
 from .queue import enqueue
 from .reconcile import reconcile_root
@@ -57,6 +57,7 @@ async def watch_root(
 ) -> None:
     root = Path(source_root.canonical_path)
     rules = IgnoreRules(root, source_root.exclude_patterns)
+    include_rules = IncludeRules(source_root.include_patterns)
     async for changes in awatch(
         root,
         debounce=debounce_ms,
@@ -73,6 +74,8 @@ async def watch_root(
             except ValueError:
                 continue
             if rules.matches(relative, is_dir=candidate.is_dir()):
+                continue
+            if not candidate.is_dir() and not include_rules.matches(relative):
                 continue
             if candidate.suffix.lower() not in SUPPORTED_EXTENSIONS:
                 continue

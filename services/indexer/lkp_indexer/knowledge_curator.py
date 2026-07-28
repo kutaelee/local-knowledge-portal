@@ -17,7 +17,7 @@ from lkp.logging import configure_logging
 from lkp.models import EvidenceRecord, KnowledgeCandidate, SystemSetting
 from lkp.settings import Settings, get_settings
 from pydantic import ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from .case_pages import materialize_case
@@ -40,9 +40,9 @@ logger = structlog.get_logger()
 _SCHEDULER_KEY = "knowledge_curator.scheduler"
 _EVIDENCE_REPAIR_KEY = "knowledge.evidence_repair.non_execution_v1"
 _VALUE_BACKFILL_KEY = "knowledge.value_backfill.v3"
-_CURATION_HARNESS_VERSION = "evidence-gate-v3"
+_CURATION_HARNESS_VERSION = "evidence-gate-v4-reported-provenance"
 _INLINE_CITATION = re.compile(
-    r"\[[^\]\r\n]{1,50}\]|\((?:\s*E\d+\s*,?)+\s*\)",
+    r"\[[^\]\r\n]{1,50}\]|\((?:\s*[ER]\d+\s*,?)+\s*\)",
     re.IGNORECASE,
 )
 _NUMBER = re.compile(r"(?<![A-Za-z])\d+(?:[.,]\d+)*(?:%|ms|MB|GB|초|분|시간)?")
@@ -120,8 +120,11 @@ def _render_references(evidence_ids: list[str]) -> str:
     return " ".join(f"[{item}]" for item in unique)
 
 
-def _render_paragraph(paragraph: EvidenceBoundParagraph) -> str:
+def _render_paragraph(paragraph: EvidenceBoundParagraph, language: str) -> str:
     text_value = _plain_text(paragraph.text)
+    if any(item.startswith("R") for item in paragraph.evidence_ids):
+        prefix = "작업 보고: " if language == "ko" else "Reported by the task: "
+        text_value = f"{prefix}{text_value}"
     references = _render_references(paragraph.evidence_ids)
     return f"{text_value} {references}".strip()
 
@@ -130,33 +133,39 @@ def _section_plain(paragraphs: list[EvidenceBoundParagraph]) -> str:
     return "\n\n".join(_plain_text(item.text) for item in paragraphs).strip()
 
 
-def _section_markdown(paragraphs: list[EvidenceBoundParagraph]) -> str:
-    return "\n\n".join(_render_paragraph(item) for item in paragraphs).strip()
+def _section_markdown(
+    paragraphs: list[EvidenceBoundParagraph],
+    language: str,
+) -> str:
+    return "\n\n".join(_render_paragraph(item, language) for item in paragraphs).strip()
 
 
 def render_article(draft: CuratedKnowledgeArticle, language: str) -> str:
     if language == "ko":
         headings = (
-            ("상황과 맥락", _section_markdown(draft.context)),
-            ("문제는 어떻게 드러났나", _section_markdown(draft.problem)),
-            ("원인 또는 구현 판단", _section_markdown(draft.cause_or_decision)),
-            ("무엇을 어떻게 바꿨나", _section_markdown(draft.implementation)),
-            ("검증된 결과", _section_markdown(draft.verification)),
-            ("한계와 다음 확인", _section_markdown(draft.limitations)),
+            ("상황과 맥락", _section_markdown(draft.context, language)),
+            ("문제는 어떻게 드러났나", _section_markdown(draft.problem, language)),
+            ("원인 또는 구현 판단", _section_markdown(draft.cause_or_decision, language)),
+            ("무엇을 어떻게 바꿨나", _section_markdown(draft.implementation, language)),
+            ("검증된 결과", _section_markdown(draft.verification, language)),
+            ("한계와 다음 확인", _section_markdown(draft.limitations, language)),
         )
     else:
         headings = (
-            ("Context", _section_markdown(draft.context)),
-            ("How the problem appeared", _section_markdown(draft.problem)),
+            ("Context", _section_markdown(draft.context, language)),
+            ("How the problem appeared", _section_markdown(draft.problem, language)),
             (
                 "Cause or implementation decision",
-                _section_markdown(draft.cause_or_decision),
+                _section_markdown(draft.cause_or_decision, language),
             ),
-            ("What changed", _section_markdown(draft.implementation)),
-            ("Verified result", _section_markdown(draft.verification)),
-            ("Limitations and next checks", _section_markdown(draft.limitations)),
+            ("What changed", _section_markdown(draft.implementation, language)),
+            ("Verified result", _section_markdown(draft.verification, language)),
+            ("Limitations and next checks", _section_markdown(draft.limitations, language)),
         )
     standfirst = _plain_text(draft.standfirst)
+    if any(item.startswith("R") for item in draft.standfirst_evidence_ids):
+        prefix = "작업 보고 기반: " if language == "ko" else "Based on the task report: "
+        standfirst = f"{prefix}{standfirst}"
     standfirst_refs = _render_references(draft.standfirst_evidence_ids)
     lines = [f"> {standfirst} {standfirst_refs}".rstrip(), ""]
     for heading, content in headings:
@@ -207,6 +216,34 @@ def _payload(
                 "exit_code": item.exit_code,
             }
         )
+    reported = []
+    metadata_sources = (candidate.metadata_json or {}).get("reported_sources") or []
+    if not metadata_sources and candidate.reported_result.strip():
+        metadata_sources = [
+            {
+                "kind": "final_report",
+                "text": candidate.reported_result,
+                "verification": "REPORTED_NOT_VERIFIED",
+            }
+        ]
+    for index, item in enumerate(metadata_sources[:4], start=1):
+        if not isinstance(item, dict):
+            continue
+        text_value = str(item.get("text") or "").strip()[:16000]
+        if not text_value:
+            continue
+        source_id = f"R{index}"
+        evidence_map[source_id] = text_value
+        reported.append(
+            {
+                "id": source_id,
+                "kind": str(item.get("kind") or "reported_context"),
+                "text": text_value,
+                "verification": str(
+                    item.get("verification") or "REPORTED_NOT_VERIFIED"
+                ),
+            }
+        )
     payload = {
         "candidate": {
             "current_category": candidate.category,
@@ -216,12 +253,13 @@ def _payload(
             "root_cause": candidate.root_cause,
             "solution": candidate.solution,
         },
-        "reported_result_not_evidence": candidate.reported_result,
+        "reported_sources": reported,
         "verified_evidence": serialized,
         "deterministic_value_assessment": (candidate.metadata_json or {}).get("knowledge_value"),
         "publication_rule": (
-            "Choose publish only when verified evidence supports a reusable, non-inflated "
-            "article. Reported text may provide context but is not verified evidence."
+            "R-prefixed sources preserve reported intent, cause, decision, and implementation "
+            "context; cite them only as reported context. E-prefixed sources are independently "
+            "observed evidence. Verification and measured outcomes must cite E sources."
         ),
     }
     return payload, evidence_map
@@ -278,10 +316,12 @@ def validate_draft(
     settings: Settings,
 ) -> tuple[str, list[str], str]:
     if not draft.standfirst_evidence_ids:
-        explicit_ids = list(dict.fromkeys(re.findall(r"(?<!\w)E\d+(?!\w)", draft.standfirst)))
+        explicit_ids = list(
+            dict.fromkeys(re.findall(r"(?<!\w)[ER]\d+(?!\w)", draft.standfirst))
+        )
         if explicit_ids:
             clean_standfirst = re.sub(
-                r"(?:\s*[,;]?\s*E\d+)+[.!]?\s*$",
+                r"(?:\s*[,;]?\s*[ER]\d+)+[.!]?\s*$",
                 "",
                 draft.standfirst,
             ).rstrip(" ,;")
@@ -313,7 +353,12 @@ def validate_draft(
     elif any(item not in evidence_map for item in draft.standfirst_evidence_ids):
         reasons.append("standfirst_invalid_citation")
     else:
-        cited_text = " ".join(evidence_map[item] for item in draft.standfirst_evidence_ids)
+        verified_ids = [
+            item for item in draft.standfirst_evidence_ids if item.startswith("E")
+        ]
+        if not verified_ids:
+            reasons.append("standfirst_missing_verified_evidence")
+        cited_text = " ".join(evidence_map[item] for item in verified_ids)
         source_numbers = {token.replace(",", "") for token in _NUMBER.findall(cited_text)}
         if any(
             token.replace(",", "") not in source_numbers
@@ -349,7 +394,17 @@ def validate_draft(
             if invalid:
                 reasons.append(f"{name}_invalid_citation")
                 continue
-            cited_text = " ".join(evidence_map[item] for item in paragraph_citations)
+            verified_citations = {
+                item for item in paragraph_citations if item.startswith("E")
+            }
+            if name in {"implementation", "verification"} and not verified_citations:
+                reasons.append(f"{name}_missing_verified_evidence")
+            if name == "verification" and paragraph_citations - verified_citations:
+                reasons.append("verification_reported_source_not_allowed")
+            numeric_citations = (
+                verified_citations if name == "verification" else paragraph_citations
+            )
+            cited_text = " ".join(evidence_map[item] for item in numeric_citations)
             source_numbers = {token.replace(",", "") for token in _NUMBER.findall(cited_text)}
             if any(
                 token.replace(",", "") not in source_numbers
@@ -742,7 +797,11 @@ def curate_candidate(
     )
     metadata["knowledge_value"] = value_assessment
     candidate.metadata_json = metadata
-    if value_assessment["tier"] != "promote":
+    journal_editorial_path = bool(
+        value_assessment["tier"] == "needs_review"
+        and metadata.get("journal_backed")
+    )
+    if value_assessment["tier"] != "promote" and not journal_editorial_path:
         value_hash = hashlib.sha256(
             json.dumps(
                 value_assessment,
@@ -832,6 +891,16 @@ def curate_candidate(
         candidate.updated_at = now
         return "NEEDS_REVIEW", None
 
+    if journal_editorial_path and draft.decision != "publish":
+        state = "activity_only" if draft.decision == "activity_only" else "needs_review"
+        curation["state"] = state
+        curation["validation_reasons"] = [
+            "editorial_recommendation_did_not_support_publication"
+        ]
+        candidate.metadata_json = {**metadata, "curation": dict(curation)}
+        candidate.status = state
+        return ("ACTIVITY_ONLY" if state == "activity_only" else "NEEDS_REVIEW"), None
+
     candidate.title = draft.title.strip()
     candidate.problem = _section_plain(draft.problem)
     candidate.symptom = _section_plain(draft.context)
@@ -863,6 +932,13 @@ def curate_candidate(
             "curation_validation_status": "PASS",
         }
     )
+    if journal_editorial_path:
+        metadata["editorial_value_resolution"] = {
+            "approved": True,
+            "deterministic_tier_before_editorial": value_assessment["tier"],
+            "reason": "journal_backed_article_passed_evidence_citation_validation",
+            "curated_at": now.isoformat(),
+        }
     candidate.metadata_json = metadata
     if evaluate_gate(session, candidate) != "VERIFIED":
         curation["state"] = "needs_review"
@@ -924,8 +1000,13 @@ def run_once(
         session.scalars(
             select(KnowledgeCandidate.id)
             .where(
-                KnowledgeCandidate.status.in_(["candidate", "verified", "needs_review"]),
+                KnowledgeCandidate.status.in_(["candidate", "verified"]),
                 KnowledgeCandidate.evidence_gate_status == "VERIFIED",
+                func.coalesce(
+                    KnowledgeCandidate.metadata_json["semantic_dedup"]["state"].astext,
+                    "",
+                )
+                != "pending_gpu_vector_check",
                 KnowledgeCandidate.updated_at <= now,
             )
             .order_by(KnowledgeCandidate.updated_at)
@@ -1060,7 +1141,7 @@ def run_once(
             select(KnowledgeCandidate)
             .where(
                 KnowledgeCandidate.id.in_(snapshot_candidate_ids),
-                KnowledgeCandidate.status.in_(["candidate", "verified", "needs_review"]),
+                KnowledgeCandidate.status.in_(["candidate", "verified"]),
                 KnowledgeCandidate.evidence_gate_status == "VERIFIED",
             )
             .order_by(KnowledgeCandidate.updated_at)

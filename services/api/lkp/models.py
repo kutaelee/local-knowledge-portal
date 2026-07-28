@@ -58,6 +58,11 @@ class SourceRoot(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     include_patterns: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
     exclude_patterns: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    # Keep documents discoverable while allowing source-root-specific semantic
+    # exclusions for generated evidence or bulk artifacts. This must never be
+    # reused as a filesystem ignore list: lexical search and provenance remain
+    # available for these files.
+    semantic_exclude_patterns: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -145,6 +150,47 @@ class ChunkEmbedding(Base):
     dimension: Mapped[int] = mapped_column(Integer)
     embedding: Mapped[list[float]] = mapped_column(Vector(1024))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeSimilarityEmbedding(Base):
+    """Rebuildable vectors used only to compare candidates with canonical cases.
+
+    They are intentionally separate from document retrieval embeddings so a
+    candidate cannot become searchable/published merely by receiving a vector.
+    """
+
+    __tablename__ = "knowledge_similarity_embedding"
+    __table_args__ = (
+        UniqueConstraint(
+            "record_type",
+            "record_id",
+            "embedding_revision",
+            name="uq_knowledge_similarity_embedding_record_revision",
+        ),
+        Index(
+            "ix_knowledge_similarity_embedding_lookup",
+            "record_type",
+            "embedding_revision",
+        ),
+        Index(
+            "ix_knowledge_similarity_embedding_terms",
+            "key_terms",
+            postgresql_using="gin",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    record_type: Mapped[str] = mapped_column(String(32))
+    record_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    key_terms: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    embedding_revision: Mapped[str] = mapped_column(String(200))
+    provider: Mapped[str] = mapped_column(String(100))
+    model: Mapped[str] = mapped_column(String(200))
+    model_digest: Mapped[str] = mapped_column(String(200))
+    dimension: Mapped[int] = mapped_column(Integer)
+    embedding: Mapped[list[float]] = mapped_column(Vector(1024))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class IngestJob(Base):
@@ -346,6 +392,68 @@ class ProjectJournalEntry(Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ProjectArticle(Base):
+    """One canonical, incrementally refreshed article per project."""
+
+    __tablename__ = "project_article"
+    __table_args__ = (
+        UniqueConstraint("project_key", name="uq_project_article_project"),
+        Index("ix_project_article_updated", "updated_at", "project_key"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_key: Mapped[str] = mapped_column(String(200))
+    current_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    source_hash: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    last_compared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ProjectArticleRevision(Base):
+    """Append-only article revision with sentence-level provenance."""
+
+    __tablename__ = "project_article_revision"
+    __table_args__ = (
+        UniqueConstraint(
+            "article_id",
+            "revision_number",
+            name="uq_project_article_revision_number",
+        ),
+        Index(
+            "ix_project_article_revision_article_created",
+            "article_id",
+            "created_at",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    article_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("project_article.id"))
+    revision_number: Mapped[int] = mapped_column(Integer)
+    previous_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("project_article_revision.id")
+    )
+    title: Mapped[str] = mapped_column(Text)
+    standfirst_json: Mapped[dict[str, Any]] = mapped_column("standfirst", JSONB)
+    sections_json: Mapped[list[dict[str, Any]]] = mapped_column("sections", JSONB)
+    sources_json: Mapped[list[dict[str, Any]]] = mapped_column("sources", JSONB)
+    source_manifest_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        "source_manifest", JSONB, default=list
+    )
+    source_hash: Mapped[str] = mapped_column(String(64))
+    provider: Mapped[str] = mapped_column(String(100))
+    model: Mapped[str] = mapped_column(String(200))
+    model_digest: Mapped[str] = mapped_column(String(200))
+    prompt_version: Mapped[str] = mapped_column(String(200))
+    change_summary_json: Mapped[dict[str, Any]] = mapped_column(
+        "change_summary", JSONB, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class KnowledgeCandidate(Base):

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from .chunking import SUPPORTED_EXTENSIONS
 from .file_safety import source_file_rejection_reason
-from .ignore import IgnoreRules
+from .ignore import IgnoreRules, IncludeRules
 from .paths import canonicalize, idempotency_key, is_reparse_point
 from .queue import enqueue
 
@@ -44,6 +44,7 @@ def register_roots(session: Session, config_path: Path) -> list[SourceRoot]:
                 enabled=enabled,
                 include_patterns=item.get("include_patterns", ["**/*"]),
                 exclude_patterns=item.get("exclude_patterns", []),
+                semantic_exclude_patterns=item.get("semantic_exclude_patterns", []),
             )
             session.add(root)
             session.flush()
@@ -55,6 +56,7 @@ def register_roots(session: Session, config_path: Path) -> list[SourceRoot]:
             root.enabled = enabled
             root.include_patterns = item.get("include_patterns", ["**/*"])
             root.exclude_patterns = item.get("exclude_patterns", [])
+            root.semantic_exclude_patterns = item.get("semantic_exclude_patterns", [])
         if root.enabled:
             roots.append(root)
     return roots
@@ -78,6 +80,7 @@ def scan_bases(root: Path, source_type: str) -> list[Path]:
 def scan_root(session: Session, source_root: SourceRoot, max_file_bytes: int) -> ScanStats:
     root = Path(source_root.canonical_path)
     rules = IgnoreRules(root, source_root.exclude_patterns)
+    include_rules = IncludeRules(source_root.include_patterns)
     stats = ScanStats()
     try:
         bases = scan_bases(root, source_root.source_type)
@@ -104,7 +107,11 @@ def scan_root(session: Session, source_root: SourceRoot, max_file_bytes: int) ->
             candidate = current_path / name
             relative = candidate.relative_to(root).as_posix()
             try:
-                if rules.matches(relative) or is_reparse_point(candidate):
+                if (
+                    rules.matches(relative)
+                    or not include_rules.matches(relative)
+                    or is_reparse_point(candidate)
+                ):
                     stats.ignored += 1
                     continue
                 if candidate.suffix.lower() not in SUPPORTED_EXTENSIONS:

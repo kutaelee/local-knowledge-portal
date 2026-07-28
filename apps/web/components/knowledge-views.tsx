@@ -9,6 +9,7 @@ import {
   Cpu,
   FileDiff,
   FolderTree,
+  History,
   ShieldAlert,
   Tag,
 } from "lucide-react";
@@ -33,6 +34,16 @@ const textByLocale = {
       notObserved: "관측되지 않음", changedFiles: "변경 파일",
       versions: "문서 버전", reported: "보고된 결과", verified: "검증된 결과",
     },
+    localChat: {
+      eyebrow: "로컬 모델", title: "로컬 모델 대화",
+      subtitle: "Ollama 등 로컬 모델의 완료된 대화를 Codex 작업과 분리해 프로젝트별로 기록합니다. 대화 내용 자체는 검증 근거가 아닙니다.",
+      global: "프로젝트 미지정", empty: "수집된 로컬 모델 대화가 없습니다.",
+      previous: "이전", next: "다음", page: "페이지",
+      select: "대화를 선택하면 사용자 질문과 모델 응답을 확인할 수 있습니다.",
+      instruction: "사용자 질문", command: "모델", exitCode: "실행 근거",
+      notObserved: "대화만 수집됨", changedFiles: "변경 파일",
+      versions: "문서 버전", reported: "모델 응답", verified: "독립 검증 결과",
+    },
     knowledge: {
       eyebrow: "프로젝트 지식", title: "프로젝트 지식",
       subtitle: "개발 일지와 재사용 가능한 검증 사례를 원본 파일과 분리해 관리합니다.",
@@ -40,9 +51,18 @@ const textByLocale = {
       hierarchy: "프로젝트 · 작업 특성", allProjects: "전체 프로젝트",
       allCategories: "전체 작업 특성", tags: "태그", allTags: "전체 태그",
       latestFirst: "최신 갱신 순", latest: "최근 갱신",
-      journal: "프로젝트 개발 일지",
-      journalSubtitle: "주요 구현·설정·운영 변경을 사례 승격 여부와 별도로 기록합니다.",
-      intent: "작업 의도", changes: "주요 변경", changedFiles: "변경 파일", failures: "실패와 해결",
+      journal: "프로젝트 문서",
+      journalSubtitle: "프로젝트의 최신 상태를 주제별로 갱신한 문서입니다. 과거 작업은 본문에 합치지 않고 근거와 이력으로 보존합니다.",
+      currentDocument: "프로젝트 최신 문서", history: "작업 이력",
+      historyCount: "개별 이력", sourceList: "출처",
+      sourceHelp: "본문의 작은 번호를 누르면 해당 내용을 만든 원문과 실행 근거를 확인할 수 있습니다.",
+      openHistory: "이 프로젝트의 작업 이력 보기",
+      integratedLimit: "현재 문서는 최근 200개 이력에서 주제별 최신 근거를 선택했습니다. 전체 기록은 작업 이력에서 확인하세요.",
+      sourceArticle: "근거 원문", closeSource: "근거 닫기",
+      sourceIntent: "당시 작업 의도", sourceReport: "원문 작업 보고",
+      projectSelector: "프로젝트 선택",
+      intent: "작업 의도", changes: "주요 변경", changedFiles: "변경 파일", failures: "오류 및 조치",
+      noObservedFailure: "관측된 명령 실패가 없습니다. 이 일지는 오류 해결 사례로 주장하지 않습니다.",
       verification: "실행 검증", references: "지식베이스 참조",
       noReferences: "이 작업에서 구조화된 지식베이스 참조가 관측되지 않았습니다.",
       previous: "이전", next: "다음", page: "페이지",
@@ -57,11 +77,25 @@ const textByLocale = {
       held: "자동 선별 완료: 현재 근거로는 사례 승격 조건을 충족하지 못했습니다.",
       revisions: "리비전과 발생 이력",
       revisionCount: "리비전", occurrenceCount: "발생", relationCount: "관계",
-      curator: "로컬 지식 편집기", nextAttempt: "다음 확인",
+      curator: "근거 기반 지식 선별기", nextAttempt: "다음 확인",
+      editorConnection: "편집기 연결",
+      editorConnectionStates: {
+        connected: "연결됨", starting: "시작 중", waiting_for_gpu: "GPU 대기",
+        scheduled_idle: "예약 대기(정상)",
+      },
       lastSnapshot: "최근 선별", processed: "처리", failed: "실패",
+      projectArticles: "프로젝트 통합 문서",
+      projectArticleStatus: {
+        current: "최신", processing: "편집 중", error: "재시도 대기",
+        pending: "편집 대기", pending_editor: "편집 대기", stale: "갱신 대기",
+      },
+      projectArticlePendingTitle: "통합 문서를 편집하고 있습니다",
+      projectArticlePendingBody: "등록된 문서와 작업 이력을 근거로 읽기 좋은 최신 문서 한 장을 생성합니다. GPU 예약 작업이 완료되면 이 화면이 자동으로 교체됩니다.",
+      recordSummary: "검증 사례 {cases} · 개발 일지 {journals} · 편집 후보 {candidates} · 일반 활동 {activity}",
       gpu: "GPU 여유 / 사용률 / 온도", qualification: "모델 적합성",
+      qualificationStates: { PASS: "통과", PENDING: "대기", FAIL: "실패" },
       schedulerStates: {
-        not_started: "시작 대기", waiting_for_gpu: "GPU 유휴 대기",
+        not_started: "시작 대기", waiting_for_gpu: "GPU 예약 대기",
         gpu_wait_cooldown: "GPU 점검 냉각 중", gpu_probe_error: "GPU 상태 확인 실패",
         model_unavailable: "모델 준비 대기", model_rejected: "모델 적합성 탈락",
         qualification_error: "모델 평가 재시도 대기",
@@ -69,6 +103,7 @@ const textByLocale = {
         curation_error: "편집 오류 재시도 대기",
         curation_error_cooldown: "편집 오류 냉각 중",
         standby_lock_held: "다른 편집기 인스턴스가 처리 중",
+        running: "GPU 예약에서 편집 중",
         idle: "대기 중", completed_batch: "최근 편집 완료",
         completed_batch_with_errors: "일부 오류와 함께 편집 완료", disabled: "비활성",
       },
@@ -90,6 +125,7 @@ const textByLocale = {
         reusable_implementation_decision_required: "검증된 변경과 재사용 가능한 구현 판단이 함께 필요합니다.",
         before_after_and_load_cause_required: "성능 사례에는 before/after 측정과 부하 원인이 필요합니다.",
         incident_and_recovery_evidence_required: "운영 사례에는 장애 관측과 복구 성공 근거가 필요합니다.",
+        incident_recovery_or_editorial_operation_assessment_required: "운영·설정 변경은 근거 인용 가능한 편집 판정을 거쳐야 합니다.",
         knowledge_value_harness_not_promotable: "결정론적 가치 하니스에서 사례 승격 대상으로 판정되지 않았습니다.",
         previously_quarantined_activity: "이전 근거 감사에서 일반 활동으로 격리되어 자동 상향하지 않습니다.",
       },
@@ -120,6 +156,16 @@ const textByLocale = {
       notObserved: "not observed", changedFiles: "Changed files",
       versions: "Document versions", reported: "Reported result", verified: "Verified result",
     },
+    localChat: {
+      eyebrow: "Local model", title: "Local model conversations",
+      subtitle: "Completed Ollama and other local-model turns, separated from Codex work and grouped by project. Conversation text is not execution evidence.",
+      global: "project not set", empty: "No local-model conversations collected.",
+      previous: "Previous", next: "Next", page: "Page",
+      select: "Select a conversation to inspect the user prompt and model response.",
+      instruction: "User prompt", command: "Model", exitCode: "Execution evidence",
+      notObserved: "conversation only", changedFiles: "Changed files",
+      versions: "Document versions", reported: "Model response", verified: "Independent verification",
+    },
     knowledge: {
       eyebrow: "Project knowledge", title: "Project knowledge",
       subtitle: "Project journals and reusable verified cases are kept apart from source files.",
@@ -127,9 +173,18 @@ const textByLocale = {
       hierarchy: "Project · work type", allProjects: "All projects",
       allCategories: "All work types", tags: "Tags", allTags: "All tags",
       latestFirst: "Newest updated first", latest: "Last updated",
-      journal: "Project journal",
-      journalSubtitle: "Significant implementation, configuration, and operational changes.",
+      journal: "Project documents",
+      journalSubtitle: "A topic-based current project document. Past work remains source evidence and history instead of being concatenated into the article.",
+      currentDocument: "Current document", history: "Work history",
+      historyCount: "history entries", sourceList: "Sources",
+      sourceHelp: "Select a small citation number to inspect the original work record and execution evidence.",
+      openHistory: "View this project's work history",
+      integratedLimit: "The current document selects the newest source per topic from the latest 200 entries. Use work history for the complete record.",
+      sourceArticle: "Source record", closeSource: "Close source",
+      sourceIntent: "Original intent", sourceReport: "Original work report",
+      projectSelector: "Select project",
       intent: "Intent", changes: "Changes", changedFiles: "Changed files", failures: "Failures and resolution",
+      noObservedFailure: "No failed command was observed. This journal does not claim an error-resolution case.",
       verification: "Execution verification", references: "Knowledge references",
       noReferences: "No structured knowledge-base reference was observed.",
       previous: "Previous", next: "Next", page: "Page",
@@ -144,11 +199,26 @@ const textByLocale = {
       held: "Automatic selection completed; current evidence does not qualify for promotion.",
       revisions: "Revisions & occurrences",
       revisionCount: "revisions", occurrenceCount: "occurrences", relationCount: "relations",
-      curator: "Local knowledge editor", nextAttempt: "Next check",
+      curator: "Evidence-based knowledge curator", nextAttempt: "Next check",
+      editorConnection: "Editor connection",
+      editorConnectionStates: {
+        connected: "connected", starting: "starting", waiting_for_gpu: "waiting for GPU",
+        scheduled_idle: "scheduled idle",
+      },
       lastSnapshot: "Last selection", processed: "processed", failed: "failed",
+      projectArticles: "Project articles",
+      projectArticleStatus: {
+        current: "current", processing: "editing", error: "retry pending",
+        pending: "editing pending", pending_editor: "editing pending",
+        stale: "update pending",
+      },
+      projectArticlePendingTitle: "The integrated document is being edited",
+      projectArticlePendingBody: "The editor is turning registered documents and work history into one readable current article. This view updates automatically after the GPU-reserved job completes.",
+      recordSummary: "Verified cases {cases} · project journals {journals} · editorial candidates {candidates} · ordinary activity {activity}",
       gpu: "GPU free / utilization / temperature", qualification: "Model qualification",
+      qualificationStates: { PASS: "Passed", PENDING: "Pending", FAIL: "Failed" },
       schedulerStates: {
-        not_started: "not started", waiting_for_gpu: "waiting for idle GPU",
+        not_started: "not started", waiting_for_gpu: "waiting for GPU reservation",
         gpu_wait_cooldown: "GPU check cooldown", gpu_probe_error: "GPU probe failed",
         model_unavailable: "model unavailable", model_rejected: "model rejected",
         qualification_error: "qualification retry pending",
@@ -156,6 +226,7 @@ const textByLocale = {
         curation_error: "curation retry pending",
         curation_error_cooldown: "curation error cooldown",
         standby_lock_held: "another editor instance is active",
+        running: "editing in GPU reservation",
         idle: "idle", completed_batch: "batch completed",
         completed_batch_with_errors: "batch completed with errors", disabled: "disabled",
       },
@@ -177,6 +248,7 @@ const textByLocale = {
         reusable_implementation_decision_required: "A verified change and reusable implementation decision are required.",
         before_after_and_load_cause_required: "Performance cases require before/after metrics and a load cause.",
         incident_and_recovery_evidence_required: "Operations cases require incident and recovery evidence.",
+        incident_recovery_or_editorial_operation_assessment_required: "Operational/configuration changes require evidence-cited editorial assessment.",
         knowledge_value_harness_not_promotable: "The deterministic value harness did not mark this candidate promotable.",
         previously_quarantined_activity: "A prior evidence audit quarantined this activity; it cannot be auto-promoted.",
       },
@@ -200,6 +272,8 @@ const textByLocale = {
 type ActivityItem = {
   id: string;
   event_type: string;
+  source: "codex" | "local_llm_chat" | string;
+  model: string | null;
   occurred_at: string;
   project: string | null;
   instruction: string | null;
@@ -307,13 +381,93 @@ type JournalEntry = {
   }>;
   significance_reasons: string[];
   verification_status: string;
+  citation_number?: number;
+};
+
+type JournalProjectSummary = {
+  id: string;
+  project: string;
+  title: string;
+  entry_count: number;
+  document_count: number;
+  latest_at: string;
+  verification_status: string;
+  article_status?: string;
+  revision_number?: number | null;
+  last_compared_at?: string | null;
+};
+
+type ArticleSentence = {
+  text: string;
+  source_ids: string[];
+};
+
+type ArticleParagraph = {
+  sentences: ArticleSentence[];
+};
+
+type ArticleSource = {
+  id: string;
+  citation_number: number;
+  source_type: "document_chunk" | "project_journal";
+  title: string;
+  excerpt?: string;
+  content_hash: string;
+  document_id?: string;
+  document_version_id?: string;
+  chunk_id?: string;
+  canonical_path?: string;
+  relative_path?: string;
+  start_line?: number;
+  end_line?: number;
+  journal_entry_id?: string;
+  occurred_at?: string;
+  verification_status?: string;
+};
+
+type JournalProjectDocument = JournalProjectSummary & {
+  visible_entry_count: number;
+  truncated: boolean;
+  content_type: "canonical_article" | "legacy_extract";
+  article_status?: string;
+  revision_number?: number | null;
+  prompt_version?: string;
+  model?: string;
+  model_digest?: string;
+  standfirst?: ArticleParagraph;
+  change_summary?: {
+    new_or_changed_sources?: number;
+    removed_sources?: number;
+    total_sources?: number;
+    cited_sources?: number;
+    batches?: number;
+  };
+  sections: Array<{
+    id: string;
+    category: string;
+    title: { ko: string; en: string };
+    updated_at: string;
+    content: string;
+    verification_status: string;
+    citation_numbers: number[];
+  } | {
+    key: string;
+    title: string;
+    paragraphs: ArticleParagraph[];
+  }>;
+  sources: Array<{
+    citation_number: number;
+    entry: JournalEntry;
+  } | ArticleSource>;
 };
 
 type CurationStatus = {
   enabled: boolean;
+  project_article_enabled: boolean;
   auto_publish: boolean;
   model: string;
   prompt_version: string;
+  editor_connection: "connected" | "starting" | "waiting_for_gpu" | "scheduled_idle";
   scheduler: {
     state?: string;
     next_attempt_at?: string;
@@ -328,15 +482,47 @@ type CurationStatus = {
     };
   };
   qualification: { status?: string } | null;
+  project_articles?: {
+    projects: number;
+    current: number;
+    due: number;
+    missing: number;
+    failed: number;
+    processing: number;
+    per_run_limit: number;
+  };
+  record_summary?: {
+    verified_cases: number;
+    project_journals: number;
+    editorial_candidates: number;
+    activity_only: number;
+  };
 };
 
-function Article({ markdown }: { markdown: string }) {
-  return <div className="curated-article">{markdown.split(/\n{2,}/).map((block, index) => {
+function MarkdownArticle({ markdown, className = "" }: { markdown: string; className?: string }) {
+  const blocks = markdown.trim().split(/\n{2,}/).map((block, index) => {
     const value = block.trim();
+    const lines = value.split("\n");
+    if (value.startsWith("```")) {
+      return <pre key={index}><code>{lines.slice(1, -1).join("\n")}</code></pre>;
+    }
+    if (value.startsWith("### ")) return <h4 key={index}>{value.slice(4)}</h4>;
     if (value.startsWith("## ")) return <h3 key={index}>{value.slice(3)}</h3>;
-    if (value.startsWith("> ")) return <blockquote key={index}>{value.slice(2)}</blockquote>;
+    if (value.startsWith("# ")) return <h2 key={index}>{value.slice(2)}</h2>;
+    if (value.startsWith("> ")) return <blockquote key={index}>{value.replace(/^>\s?/gm, "")}</blockquote>;
+    if (lines.every((line) => /^[-*]\s+/.test(line))) {
+      return <ul key={index}>{lines.map((line, itemIndex) => <li key={itemIndex}>{line.replace(/^[-*]\s+/, "")}</li>)}</ul>;
+    }
+    if (lines.every((line) => /^\d+\.\s+/.test(line))) {
+      return <ol key={index}>{lines.map((line, itemIndex) => <li key={itemIndex}>{line.replace(/^\d+\.\s+/, "")}</li>)}</ol>;
+    }
     return <p key={index}>{value}</p>;
-  })}</div>;
+  });
+  return <div className={`knowledge-markdown ${className}`}>{blocks}</div>;
+}
+
+function Article({ markdown }: { markdown: string }) {
+  return <MarkdownArticle markdown={markdown} className="curated-article" />;
 }
 
 type DocumentDetail = {
@@ -409,15 +595,37 @@ function candidateBadge(candidate: Candidate): string {
     : candidate.evidence_gate_status;
 }
 
-export function ActivityHistory({ locale }: { locale: Locale }) {
-  const text = textByLocale[locale].activity;
+function activityTypeLabel(value: string, locale: Locale) {
+  const labels: Record<string, [string, string]> = {
+    SessionStart: ["작업 세션 시작", "Work session started"],
+    UserPromptSubmit: ["사용자 지시", "User instruction"],
+    PostToolUse: ["도구 실행 결과", "Tool execution result"],
+    Stop: ["작업 결과 보고", "Work result reported"],
+    SubagentStart: ["보조 작업 시작", "Subtask started"],
+    SubagentStop: ["보조 작업 완료", "Subtask completed"],
+    LocalChat: ["로컬 모델 대화", "Local model conversation"],
+  };
+  return labels[value]?.[locale === "ko" ? 0 : 1] ??
+    (locale === "ko" ? "작업 기록" : "Activity record");
+}
+
+export function ActivityHistory({
+  locale,
+  source = "codex",
+}: {
+  locale: Locale;
+  source?: "codex" | "local_llm_chat";
+}) {
+  const text = source === "local_llm_chat"
+    ? textByLocale[locale].localChat
+    : textByLocale[locale].activity;
   const [selected, setSelected] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const pageSize = 50;
   const activities = useQuery({
-    queryKey: ["activities", page],
+    queryKey: ["activities", source, page],
     queryFn: () => api<{ items: ActivityItem[]; total: number }>(
-      `/api/v1/activities?page=${page}&page_size=${pageSize}`,
+      `/api/v1/activities?page=${page}&page_size=${pageSize}&source=${source}`,
     ),
     refetchInterval: 5000,
   });
@@ -439,7 +647,11 @@ export function ActivityHistory({ locale }: { locale: Locale }) {
           key={item.id} className={selected === item.id ? "selected" : ""}
           onClick={() => setSelected(item.id)}
         >
-          <Activity size={16} /><span><strong>{item.event_type}</strong>
+          <Activity size={16} /><span><strong>{
+            item.source === "local_llm_chat"
+              ? (item.model ?? activityTypeLabel(item.event_type, locale))
+              : activityTypeLabel(item.event_type, locale)
+          }</strong>
             <small>{item.project ?? text.global} · {new Date(item.occurred_at).toLocaleString(
               locale === "ko" ? "ko-KR" : "en-US"
             )}</small>
@@ -452,27 +664,260 @@ export function ActivityHistory({ locale }: { locale: Locale }) {
       </div>
       <article className="panel detail-card">
         {detail.data ? <>
-          <div className="panel-head"><h2>{detail.data.event_type}</h2>
+          <div className="panel-head"><h2>{activityTypeLabel(detail.data.event_type, locale)}</h2>
             <Badge value={detail.data.verification_status} locale={locale} /></div>
           <dl className="detail-grid">
             <div><dt>{text.instruction}</dt><dd>{detail.data.instruction ?? "—"}</dd></div>
-            <div><dt>{text.command}</dt><dd className="mono">{detail.data.command ?? "—"}</dd></div>
             <div><dt>{text.exitCode}</dt><dd>{detail.data.exit_code ?? text.notObserved}</dd></div>
             <div><dt>{text.changedFiles}</dt><dd>{detail.data.changed_files.join(", ") || "—"}</dd></div>
-            <div><dt>{text.versions}</dt><dd className="mono">
-              {detail.data.document_version_ids.join(", ") || "—"}</dd></div>
             <div><dt>{text.reported}</dt><dd>{detail.data.reported_result ?? "—"}</dd></div>
             <div><dt>{text.verified}</dt><dd>{detail.data.verified_result ?? "—"}</dd></div>
           </dl>
+          <details className="technical-disclosure">
+            <summary>{locale === "ko" ? "기술 정보" : "Technical details"}</summary>
+            <dl className="detail-grid">
+              <div><dt>{text.command}</dt><dd className="mono">{detail.data.command ?? "—"}</dd></div>
+              <div><dt>{text.versions}</dt><dd className="mono">
+                {detail.data.document_version_ids.join(", ") || "—"}</dd></div>
+            </dl>
+          </details>
         </> : <div className="inline-empty">{text.select}</div>}
       </article>
     </div>
   </section>;
 }
 
+function IntegratedProjectJournal({
+  document,
+  locale,
+  onOpenHistory,
+}: {
+  document: JournalProjectDocument;
+  locale: Locale;
+  onOpenHistory: () => void;
+}) {
+  const text = textByLocale[locale].knowledge;
+  const [openCitation, setOpenCitation] = useState<{
+    number: number;
+    location: string;
+  } | null>(null);
+  const canonical = document.content_type === "canonical_article";
+  const articleStatus = document.article_status ?? "pending_editor";
+  const articleStatusLabel = text.projectArticleStatus[
+    articleStatus as keyof typeof text.projectArticleStatus
+  ] ?? articleStatus;
+  const articleSources = canonical
+    ? document.sources.filter((source): source is ArticleSource => !("entry" in source))
+    : [];
+  const sourceById = new Map(articleSources.map((source) => [source.id, source]));
+  const legacySourceByCitation = new Map(
+    document.sources
+      .filter((source): source is { citation_number: number; entry: JournalEntry } =>
+        "entry" in source)
+      .map((source) => [source.citation_number, source.entry]),
+  );
+  const articleSourceCard = (source: ArticleSource) => (
+    <aside className="journal-source-card sentence-source-card"
+      id={`journal-source-${source.citation_number}`}
+      aria-label={`${text.sourceArticle} ${source.citation_number}`}>
+      <div className="journal-source-card-head">
+        <span>{source.citation_number}</span>
+        <div><strong>{text.sourceArticle}</strong><p>{source.title}</p></div>
+        <button type="button" onClick={() => setOpenCitation(null)}
+          aria-label={text.closeSource}>×</button>
+      </div>
+      <dl>
+        <div><dt>{locale === "ko" ? "원본 유형" : "Source type"}</dt>
+          <dd>{source.source_type === "document_chunk"
+            ? (locale === "ko" ? "프로젝트 문서" : "Project document")
+            : (locale === "ko" ? "개발 작업 기록" : "Development record")}</dd></div>
+        {source.relative_path && <div><dt>{locale === "ko" ? "경로" : "Path"}</dt>
+          <dd className="mono">{source.relative_path}</dd></div>}
+        {source.start_line != null && <div><dt>{locale === "ko" ? "원본 줄" : "Source lines"}</dt>
+          <dd>{source.start_line}–{source.end_line}</dd></div>}
+        {source.occurred_at && <div><dt>{text.latest}</dt><dd>{
+          new Date(source.occurred_at).toLocaleString(locale === "ko" ? "ko-KR" : "en-US")
+        }</dd></div>}
+        {source.verification_status && <div><dt>{text.verification}</dt>
+          <dd><Badge value={source.verification_status} locale={locale} /></dd></div>}
+      </dl>
+      {source.excerpt && <>
+        <h4>{locale === "ko" ? "인용한 원문" : "Cited original"}</h4>
+        <MarkdownArticle markdown={source.excerpt} />
+      </>}
+    </aside>
+  );
+  const articleParagraph = (paragraph: ArticleParagraph, key: string) => (
+    <div className="project-article-paragraph" key={key}>
+      <p>{paragraph.sentences.map((sentence, sentenceIndex) => {
+        const sources = sentence.source_ids
+          .map((sourceId) => sourceById.get(sourceId))
+          .filter((source): source is ArticleSource => Boolean(source));
+        return <span className="cited-sentence" key={`${key}-${sentenceIndex}`}>
+          {sentence.text}{" "}
+          <span className="sentence-citations" aria-label={text.sourceList}>
+            {sources.map((source) => {
+              const location = `${key}:${sentenceIndex}:${source.id}`;
+              const expanded = openCitation?.location === location;
+              return <button key={source.id} type="button"
+              aria-expanded={expanded}
+              aria-controls={`journal-source-${source.citation_number}`}
+              onClick={() => setOpenCitation(
+                expanded
+                  ? null
+                  : { number: source.citation_number, location },
+              )}>{source.citation_number}</button>;
+            })}
+          </span>{" "}
+        </span>;
+      })}</p>
+      {paragraph.sentences.flatMap((sentence) => sentence.source_ids)
+        .map((sourceId) => sourceById.get(sourceId))
+        .filter((source): source is ArticleSource => Boolean(source))
+        .filter((source, index, values) =>
+          source.citation_number === openCitation?.number
+          && openCitation.location.startsWith(`${key}:`)
+          && values.findIndex((item) => item.id === source.id) === index)
+        .map(articleSourceCard)}
+    </div>
+  );
+  return <div className="journal-document integrated-journal">
+    <div className="integrated-journal-intro">
+      <div>
+        <p className="journal-lead">{text.journalSubtitle}</p>
+        <div className="journal-meta-grid">
+          <div><small>{text.hierarchy}</small><strong>{document.project}</strong></div>
+          <div><small>{text.latest}</small><strong>{new Date(document.latest_at).toLocaleString(
+            locale === "ko" ? "ko-KR" : "en-US",
+          )}</strong></div>
+          <div><small>{text.historyCount}</small><strong>{document.entry_count}</strong></div>
+          {canonical && <div><small>{locale === "ko" ? "문서 개정" : "Article revision"}</small>
+            <strong>v{document.revision_number}</strong></div>}
+          <div><small>{text.projectArticles}</small><strong>{articleStatusLabel}</strong></div>
+        </div>
+      </div>
+      <button className="secondary" onClick={onOpenHistory}>
+        <History size={15} />{text.openHistory}
+      </button>
+    </div>
+    {document.truncated && <p className="journal-limit-note">{text.integratedLimit}</p>}
+    <p className="journal-citation-help">{text.sourceHelp}</p>
+    {canonical && document.change_summary && <div className="article-update-summary">
+      <span>{locale === "ko" ? "이번 갱신" : "This update"}</span>
+      <strong>{locale === "ko"
+        ? `변경 근거 ${document.change_summary.new_or_changed_sources ?? 0}개 · 제거 ${document.change_summary.removed_sources ?? 0}개`
+        : `${document.change_summary.new_or_changed_sources ?? 0} changed sources · ${document.change_summary.removed_sources ?? 0} removed`}</strong>
+      <small>{locale === "ko"
+        ? `전체 ${document.change_summary.total_sources ?? 0}개 원본 비교`
+        : `${document.change_summary.total_sources ?? 0} total sources compared`}</small>
+    </div>}
+    <div className="project-current-body">
+      {!canonical && <div className="project-article-pending" role="status">
+        <Cpu size={22} />
+        <div>
+          <h2>{text.projectArticlePendingTitle}</h2>
+          <p>{text.projectArticlePendingBody}</p>
+          <small>
+            {document.document_count ?? 0}{" "}
+            {locale === "ko" ? "개 문서" : "documents"}
+            {" · "}
+            {document.entry_count} {text.historyCount}
+          </small>
+        </div>
+      </div>}
+      {canonical && <article className="project-canonical-article">
+        <h2>{document.title}</h2>
+        {document.standfirst && <div className="project-article-standfirst">
+          {articleParagraph(document.standfirst, "standfirst")}
+        </div>}
+        {document.sections.map((section, sectionIndex) => "paragraphs" in section
+          ? <section key={section.key} id={`project-section-${section.key}`}>
+            <h3>{section.title}</h3>
+            {section.paragraphs.map((paragraph, paragraphIndex) =>
+              articleParagraph(paragraph, `${sectionIndex}-${paragraphIndex}`))}
+          </section>
+          : null)}
+      </article>}
+      {!canonical && articleStatus === "current"
+        && document.sections.map((section) => "content" in section
+        ? <section className="project-current-section"
+        id={`project-section-${section.id}`} key={section.id}>
+        <header>
+          <div><p>{new Date(section.updated_at).toLocaleDateString(
+            locale === "ko" ? "ko-KR" : "en-US",
+          )}</p><h3>{section.title[locale]}</h3></div>
+          <div className="section-citations" aria-label={text.sourceList}>
+            {section.citation_numbers.map((citation) => <button
+              key={citation}
+              type="button"
+              aria-expanded={
+                openCitation?.location === `legacy:${section.id}:${citation}`
+              }
+              aria-controls={`journal-source-${citation}`}
+              onClick={() => {
+                const location = `legacy:${section.id}:${citation}`;
+                setOpenCitation(openCitation?.location === location
+                  ? null
+                  : { number: citation, location });
+              }}
+            >{citation}</button>)}
+          </div>
+        </header>
+        {section.citation_numbers.map((citation) => {
+          const entry = legacySourceByCitation.get(citation);
+          if (
+            !entry
+            || openCitation?.location !== `legacy:${section.id}:${citation}`
+          ) return null;
+          return <aside className="journal-source-card" id={`journal-source-${citation}`}
+            key={citation} aria-label={`${text.sourceArticle} ${citation}`}>
+            <div className="journal-source-card-head">
+              <span>{citation}</span>
+              <div><strong>{text.sourceArticle}</strong><p>{entry.title}</p></div>
+              <button type="button" onClick={() => setOpenCitation(null)}
+                aria-label={text.closeSource}>×</button>
+            </div>
+            <dl>
+              <div><dt>{text.latest}</dt><dd>{new Date(entry.occurred_at).toLocaleString(
+                locale === "ko" ? "ko-KR" : "en-US",
+              )}</dd></div>
+              <div><dt>{text.verification}</dt><dd>{entry.verification.length}</dd></div>
+              <div><dt>{text.changedFiles}</dt><dd>{entry.changed_files.length}</dd></div>
+            </dl>
+            <h4>{text.sourceIntent}</h4>
+            <MarkdownArticle markdown={entry.intent} />
+            <h4>{text.sourceReport}</h4>
+            <MarkdownArticle markdown={entry.change_summary} />
+            <h4>{text.verification}</h4>
+            {entry.verification.length ? <ul className="evidence-list">
+              {entry.verification.map((evidence, index) => <li
+                key={`${evidence.command_family}-${index}`}>
+                <strong>{evidence.command_family ?? evidence.evidence_type ?? "validation"}</strong>
+                <span>exit {evidence.exit_code ?? "—"}</span>
+              </li>)}
+            </ul> : <p className="muted-copy">—</p>}
+            {entry.failures.length > 0 && <>
+              <h4>{text.failures}</h4>
+              <MarkdownArticle markdown={entry.resolution} />
+            </>}
+          </aside>;
+        })}
+        <MarkdownArticle markdown={section.content} />
+        <div className="journal-evidence-summary">
+          <Badge value={section.verification_status} locale={locale} />
+        </div>
+      </section> : null)}
+    </div>
+  </div>;
+}
+
 export function KnowledgeCases({ locale }: { locale: Locale }) {
   const text = textByLocale[locale].knowledge;
-  const [tab, setTab] = useState<"cases" | "candidates" | "journal">("cases");
+  // Project work is first recorded as a readable, evidence-labelled journal.
+  // Canonical cases are deliberately narrower: they require a reusable claim
+  // and must never be used as a count of all completed project work.
+  const [tab, setTab] = useState<"cases" | "candidates" | "journal">("journal");
+  const [journalView, setJournalView] = useState<"current" | "history">("current");
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedProject, setSelectedProject] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
@@ -520,14 +965,23 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
     ),
     enabled: tab === "candidates",
   });
-  const journal = useQuery({
-    queryKey: ["project-journal", page, selectedProject, selectedCategory],
+  const journalProjects = useQuery({
+    queryKey: ["project-journal-projects", page, selectedProject],
+    queryFn: () => api<{ items: JournalProjectSummary[]; total: number }>(
+      `/api/v1/project-journal/projects?page=${page}&page_size=${pageSize}`
+      + `${selectedProject ? `&project=${encodeURIComponent(selectedProject)}` : ""}`,
+    ),
+    enabled: tab === "journal" && journalView === "current",
+  });
+  const currentJournalProject = selected ?? journalProjects.data?.items[0]?.id ?? null;
+  const journalHistory = useQuery({
+    queryKey: ["project-journal-history", page, selectedProject, selectedCategory],
     queryFn: () => api<{ items: JournalEntry[]; total: number }>(
       `/api/v1/project-journal?page=${page}&page_size=${pageSize}`
       + `${selectedProject ? `&project=${encodeURIComponent(selectedProject)}` : ""}`
       + `${selectedCategory ? `&category=${encodeURIComponent(selectedCategory)}` : ""}`,
     ),
-    enabled: tab === "journal",
+    enabled: tab === "journal" && journalView === "history",
   });
   const caseDetail = useQuery({
     queryKey: ["knowledge-case", selected],
@@ -541,30 +995,53 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
     ),
     enabled: tab === "candidates" && Boolean(selected),
   });
+  const journalProjectDetail = useQuery({
+    queryKey: ["project-journal-project", currentJournalProject],
+    queryFn: () => api<JournalProjectDocument>(
+      `/api/v1/project-journal/projects/${encodeURIComponent(currentJournalProject!)}`,
+    ),
+    enabled: tab === "journal" && journalView === "current"
+      && Boolean(currentJournalProject),
+  });
   const journalDetail = useQuery({
     queryKey: ["project-journal-entry", selected],
     queryFn: () => api<JournalEntry>(`/api/v1/project-journal/${selected}`),
-    enabled: tab === "journal" && Boolean(selected),
+    enabled: tab === "journal" && journalView === "history" && Boolean(selected),
   });
-  const items: Array<Case | Candidate | JournalEntry> = tab === "cases"
+  const items: Array<Case | Candidate | JournalEntry | JournalProjectSummary> = tab === "cases"
     ? cases.data?.items ?? []
     : tab === "candidates"
       ? candidates.data?.items ?? []
-      : journal.data?.items ?? [];
+      : journalView === "current"
+        ? journalProjects.data?.items ?? []
+        : journalHistory.data?.items ?? [];
   const total = tab === "cases"
     ? cases.data?.total ?? 0
     : tab === "candidates"
       ? candidates.data?.total ?? 0
-      : journal.data?.total ?? 0;
+      : journalView === "current"
+        ? journalProjects.data?.total ?? 0
+        : journalHistory.data?.total ?? 0;
   const selectedDetail = tab === "cases"
     ? caseDetail.data
     : tab === "candidates"
       ? candidateDetail.data
-      : journalDetail.data;
+      : journalView === "current"
+        ? journalProjectDetail.data
+        : journalDetail.data;
   const scheduler = curation.data?.scheduler;
   const schedulerLabel = scheduler?.state
     ? text.schedulerStates[scheduler.state as keyof typeof text.schedulerStates] ?? scheduler.state
     : text.schedulerStates.not_started;
+  const qualificationStatus = curation.data?.qualification?.status ?? "PENDING";
+  const qualificationLabel = text.qualificationStates[
+    qualificationStatus as keyof typeof text.qualificationStates
+  ] ?? qualificationStatus;
+  const editorConnection = curation.data?.editor_connection ?? "scheduled_idle";
+  const editorConnectionLabel = text.editorConnectionStates[
+    editorConnection as keyof typeof text.editorConnectionStates
+  ] ?? editorConnection;
+  const isCurrentJournal = tab === "journal" && journalView === "current";
   return <section>
     <div className="page-title compact"><div>
       <p className="eyebrow">{text.eyebrow}</p><h1>{text.title}</h1>
@@ -579,40 +1056,84 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
         ? `${Math.round(scheduler.last_gpu.free_mb / 1024)} GB / ${scheduler.last_gpu.utilization_percent}% / ${scheduler.last_gpu.temperature_c}°C`
         : "—"}</strong></div>
       <div><small>{text.qualification}</small>
-        <strong>{curation.data?.qualification?.status ?? "PENDING"}</strong></div>
+        <strong>{qualificationLabel}</strong></div>
+      <div><small>{text.editorConnection}</small>
+        <strong>{editorConnectionLabel}</strong></div>
       <div><small>{text.lastSnapshot}</small><strong>
         {scheduler?.processed_candidate_count ?? 0}/{scheduler?.snapshot_candidate_count ?? 0}
         {" "}{text.processed} · {scheduler?.failed_candidate_count ?? 0} {text.failed}
+      </strong></div>
+      <div><small>{text.projectArticles}</small><strong>
+        {curation.data?.project_articles
+          ? `${curation.data.project_articles.current}/${curation.data.project_articles.projects} ${text.projectArticleStatus.current} · ${curation.data.project_articles.due} ${text.projectArticleStatus.pending}`
+          : "—"}
       </strong></div>
       <div><small>{text.nextAttempt}</small><strong>{scheduler?.next_attempt_at
         ? new Date(scheduler.next_attempt_at).toLocaleString(locale === "ko" ? "ko-KR" : "en-US")
         : "—"}</strong></div>
     </div>
     <div className="tabs">
+      <button className={tab === "journal" ? "active" : ""} onClick={() => {
+        setTab("journal"); setSelected(null); setSelectedProject("");
+        setSelectedCategory(""); setSelectedTag(""); setJournalView("current"); setPage(1);
+      }}>{text.journal}<span className="tab-count">{journalProjects.data?.total ?? 0}</span></button>
       <button className={tab === "cases" ? "active" : ""} onClick={() => {
         setTab("cases"); setSelected(null); setSelectedProject("");
         setSelectedCategory(""); setSelectedTag(""); setPage(1);
-      }}>{text.cases}</button>
+      }}>{text.cases}<span className="tab-count">{cases.data?.total ?? 0}</span></button>
       <button className={tab === "candidates" ? "active" : ""} onClick={() => {
         setTab("candidates"); setSelected(null); setSelectedProject("");
         setSelectedCategory(""); setSelectedTag(""); setPage(1);
-      }}>{text.candidates}</button>
-      <button className={tab === "journal" ? "active" : ""} onClick={() => {
-        setTab("journal"); setSelected(null); setSelectedProject("");
-        setSelectedCategory(""); setSelectedTag(""); setPage(1);
-      }}>{text.journal}</button>
+      }}>{text.candidates}<span className="tab-count">{candidates.data?.total ?? 0}</span></button>
     </div>
-    <div className="knowledge-browser">
-      <aside className="panel knowledge-tree" role="tree"
+    {tab === "journal" && <div className="journal-view-switch" role="tablist"
+      aria-label={text.journal}>
+      <button id="journal-tab-current" role="tab" aria-controls="journal-view-panel"
+        aria-selected={journalView === "current"}
+        className={journalView === "current" ? "active" : ""} onClick={() => {
+          setJournalView("current"); setSelected(null); setSelectedCategory(""); setPage(1);
+        }}>{text.currentDocument}</button>
+      <button id="journal-tab-history" role="tab" aria-controls="journal-view-panel"
+        aria-selected={journalView === "history"}
+        className={journalView === "history" ? "active" : ""} onClick={() => {
+          setJournalView("history"); setSelected(null); setPage(1);
+        }}>{text.history}</button>
+    </div>}
+    {isCurrentJournal && <nav className="panel journal-project-switcher"
+      aria-label={text.projectSelector}>
+      <div className="journal-project-buttons">
+        {journalProjects.data?.items.map((project) => <button type="button"
+          key={project.id}
+          className={currentJournalProject === project.id ? "active" : ""}
+          aria-current={currentJournalProject === project.id ? "page" : undefined}
+          onClick={() => setSelected(project.id)}>
+          <span>{project.project}</span>
+          <small>{project.article_status === "current" && project.revision_number
+            ? `v${project.revision_number}`
+            : text.projectArticleStatus[
+              (project.article_status ?? "pending_editor") as keyof typeof text.projectArticleStatus
+            ] ?? project.article_status}</small>
+        </button>)}
+      </div>
+      <PageControls page={page} pageSize={pageSize} total={journalProjects.data?.total ?? 0}
+        onChange={(value) => { setPage(value); setSelected(null); }} labels={text} />
+    </nav>}
+    <div id={tab === "journal" ? "journal-view-panel" : undefined}
+      role={tab === "journal" ? "tabpanel" : undefined}
+      aria-labelledby={tab === "journal" ? `journal-tab-${journalView}` : undefined}
+      className={`knowledge-browser ${
+      isCurrentJournal ? "journal-current" : ""
+    }`}>
+      {!isCurrentJournal && <aside className="panel knowledge-tree" role="tree"
         aria-label={text.hierarchy}>
         <div className="knowledge-tree-head"><FolderTree size={16} /><strong>{text.hierarchy}</strong></div>
         <button role="treeitem" aria-selected={!selectedProject}
           className={!selectedProject ? "selected" : ""} onClick={() => {
           setSelectedProject(""); setSelectedCategory(""); setSelected(null); setPage(1);
         }}>
-          <span>{text.allProjects}</span><small>{facets.data?.projects.reduce(
-            (sum, project) => sum + project.count, 0
-          ) ?? 0}</small>
+          <span>{text.allProjects}</span><small>{tab === "journal" && journalView === "current"
+            ? journalProjects.data?.total ?? 0
+            : facets.data?.projects.reduce((sum, project) => sum + project.count, 0) ?? 0}</small>
         </button>
         {facets.data?.projects.map((project) => {
           const expanded = selectedProject === project.key;
@@ -628,7 +1149,8 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
               {expanded ? <ChevronRight className="tree-rotated" size={13} /> : <ChevronRight size={13} />}
               <span>{project.key}</span><small>{project.count}</small>
             </button>
-            {expanded && <div className="knowledge-tree-children" role="group">
+            {expanded && (tab !== "journal" || journalView === "history") &&
+              <div className="knowledge-tree-children" role="group">
               <button role="treeitem" aria-selected={!selectedCategory}
                 className={!selectedCategory ? "selected" : ""} onClick={() => {
                 setSelectedCategory(""); setSelected(null); setPage(1);
@@ -658,13 +1180,19 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
             </option>)}
           </select>
         </div>}
-      </aside>
-      <div className="panel record-list">
+      </aside>}
+      {!isCurrentJournal && <div className="panel record-list">
         <div className="record-sort">{text.latestFirst}</div>
         {items.map((item) => <button key={item.id} onClick={() => setSelected(item.id)}
           className={selected === item.id ? "selected" : ""}>
-          <BookCheck size={16} /><span><strong>{item.title}</strong>
-            <small>{"source_stop_activity_id" in item
+          <BookCheck size={16} /><span><strong>{"entry_count" in item
+            ? `${item.project} ${locale === "ko" ? "개발 일지" : "development journal"}`
+            : item.title}</strong>
+            <small>{"entry_count" in item
+              ? `${item.entry_count} ${text.historyCount} · ${new Date(item.latest_at).toLocaleString(
+                locale === "ko" ? "ko-KR" : "en-US",
+              )}`
+              : "source_stop_activity_id" in item
               ? `${item.project} · ${knowledgeCategoryLabel(item.category, locale)} · ${new Date(item.occurred_at).toLocaleString(
                 locale === "ko" ? "ko-KR" : "en-US",
               )}`
@@ -675,7 +1203,9 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
                   locale === "ko" ? "ko-KR" : "en-US",
                 )}`}`
             }</small></span>
-          <Badge value={"source_stop_activity_id" in item
+          <Badge value={"entry_count" in item
+            ? item.verification_status
+            : "source_stop_activity_id" in item
             ? item.verification_status
             : "evidence_gate_status" in item
               ? candidateBadge(item) : item.status} locale={locale} /><ChevronRight size={14} />
@@ -683,43 +1213,74 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
         {!items.length && <div className="inline-empty">{text.empty}</div>}
         <PageControls page={page} pageSize={pageSize} total={total}
           onChange={(value) => { setPage(value); setSelected(null); }} labels={text} />
-      </div>
+      </div>}
       <article className="panel detail-card">
         {selectedDetail ? <>
-          <div className="panel-head"><h2>{selectedDetail.title}</h2>
-            <Badge value={"source_stop_activity_id" in selectedDetail
+          <div className="panel-head"><h2>{"sections" in selectedDetail
+            ? `${selectedDetail.project} ${locale === "ko" ? "프로젝트 문서" : "project document"}`
+            : "entry_count" in selectedDetail
+            ? `${selectedDetail.project} ${locale === "ko" ? "개발 일지" : "development journal"}`
+            : selectedDetail.title}</h2>
+            <Badge value={"entry_count" in selectedDetail
+              ? selectedDetail.verification_status
+              : "source_stop_activity_id" in selectedDetail
               ? selectedDetail.verification_status
               : "evidence_gate_status" in selectedDetail
                 ? candidateBadge(selectedDetail) : selectedDetail.status} locale={locale} /></div>
-          {"source_stop_activity_id" in selectedDetail ? <>
-            <p>{text.journalSubtitle}</p>
-            <dl className="detail-grid">
-              <div><dt>{text.intent}</dt><dd>{selectedDetail.intent}</dd></div>
-              <div><dt>{text.changes}</dt><dd>{selectedDetail.change_summary}</dd></div>
-              <div><dt>{text.changedFiles}</dt><dd className="mono">
-                {selectedDetail.changed_files.join(", ") || "—"}</dd></div>
-              <div><dt>{text.failures}</dt><dd>
-                {selectedDetail.failures.length
-                  ? `${selectedDetail.failures.map((item) =>
-                    `${item.command_family ?? "command"} (exit ${item.exit_code})`
-                  ).join(", ")} · ${selectedDetail.resolution}`
-                  : "—"}
-              </dd></div>
-              <div><dt>{text.verification}</dt><dd>
-                {selectedDetail.verification.map((item) =>
-                  `${item.command_family ?? item.evidence_type ?? "validation"} (exit ${item.exit_code})`
-                ).join(", ") || "—"}
-              </dd></div>
-              <div><dt>{text.references}</dt><dd>
-                {selectedDetail.knowledge_references.length
-                  ? selectedDetail.knowledge_references.map((item) =>
-                    `${item.relative_path ?? item.canonical_path ?? item.document_id ?? "document"}`
-                    + `${item.chunk_id ? ` · chunk ${item.chunk_id}` : ""}`
-                    + `${item.retrieval_score !== undefined ? ` · ${item.retrieval_score}` : ""}`
-                  ).join("\n")
-                  : text.noReferences}
-              </dd></div>
-            </dl>
+          {"sections" in selectedDetail
+            ? <IntegratedProjectJournal document={selectedDetail} locale={locale}
+              onOpenHistory={() => {
+                setJournalView("history");
+                setSelected(null);
+                setSelectedProject(selectedDetail.project);
+                setSelectedCategory("");
+                setPage(1);
+              }} />
+            : "source_stop_activity_id" in selectedDetail ? <>
+            <div className="journal-document">
+              <p className="journal-lead">{text.journalSubtitle}</p>
+              <div className="journal-meta-grid">
+                <div><small>{text.hierarchy}</small><strong>{selectedDetail.project}</strong></div>
+                <div><small>{text.latest}</small><strong>{new Date(selectedDetail.occurred_at).toLocaleString(
+                  locale === "ko" ? "ko-KR" : "en-US",
+                )}</strong></div>
+                <div><small>{text.verification}</small><Badge value={selectedDetail.verification_status} locale={locale} /></div>
+              </div>
+              <section><h3>{text.intent}</h3><MarkdownArticle markdown={selectedDetail.intent} /></section>
+              <section><h3>{text.changes}</h3><MarkdownArticle markdown={selectedDetail.change_summary} /></section>
+              <section><h3>{text.changedFiles}</h3>
+                {selectedDetail.changed_files.length ? <ul className="changed-file-list mono">
+                  {selectedDetail.changed_files.map((path) => <li key={path}>{path}</li>)}
+                </ul> : <p className="muted-copy">—</p>}
+              </section>
+              <section><h3>{text.verification}</h3>
+                {selectedDetail.verification.length ? <ul className="evidence-list">
+                  {selectedDetail.verification.map((item, index) => <li key={`${item.command_family}-${index}`}>
+                    <strong>{item.command_family ?? item.evidence_type ?? "validation"}</strong>
+                    <span>exit {item.exit_code ?? "—"}</span>
+                  </li>)}
+                </ul> : <p className="muted-copy">—</p>}
+              </section>
+              <section><h3>{text.failures}</h3>
+                {selectedDetail.failures.length ? <>
+                  <ul className="evidence-list">
+                    {selectedDetail.failures.map((item, index) => <li key={`${item.command_family}-${index}`}>
+                      <strong>{item.command_family ?? "command"}</strong><span>exit {item.exit_code ?? "—"}</span>
+                    </li>)}
+                  </ul>
+                  <MarkdownArticle markdown={selectedDetail.resolution} />
+                </> : <p className="muted-copy">{text.noObservedFailure}</p>}
+              </section>
+              <section><h3>{text.references}</h3>
+                {selectedDetail.knowledge_references.length ? <ul className="changed-file-list mono">
+                  {selectedDetail.knowledge_references.map((item, index) => <li key={`${item.document_id}-${item.chunk_id}-${index}`}>
+                    {item.relative_path ?? item.canonical_path ?? item.document_id ?? "document"}
+                    {item.chunk_id ? ` · chunk ${item.chunk_id}` : ""}
+                    {item.retrieval_score !== undefined ? ` · ${item.retrieval_score}` : ""}
+                  </li>)}
+                </ul> : <p className="muted-copy">{text.noReferences}</p>}
+              </section>
+            </div>
           </> : <>
           <dl className="detail-grid">
             {!("evidence_gate_status" in selectedDetail) && <div><dt>{text.latest}</dt><dd>

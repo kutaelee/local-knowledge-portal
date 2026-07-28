@@ -26,6 +26,18 @@ class Settings(BaseSettings):
     cors_origins: str = "http://127.0.0.1:3010,http://localhost:3010"
     gpu_scheduler_base_url: str = "http://host.docker.internal:8790"
     gpu_scheduler_timeout_seconds: float = Field(default=2.0, ge=0.2, le=10)
+    gpu_scheduler_control_token: str = Field(default="", repr=False)
+    service_manager_base_url: str = "http://host.docker.internal:8791"
+    service_manager_timeout_seconds: float = Field(default=5.0, ge=0.5, le=30)
+    service_manager_action_timeout_seconds: float = Field(
+        default=150.0,
+        ge=30,
+        le=300,
+    )
+    service_manager_token: str = Field(default="", repr=False)
+    comfyui_bridge_health_url: str = "http://host.docker.internal:8188/gpuq_bridge/health"
+    gpu_embedding_reaper_path: Path = Path("/data/runtime/gpu-embedding-reaper.json")
+    gpu_embedding_reaper_health_enabled: bool = False
     docker_inventory_path: Path = Path("/data/runtime/docker-services.json")
     docker_inventory_stale_seconds: int = Field(default=90, ge=30, le=3600)
     ollama_base_url: str = "http://127.0.0.1:11434"
@@ -36,6 +48,18 @@ class Settings(BaseSettings):
     embedding_model_digest: str = "unresolved"
     embedding_batch_size: int = Field(default=2, ge=1, le=32)
     embedding_batch_cooldown_seconds: float = Field(default=0.5, ge=0, le=60)
+    embedding_request_timeout_seconds: float = Field(default=90, ge=5, le=300)
+    # Interactive and ordinary worker requests must release VRAM immediately.
+    # GPU-scheduled batch services override this briefly and unload in finally.
+    embedding_keep_alive: str = "0"
+    embedding_input_max_chars: int = Field(default=2400, ge=256, le=100_000)
+    embedding_timeout_circuit_threshold: int = Field(default=3, ge=1, le=100)
+    embedding_timeout_circuit_window_seconds: int = Field(default=3600, ge=60, le=86_400)
+    embedding_timeout_circuit_bypass: bool = False
+    # Normal CPU inference can be suspended explicitly while a gpuq-managed
+    # reindex repairs deferred vectors. This does not affect the one-shot
+    # reindex service, which sets the bypass flag in its isolated environment.
+    embedding_runtime_mode: Literal["enabled", "deferred_gpu_recovery"] = "enabled"
     embedding_max_chunks_per_document: int = Field(default=128, ge=1, le=4096)
     embedding_max_chars_per_document: int = Field(default=250_000, ge=1_000, le=100_000_000)
     semantic_high_confidence_similarity: float = Field(default=0.6, ge=-1, le=1)
@@ -51,13 +75,28 @@ class Settings(BaseSettings):
     generation_model_digest: str = "unresolved"
     generation_timeout_seconds: int = 120
     generation_max_input_chars: int = 40000
-    generation_prompt_version: str = "evidence-blog-v9"
+    generation_prompt_version: str = "evidence-blog-v10-reported-provenance"
     generation_fallback_models: str = "gemma4:12b,qwen3:14b"
     generation_temperature: float = Field(default=0, ge=0, le=2)
     generation_context_window: int = Field(default=16_384, ge=2_048, le=262_144)
     generation_keep_alive: str = "2m"
+    project_article_enabled: bool = True
+    project_article_prompt_version: str = (
+        "project-article-v3-hierarchical-source-manifest"
+    )
+    project_article_batch_chars: int = Field(
+        default=24_000, ge=4_000, le=100_000
+    )
+    project_article_min_group_coverage: float = Field(
+        default=0.45, ge=0.25, le=1.0
+    )
+    project_article_max_projects_per_run: int = Field(
+        default=20, ge=1, le=500
+    )
     knowledge_curation_enabled: bool = False
     knowledge_curation_auto_publish: bool = True
+    knowledge_dedup_similarity_threshold: float = Field(default=0.88, ge=0.5, le=0.999)
+    knowledge_dedup_max_candidates_per_run: int = Field(default=50, ge=1, le=500)
     knowledge_curation_poll_seconds: int = Field(default=60, ge=10, le=3600)
     knowledge_curation_gpu_min_free_mb: int = Field(default=12_288, ge=1_024, le=131_072)
     knowledge_curation_gpu_max_utilization: int = Field(default=15, ge=0, le=100)
@@ -71,6 +110,7 @@ class Settings(BaseSettings):
     knowledge_curation_min_article_chars: int = Field(default=0, ge=0, le=5000)
     knowledge_curation_max_article_chars: int = Field(default=10_000, ge=1_000, le=50_000)
     hook_spool_dir: Path = Path("runtime/ingest/codex-spool")
+    local_llm_spool_dir: Path = Path("runtime/ingest/local-llm-spool")
     hook_spool_fallback_dir: Path = Field(
         default_factory=lambda: (
             Path(os.getenv("LOCALAPPDATA", str(Path.home())))
@@ -84,6 +124,8 @@ class Settings(BaseSettings):
     knowledge_auto_publish: bool = False
     knowledge_content_language: Literal["ko", "en"] = "ko"
     activity_detail_retention_days: int = Field(default=30, ge=1, le=3650)
+    terminal_job_detail_retention_days: int = Field(default=90, ge=1, le=3650)
+    ingest_event_detail_retention_days: int = Field(default=90, ge=1, le=3650)
     activity_retention_check_seconds: int = Field(default=3600, ge=60, le=86400)
     mount_guard_paths: str = ""
     mount_guard_nonempty_dirs: str = ""
@@ -123,20 +165,34 @@ class Settings(BaseSettings):
             raise ValueError("non-local API bind requires an authentication implementation")
         return value
 
+    @field_validator("embedding_keep_alive")
+    @classmethod
+    def bounded_embedding_keep_alive(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized not in {"0", "0s", "30s", "1m", "2m"}:
+            raise ValueError("embedding keep-alive must be zero or at most 2m")
+        return normalized
+
     @field_validator("ollama_base_url", "generation_base_url")
     @classmethod
     def local_model_guard(cls, value: str) -> str:
-        if urlparse(value).hostname not in {
+        parsed = urlparse(value)
+        if parsed.scheme != "http" or parsed.hostname not in {
             "127.0.0.1",
             "localhost",
             "::1",
+            "host.docker.internal",
             "ollama",
             "ollama-generation",
+            "ollama-embedding-batch",
         }:
             raise ValueError(
-                "model providers must use localhost/loopback or the private Docker service 'ollama'"
+                "model providers must use localhost/loopback or an approved private "
+                "Docker Ollama service"
             )
-        return value
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("model provider base URL cannot contain a path, query, or fragment")
+        return value.rstrip("/")
 
     @field_validator("gpu_scheduler_base_url")
     @classmethod
@@ -155,6 +211,38 @@ class Settings(BaseSettings):
             raise ValueError("GPU scheduler base URL cannot contain a path, query, or fragment")
         return value.rstrip("/")
 
+    @field_validator("service_manager_base_url")
+    @classmethod
+    def local_service_manager_guard(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme != "http" or parsed.hostname not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+            "host.docker.internal",
+        }:
+            raise ValueError(
+                "service manager must use loopback or Docker Desktop's host boundary"
+            )
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("service manager base URL cannot contain a path")
+        return value.rstrip("/")
+
+    @field_validator("comfyui_bridge_health_url")
+    @classmethod
+    def local_comfyui_bridge_guard(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme != "http" or parsed.hostname not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+            "host.docker.internal",
+        }:
+            raise ValueError("ComfyUI bridge must use a local host boundary")
+        if parsed.path != "/gpuq_bridge/health" or parsed.query or parsed.fragment:
+            raise ValueError("ComfyUI bridge health URL must use /gpuq_bridge/health only")
+        return value
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
@@ -168,7 +256,11 @@ class Settings(BaseSettings):
 
     @property
     def hook_spool_roots(self) -> list[Path]:
-        return [self.hook_spool_dir, self.hook_spool_fallback_dir]
+        return [
+            self.hook_spool_dir,
+            self.local_llm_spool_dir,
+            self.hook_spool_fallback_dir,
+        ]
 
     @property
     def watch_polling_root_set(self) -> set[str]:
