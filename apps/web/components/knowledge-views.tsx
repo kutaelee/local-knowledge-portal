@@ -983,7 +983,6 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
       `/api/v1/developer-feed?language=${locale}&page=${page}&page_size=50`
       + `${selectedProject ? `&project=${encodeURIComponent(selectedProject)}` : ""}`,
     ),
-    enabled: tab === "feed",
     refetchInterval: 60000,
   });
   const candidates = useQuery({
@@ -1115,11 +1114,15 @@ export function KnowledgeCases({ locale }: { locale: Locale }) {
       <button className={tab === "cases" ? "active" : ""} onClick={() => {
         setTab("cases"); setSelected(null); setSelectedProject("");
         setSelectedCategory(""); setSelectedTag(""); setPage(1);
-      }}>{text.cases}<span className="tab-count">{cases.data?.total ?? 0}</span></button>
+      }}>{text.cases}<span className="tab-count">
+        {curation.data?.record_summary?.verified_cases ?? cases.data?.total ?? 0}
+      </span></button>
       <button className={tab === "candidates" ? "active" : ""} onClick={() => {
         setTab("candidates"); setSelected(null); setSelectedProject("");
         setSelectedCategory(""); setSelectedTag(""); setPage(1);
-      }}>{text.candidates}<span className="tab-count">{candidates.data?.total ?? 0}</span></button>
+      }}>{text.candidates}<span className="tab-count">
+        {curation.data?.record_summary?.editorial_candidates ?? candidates.data?.total ?? 0}
+      </span></button>
       <button className={tab === "feed" ? "active" : ""} onClick={() => {
         setTab("feed"); setSelected(null); setSelectedProject("");
         setSelectedCategory(""); setSelectedTag(""); setPage(1);
