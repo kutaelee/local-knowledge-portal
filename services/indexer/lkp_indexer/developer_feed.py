@@ -255,11 +255,18 @@ def publish_once(
                 >= now - timedelta(hours=settings.developer_feed_initial_lookback_hours),
             )
             .order_by(ProjectJournalEntry.occurred_at, ProjectJournalEntry.id)
-            .limit(settings.developer_feed_max_sources_per_run * 10)
+            .limit(1000)
         )
     )
     created: list[DeveloperFeedPost] = []
     activity_threads = 0
+    eligible_journals: list[
+        tuple[
+            ProjectJournalEntry,
+            list[dict[str, object]],
+            list[datetime],
+        ]
+    ] = []
     for journal in journals:
         root_key = f"activity:{journal.id}:0"
         if session.scalar(
@@ -274,8 +281,20 @@ def publish_once(
             for item in documents
             if isinstance(item.get("embedded_at"), datetime)
         ]
-        if not embedded_times or max(embedded_times) <= cursor:
+        if not embedded_times or max(embedded_times) < cursor:
             continue
+        eligible_journals.append((journal, documents, embedded_times))
+
+    eligible_journals.sort(
+        key=lambda item: (
+            max(item[2]),
+            item[0].occurred_at,
+            str(item[0].id),
+        )
+    )
+    for journal, documents, embedded_times in eligible_journals[
+        : settings.developer_feed_max_sources_per_run
+    ]:
         checks = sum(
             1
             for item in (journal.verification_json or [])
@@ -318,8 +337,10 @@ def publish_once(
             )
         )
         activity_threads += 1
-        if activity_threads >= settings.developer_feed_max_sources_per_run:
-            break
+    backlog_remaining = max(
+        0,
+        len(eligible_journals) - settings.developer_feed_max_sources_per_run,
+    )
 
     local_tz = ZoneInfo(settings.developer_feed_timezone)
     local_now = now.astimezone(local_tz)
@@ -328,6 +349,7 @@ def publish_once(
     daily_key = f"daily:{local_date}:0"
     if (
         local_now.hour >= settings.developer_feed_daily_hour
+        and backlog_remaining == 0
         and not session.scalar(
             select(DeveloperFeedPost.id).where(
                 DeveloperFeedPost.publication_key == daily_key
@@ -401,6 +423,7 @@ def publish_once(
         "activity_threads": activity_threads,
         "daily_threads": daily_threads,
         "posts": len(created),
+        "backlog_remaining": backlog_remaining,
         "embedding_cursor": cursor.isoformat(),
     }
 
