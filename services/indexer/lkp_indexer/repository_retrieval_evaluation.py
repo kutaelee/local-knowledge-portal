@@ -183,6 +183,24 @@ def prepare_package(output: Path, *, limit: int = 5) -> dict[str, Any]:
     if not settings.embedding_timeout_circuit_bypass:
         raise RuntimeError("retrieval preparation must run in the admitted GPU profile")
     embedder = get_embedder(settings, deterministic=False)
+    try:
+        return _prepare_package(
+            output,
+            limit=limit,
+            settings=settings,
+            embedder=embedder,
+        )
+    finally:
+        embedder.close()
+
+
+def _prepare_package(
+    output: Path,
+    *,
+    limit: int,
+    settings: Any,
+    embedder: Any,
+) -> dict[str, Any]:
     package: dict[str, Any] = {
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),

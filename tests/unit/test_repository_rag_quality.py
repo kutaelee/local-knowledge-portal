@@ -1,4 +1,8 @@
+from pathlib import Path
+
+import pytest
 from lkp.repository_rag_quality import infer_repository_types, repository_reward_rerank
+from lkp_indexer import repository_retrieval_evaluation
 from lkp_indexer.repository_retrieval_evaluation import (
     _answer_failures,
     _reference_key,
@@ -195,3 +199,35 @@ def test_support_evaluation_run_id_is_stable_and_model_scoped() -> None:
         model="qwen3.6-27b-nvfp4-revised",
         prompt_version="repository-analysis-v1",
     )
+
+
+def test_retrieval_package_always_releases_embedding_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class Settings:
+        embedding_timeout_circuit_bypass = True
+
+    class Embedder:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    embedder = Embedder()
+    monkeypatch.setattr(repository_retrieval_evaluation, "get_settings", Settings)
+    monkeypatch.setattr(
+        repository_retrieval_evaluation,
+        "get_embedder",
+        lambda settings, deterministic: embedder,
+    )
+    monkeypatch.setattr(
+        repository_retrieval_evaluation,
+        "_prepare_package",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="failed"):
+        repository_retrieval_evaluation.prepare_package(tmp_path / "package.json")
+
+    assert embedder.closed is True
