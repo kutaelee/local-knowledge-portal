@@ -283,7 +283,11 @@ three components as separate gpuq jobs in `esb`, `imc`, `agent` order.
 
 After all three runs, submit `scripts/run-gpu-repository-postprocess.sh` through `gpuq`. It uses
 the workstation Ollama embedding model to create missing vectors and writes the source-free
-hybrid retrieval package to the portal data root. Then submit
+hybrid retrieval package to the portal data root. The same admitted reservation reruns the
+representative, boundary, verified-failure, and intentional no-answer RAG evaluation and writes
+`backend-rag-evaluation-latest.json` below the repository-analysis results directory. Both the
+reindexer and package builder close the exact embedding model in `finally`; the shared Ollama
+daemon remains running. Then submit
 `scripts/run-windows-nvfp4-indigo-component.py support-evaluation` through `gpuq`; it starts
 `Peutlefaire/Qwen3.6-27B-NVFP4` with MTP-6, evaluates all 15 categories for each latest IndigoESB
 Snapshot, persists each answer-quality result before the next case, resumes an interrupted package,
