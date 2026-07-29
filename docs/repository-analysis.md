@@ -241,6 +241,14 @@ component runs use `--max-output 2560` after production runs showed repeated
 strict-JSON truncation at 2,048. The resulting 14,067-token worst case remains
 below the operational 16,000-token limit. The Windows wrapper uses that limit
 and an explicit 2,000,000,000-byte KV cache.
+The first full-report attempt exposed a separate boundary: 13,953 report input
+tokens plus the 2,048-token output reservation exceeded the 16,000-token
+profile by exactly one token and vLLM rejected it before generation. Report
+input now keeps at most 120 source-verified claims, selected for component
+breadth before additional detail, and 60 declared dependencies. The strict
+schema also caps the number of capabilities, technologies, flow steps,
+operational notes, and unknowns. This preserves the checkpoint-compatible
+2,048-token output budget while leaving bounded context headroom.
 This changes the actual vLLM allocation rather than understating the gpuq
 reservation. The 180K/0.90 profile remains the performance reference; the
 16K/2.0GB shape must still pass server health, FlashInfer kernel selection,

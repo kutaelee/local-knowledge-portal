@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from typing import Any
 
@@ -26,6 +27,9 @@ _REPORT_SYSTEM = """
 - 입력에 없는 기능, 기술, 실행 순서, 운영 사실을 추측하지 않습니다.
 - 정적 근거만으로 알 수 없는 실행 환경과 배포 동작은 unknowns에 남깁니다.
 - 클래스 목록을 나열하는 대신 사람이 전체 구조를 이해할 수 있는 수준으로 묶습니다.
+- purpose는 1~2문장, capabilities는 3~5개, technologies는 4~8개,
+  processing_flow는 3~6개, operational_notes는 2~5개로 작성합니다.
+- 각 항목은 한두 문장으로 간결하게 작성하고 같은 사실을 반복하지 않습니다.
 """.strip()
 
 _PHASES = {
@@ -87,16 +91,72 @@ def _claim_score(claim: Claim) -> tuple[int, str, str]:
 def _claim_catalog(
     manifest: AnalysisManifest,
     *,
-    limit: int = 160,
+    limit: int = 120,
+    max_serialized_chars: int = 22_000,
+    max_claim_chars: int = 800,
 ) -> tuple[list[dict[str, Any]], dict[str, Claim]]:
-    verified = sorted(
+    ranked = sorted(
         (
             claim
             for claim in manifest.claims
-            if claim.validation_status == ValidationStatus.SOURCE_VERIFIED and claim.evidence
+            if claim.validation_status == ValidationStatus.SOURCE_VERIFIED
+            and claim.evidence
+            and len(claim.claim) <= max_claim_chars
         ),
         key=_claim_score,
-    )[:limit]
+    )
+    # Preserve breadth before adding more high-scoring details. Large legacy
+    # repositories otherwise let one framework-heavy component consume the
+    # whole bounded prompt and hide the actual repository-wide lifecycle.
+    verified: list[Claim] = []
+    seen_components: set[str] = set()
+    selected_ids: set[int] = set()
+    serialized_chars = 2  # JSON array delimiters.
+
+    def add(claim: Claim) -> bool:
+        nonlocal serialized_chars
+        preview = {
+            "id": "C000",
+            "claim": claim.claim,
+            "claim_type": claim.claim_type,
+            "component": claim.component,
+            "evidence": [
+                {
+                    "file": reference.file,
+                    "start_line": reference.start_line,
+                    "end_line": reference.end_line,
+                    "symbol": reference.symbol,
+                }
+                for reference in claim.evidence[:1]
+            ],
+        }
+        encoded_chars = len(
+            json.dumps(preview, ensure_ascii=False, separators=(",", ":"))
+        )
+        separator_chars = 1 if verified else 0
+        if serialized_chars + separator_chars + encoded_chars > max_serialized_chars:
+            return False
+        serialized_chars += separator_chars + encoded_chars
+        selected_ids.add(id(claim))
+        verified.append(claim)
+        return True
+
+    for claim in ranked:
+        component = claim.component.casefold()
+        if component in seen_components:
+            continue
+        if not add(claim):
+            continue
+        seen_components.add(component)
+        if len(verified) == limit:
+            break
+    if len(verified) < limit:
+        for claim in ranked:
+            if id(claim) in selected_ids:
+                continue
+            add(claim)
+            if len(verified) == limit:
+                break
     by_id: dict[str, Claim] = {}
     catalog: list[dict[str, Any]] = []
     for index, claim in enumerate(verified, 1):
@@ -115,7 +175,7 @@ def _claim_catalog(
                         "end_line": reference.end_line,
                         "symbol": reference.symbol,
                     }
-                    for reference in claim.evidence[:3]
+                    for reference in claim.evidence[:1]
                 ],
             }
         )
@@ -179,7 +239,7 @@ def _repository_facts(manifest: AnalysisManifest) -> dict[str, Any]:
             }
             for item in manifest.components[:80]
         ],
-        "declared_dependencies": sorted({item.name for item in manifest.dependencies})[:100],
+        "declared_dependencies": sorted({item.name for item in manifest.dependencies})[:60],
     }
 
 
@@ -319,6 +379,14 @@ def synthesize_repository_report(
 ) -> KnowledgeItem:
     manifest.metrics["repository_report_contract"] = _REPORT_CONTRACT
     catalog, claims_by_id = _claim_catalog(manifest)
+    manifest.metrics.update(
+        {
+            "repository_report_claim_catalog": len(catalog),
+            "repository_report_claim_prompt_chars": len(
+                json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
+            ),
+        }
+    )
     fallback = _fallback_report(manifest, claims_by_id)
     synthesize = getattr(provider, "synthesize_report", None)
     if not catalog or not callable(synthesize):
@@ -433,7 +501,6 @@ def synthesize_repository_report(
             "repository_report_mode": "MODEL_EVIDENCE_SYNTHESIS",
             "repository_report_quality_gate": "EVIDENCE_SYNTHESIZED",
             "repository_report_model_failure": None,
-            "repository_report_claim_catalog": len(catalog),
             "repository_report_evidence_rejected_statements": rejected,
             "repository_report_flow_steps": len(flow),
             "repository_report_source_references": len(references),

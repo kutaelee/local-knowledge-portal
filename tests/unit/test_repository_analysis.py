@@ -23,7 +23,10 @@ from lkp_indexer.repository_analysis.domain import (
 )
 from lkp_indexer.repository_analysis.pipeline import RepositoryAnalysisPipeline
 from lkp_indexer.repository_analysis.provider import LocalModelProvider, ModelInvocation
-from lkp_indexer.repository_analysis.report import synthesize_repository_report
+from lkp_indexer.repository_analysis.report import (
+    _claim_catalog,
+    synthesize_repository_report,
+)
 from lkp_indexer.repository_analysis.validator import validate_claim
 from lkp_indexer.repository_embedding_reindex import embedding_text
 from lkp_indexer.repository_retrieval_evaluation import _expected_rank
@@ -279,6 +282,8 @@ def test_repository_report_uses_only_claim_ids_that_pass_the_evidence_gate(
     class ReportProvider:
         def synthesize_report(self, *, system, context):
             assert "claim_catalog" in context
+            assert len(context["claim_catalog"]) <= 120
+            assert len(context["repository"]["declared_dependencies"]) <= 60
             return ModelInvocation(
                 payload={
                     "purpose": {
@@ -360,6 +365,33 @@ def test_repository_report_fallback_is_fail_closed_about_purpose_and_sequence(
     )
     assert "저장소 분석 절차" not in report.detail
     assert "분석 결과를 데이터베이스에 저장" not in report.detail
+
+
+def test_repository_report_claim_catalog_is_diverse_and_character_bounded(
+    sample_repository: Path,
+) -> None:
+    manifest = RepositoryAnalysisPipeline(allowed_roots=[sample_repository]).run(
+        sample_repository
+    )
+    evidence = manifest.claims[0].evidence
+    manifest.claims = [
+        Claim(
+            claim=f"component-{index % 70} " + ("검증된 처리 설명 " * 35),
+            claim_type="CODE_FACT",
+            component=f"component-{index % 70}",
+            evidence=evidence,
+            confidence=Confidence.HIGH,
+            validation_status=ValidationStatus.SOURCE_VERIFIED,
+        )
+        for index in range(240)
+    ]
+
+    catalog, _ = _claim_catalog(manifest)
+    serialized = json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
+
+    assert len(serialized) <= 22_000
+    assert len({item["component"] for item in catalog}) >= 30
+    assert all(len(item["evidence"]) == 1 for item in catalog)
 
 
 def test_pipeline_snapshot_identity_is_deterministic(sample_repository: Path) -> None:

@@ -174,12 +174,12 @@ _REPOSITORY_REPORT_RESPONSE_SCHEMA: dict[str, Any] = {
         "purpose": _REPORT_STATEMENT_SCHEMA,
         "capabilities": {
             "type": "array",
-            "maxItems": 8,
+            "maxItems": 5,
             "items": _REPORT_STATEMENT_SCHEMA,
         },
         "technologies": {
             "type": "array",
-            "maxItems": 12,
+            "maxItems": 8,
             "items": {
                 "type": "object",
                 "properties": {
@@ -198,7 +198,7 @@ _REPOSITORY_REPORT_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "processing_flow": {
             "type": "array",
-            "maxItems": 8,
+            "maxItems": 6,
             "items": {
                 "type": "object",
                 "properties": {
@@ -231,12 +231,12 @@ _REPOSITORY_REPORT_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "operational_notes": {
             "type": "array",
-            "maxItems": 8,
+            "maxItems": 5,
             "items": _REPORT_STATEMENT_SCHEMA,
         },
         "unknowns": {
             "type": "array",
-            "maxItems": 12,
+            "maxItems": 5,
             "items": {"type": "string"},
         },
     },
