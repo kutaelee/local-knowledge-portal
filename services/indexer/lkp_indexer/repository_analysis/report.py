@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from typing import Any
 
@@ -30,6 +31,8 @@ _REPORT_SYSTEM = """
 - purpose는 1~2문장, capabilities는 3~5개, technologies는 4~8개,
   processing_flow는 3~6개, operational_notes는 2~5개로 작성합니다.
 - 각 항목은 한두 문장으로 간결하게 작성하고 같은 사실을 반복하지 않습니다.
+- 문장에는 인용한 Claim의 핵심 명사, 기술명 또는 식별자를 그대로 포함해
+  문장과 근거의 연결을 기계적으로 검증할 수 있게 합니다.
 """.strip()
 
 _PHASES = {
@@ -76,6 +79,30 @@ _OVERVIEW_MARKERS = (
     "종료",
     "배포",
 )
+
+_SUPPORT_TOKEN = re.compile(r"[\w./:-]{2,}", re.UNICODE)
+_IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_.:/-]{2,}\b")
+_GENERIC_SUPPORT_TERMS = {
+    "그리고",
+    "그러나",
+    "대한",
+    "위한",
+    "통해",
+    "관련",
+    "역할",
+    "기능",
+    "처리",
+    "구성",
+    "저장소",
+    "합니다",
+    "입니다",
+    "with",
+    "from",
+    "into",
+    "that",
+    "this",
+    "uses",
+}
 
 
 def _claim_score(claim: Claim) -> tuple[int, str, str]:
@@ -215,7 +242,58 @@ def _resolve_statement(
     if any(not isinstance(item, str) or item not in claims_by_id for item in claim_ids):
         return None
     claims = [claims_by_id[item] for item in dict.fromkeys(claim_ids)]
-    return text.strip(), claims
+    statement = text.strip()
+    if not _statement_supported(statement, claims):
+        return None
+    return statement, claims
+
+
+def _statement_supported(text: str, claims: list[Claim]) -> bool:
+    evidence_text = " ".join(
+        value
+        for claim in claims
+        for value in (claim.component, claim.claim)
+        if value
+    )
+    statement_terms = {
+        token.casefold()
+        for token in _SUPPORT_TOKEN.findall(text)
+        if token.casefold() not in _GENERIC_SUPPORT_TERMS
+    }
+    evidence_terms = {
+        token.casefold()
+        for token in _SUPPORT_TOKEN.findall(evidence_text)
+        if token.casefold() not in _GENERIC_SUPPORT_TERMS
+    }
+    if not statement_terms or not evidence_terms:
+        return False
+    shared_terms = statement_terms.intersection(evidence_terms)
+    term_coverage = len(shared_terms) / len(statement_terms)
+    statement_identifiers = {
+        value.casefold() for value in _IDENTIFIER.findall(text)
+    }
+    evidence_identifiers = {
+        value.casefold() for value in _IDENTIFIER.findall(evidence_text)
+    }
+    if statement_identifiers.intersection(evidence_identifiers):
+        return True
+    if len(shared_terms) >= 2 and term_coverage >= 0.15:
+        return True
+
+    def trigrams(value: str) -> set[str]:
+        normalized = re.sub(r"[^0-9a-z가-힣]+", "", value.casefold())
+        return {
+            normalized[index : index + 3]
+            for index in range(max(0, len(normalized) - 2))
+        }
+
+    statement_trigrams = trigrams(text)
+    evidence_trigrams = trigrams(evidence_text)
+    return bool(statement_trigrams) and (
+        len(statement_trigrams.intersection(evidence_trigrams))
+        / len(statement_trigrams)
+        >= 0.18
+    )
 
 
 def _repository_facts(manifest: AnalysisManifest) -> dict[str, Any]:

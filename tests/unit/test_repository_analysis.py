@@ -284,26 +284,32 @@ def test_repository_report_uses_only_claim_ids_that_pass_the_evidence_gate(
             assert "claim_catalog" in context
             assert len(context["claim_catalog"]) <= 120
             assert len(context["repository"]["declared_dependencies"]) <= 60
+            first = context["claim_catalog"][0]
+            second = context["claim_catalog"][1]
             return ModelInvocation(
                 payload={
                     "purpose": {
-                        "text": "검증된 서비스 코드와 설정을 묶어 요청을 처리하는 저장소입니다.",
+                        "text": f"저장소 전체 목적의 핵심 근거는 {first['claim']}",
                         "claim_ids": ["C001"],
                     },
                     "capabilities": [
                         {
-                            "text": "서비스 핸들러가 입력을 직렬화합니다.",
+                            "text": f"검증된 기능: {first['claim']}",
                             "claim_ids": ["C001"],
                         },
                         {
                             "text": "근거가 없는 기능입니다.",
                             "claim_ids": ["C999"],
                         },
+                        {
+                            "text": "화성 궤도 위성의 냉각수 압력을 자동 조절합니다.",
+                            "claim_ids": ["C001"],
+                        },
                     ],
                     "technologies": [
                         {
                             "name": "Python",
-                            "role": "서비스 처리 코드를 구현합니다.",
+                            "role": f"기술 역할 근거: {first['claim']}",
                             "claim_ids": ["C001"],
                         }
                     ],
@@ -311,13 +317,13 @@ def test_repository_report_uses_only_claim_ids_that_pass_the_evidence_gate(
                         {
                             "phase": "INPUT",
                             "title": "입력",
-                            "description": "서비스가 입력을 받습니다.",
+                            "description": f"입력 단계 근거: {first['claim']}",
                             "claim_ids": ["C001"],
                         },
                         {
                             "phase": "PROCESSING",
                             "title": "직렬화",
-                            "description": "핸들러가 값을 직렬화합니다.",
+                            "description": f"처리 단계 근거: {second['claim']}",
                             "claim_ids": ["C002"],
                         },
                     ],
@@ -334,9 +340,10 @@ def test_repository_report_uses_only_claim_ids_that_pass_the_evidence_gate(
     report = synthesize_repository_report(manifest, ReportProvider())
 
     assert report.knowledge_type == "REPOSITORY_OVERVIEW"
-    assert report.summary.startswith("검증된 서비스")
+    assert report.summary.startswith("저장소 전체 목적의 핵심 근거")
     assert "근거가 없는 기능" not in report.detail
-    assert manifest.metrics["repository_report_evidence_rejected_statements"] == 1
+    assert "화성 궤도 위성" not in report.detail
+    assert manifest.metrics["repository_report_evidence_rejected_statements"] == 2
     assert len(manifest.lifecycle_nodes) == 2
     assert manifest.lifecycle_edges[0].provenance == "EVIDENCE_SYNTHESIZED"
     assert manifest.metrics["repository_report_contract"] == "human-readable-v2"
