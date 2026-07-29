@@ -40,6 +40,8 @@ _PHASES = {
     "SUPPORT",
 }
 
+_REPORT_CONTRACT = "human-readable-v2"
+
 _OVERVIEW_MARKERS = (
     "main",
     "bootstrap",
@@ -186,36 +188,65 @@ def _fallback_report(
     claims_by_id: dict[str, Claim],
 ) -> KnowledgeItem:
     claims = list(claims_by_id.values())
-    key_claims = claims[: min(5, len(claims))]
+    key_claims: list[Claim] = []
+    seen_components: set[str] = set()
+    for claim in claims:
+        component = claim.component.casefold()
+        if component in seen_components and len(key_claims) < 3:
+            continue
+        seen_components.add(component)
+        key_claims.append(claim)
+        if len(key_claims) == 5:
+            break
     languages = Counter(item.language for item in manifest.files if item.language)
     language_text = ", ".join(name for name, _ in languages.most_common(5))
     if key_claims:
-        summary = " ".join(claim.claim for claim in key_claims[:2])
+        summary = (
+            f"{manifest.display_name}는 {len(manifest.components)}개 구성 영역과 "
+            f"{len(manifest.dependencies)}개 선언 의존성을 가진 "
+            f"{language_text or '소스'} 저장소입니다. 전체 목적은 모델 근거 종합이 "
+            "완료되기 전까지 확정하지 않으며, 아래에는 원본 검증을 통과한 역할만 표시합니다."
+        )
     else:
         summary = (
             f"{manifest.display_name} 저장소에서 {len(manifest.files)}개 파일을 확인했지만, "
             "전체 역할을 설명할 검증된 코드 Claim은 아직 없습니다."
         )
     detail_lines = [
-        "## 확인된 핵심 역할",
+        "## 저장소 구조",
+        f"- 분석된 파일: {len(manifest.files)}개",
+        f"- 구성 영역: {len(manifest.components)}개",
+        f"- 선언 의존성: {len(manifest.dependencies)}개",
+        "## 근거로 확인된 역할",
         *(
             [f"- {claim.claim}" for claim in key_claims]
             or ["- 전체 역할을 단정할 수 있는 검증 근거가 부족합니다."]
         ),
         "## 기술 구성",
         f"- 주 사용 언어: {language_text or '감지되지 않음'}",
-        f"- 선언 의존성: {len(manifest.dependencies)}개",
-        f"- 분석 구성요소: {len(manifest.components)}개",
+        "- 라이브러리의 실제 런타임 역할은 관련 코드 Claim이 확인된 경우에만 확정합니다.",
+        "## 처리 흐름과 생명주기",
+        "- 아래 단계는 파일·심볼 이름으로 분류한 처리 영역이며 실제 실행 순서를 뜻하지 않습니다.",
         "## 분석 경계",
+        "- 저장소 전체 목적과 단계 간 실행 순서는 모델 근거 종합 전까지 확정하지 않습니다.",
         "- 실행 시점의 외부 시스템 연결과 환경별 설정 값은 정적 분석만으로 확정하지 않습니다.",
     ]
     steps = [
-        f"{node.title}: {node.description}"
+        f"추정 처리 영역 — {node.title}: {node.description}"
         for node in sorted(manifest.lifecycle_nodes, key=lambda item: item.sequence)
     ]
     if len(steps) < 2:
-        steps = [claim.claim for claim in key_claims[:5]]
+        steps = [
+            f"검증된 역할 — {claim.component}: {claim.claim}" for claim in key_claims[:5]
+        ]
     references = _references(key_claims)
+    manifest.metrics.update(
+        {
+            "repository_report_quality_gate": "LIMITED_FALLBACK",
+            "repository_report_flow_steps": len(steps),
+            "repository_report_source_references": len(references),
+        }
+    )
     return KnowledgeItem(
         knowledge_type="REPOSITORY_OVERVIEW",
         title=f"{manifest.display_name} 저장소 전체 보고서",
@@ -232,7 +263,10 @@ def _fallback_report(
             else ValidationStatus.ADDITIONAL_DATA_NEEDED
         ),
         confidence=Confidence.MEDIUM if references else Confidence.LOW,
-        unknowns=["실행 환경에서만 결정되는 외부 연결과 설정 값"],
+        unknowns=[
+            "저장소 전체 목적과 실제 단계 실행 순서는 모델 근거 종합이 필요합니다.",
+            "실행 환경에서만 결정되는 외부 연결과 설정 값",
+        ],
         analysis_version=manifest.analysis_version,
         prompt_version=manifest.prompt_version,
     )
@@ -283,12 +317,15 @@ def synthesize_repository_report(
     manifest: AnalysisManifest,
     provider: Any | None,
 ) -> KnowledgeItem:
-    manifest.metrics["repository_report_contract"] = "human-readable-v1"
+    manifest.metrics["repository_report_contract"] = _REPORT_CONTRACT
     catalog, claims_by_id = _claim_catalog(manifest)
     fallback = _fallback_report(manifest, claims_by_id)
     synthesize = getattr(provider, "synthesize_report", None)
     if not catalog or not callable(synthesize):
         manifest.metrics["repository_report_mode"] = "DETERMINISTIC_FALLBACK"
+        manifest.metrics["repository_report_model_failure"] = (
+            "NO_VERIFIED_CLAIMS" if not catalog else "MODEL_PROVIDER_UNAVAILABLE"
+        )
         return fallback
 
     try:
@@ -303,12 +340,14 @@ def synthesize_repository_report(
     except Exception as exc:
         manifest.warnings.append(f"repository_report:model_synthesis_failed:{type(exc).__name__}")
         manifest.metrics["repository_report_mode"] = "DETERMINISTIC_FALLBACK"
+        manifest.metrics["repository_report_model_failure"] = type(exc).__name__
         return fallback
 
     purpose = _resolve_statement(payload.get("purpose"), claims_by_id)
     if purpose is None:
         manifest.warnings.append("repository_report:purpose_failed_evidence_gate")
         manifest.metrics["repository_report_mode"] = "DETERMINISTIC_FALLBACK"
+        manifest.metrics["repository_report_model_failure"] = "PURPOSE_EVIDENCE_GATE"
         return fallback
 
     rejected = 0
@@ -392,9 +431,12 @@ def synthesize_repository_report(
     manifest.metrics.update(
         {
             "repository_report_mode": "MODEL_EVIDENCE_SYNTHESIS",
+            "repository_report_quality_gate": "EVIDENCE_SYNTHESIZED",
+            "repository_report_model_failure": None,
             "repository_report_claim_catalog": len(catalog),
             "repository_report_evidence_rejected_statements": rejected,
             "repository_report_flow_steps": len(flow),
+            "repository_report_source_references": len(references),
         }
     )
     return KnowledgeItem(

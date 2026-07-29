@@ -334,6 +334,32 @@ def test_repository_report_uses_only_claim_ids_that_pass_the_evidence_gate(
     assert manifest.metrics["repository_report_evidence_rejected_statements"] == 1
     assert len(manifest.lifecycle_nodes) == 2
     assert manifest.lifecycle_edges[0].provenance == "EVIDENCE_SYNTHESIZED"
+    assert manifest.metrics["repository_report_contract"] == "human-readable-v2"
+    assert manifest.metrics["repository_report_quality_gate"] == "EVIDENCE_SYNTHESIZED"
+
+
+def test_repository_report_fallback_is_fail_closed_about_purpose_and_sequence(
+    sample_repository: Path,
+) -> None:
+    manifest = RepositoryAnalysisPipeline(allowed_roots=[sample_repository]).run(
+        sample_repository
+    )
+
+    report = synthesize_repository_report(manifest, None)
+
+    assert manifest.metrics["repository_report_contract"] == "human-readable-v2"
+    assert manifest.metrics["repository_report_mode"] == "DETERMINISTIC_FALLBACK"
+    assert manifest.metrics["repository_report_quality_gate"] == "LIMITED_FALLBACK"
+    assert manifest.metrics["repository_report_model_failure"] == (
+        "MODEL_PROVIDER_UNAVAILABLE"
+    )
+    assert "전체 목적은 모델 근거 종합이 완료되기 전까지 확정하지 않으며" in report.summary
+    assert all(
+        step.startswith(("추정 처리 영역", "검증된 역할"))
+        for step in report.processing_steps
+    )
+    assert "저장소 분석 절차" not in report.detail
+    assert "분석 결과를 데이터베이스에 저장" not in report.detail
 
 
 def test_pipeline_snapshot_identity_is_deterministic(sample_repository: Path) -> None:

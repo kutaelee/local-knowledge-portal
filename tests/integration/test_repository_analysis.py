@@ -76,7 +76,12 @@ class SupportService:
             if item.knowledge_type == "REPOSITORY_OVERVIEW"
         )
         overview.summary = "새 분석 계약으로 다시 생성한 저장소 전체 설명입니다."
-        manifest.metrics["repository_report_contract"] = "human-readable-v2"
+        manifest.metrics["repository_report_contract"] = "human-readable-v-next"
+        assert store.persist(manifest, category="IndigoESB esb") is True
+        assert store.persist(manifest, category="IndigoESB esb") is False
+        overview.summary = "모델 근거 종합으로 승격한 저장소 전체 설명입니다."
+        manifest.metrics["repository_report_mode"] = "MODEL_EVIDENCE_SYNTHESIS"
+        manifest.metrics["repository_report_quality_gate"] = "EVIDENCE_SYNTHESIZED"
         assert store.persist(manifest, category="IndigoESB esb") is True
         assert store.persist(manifest, category="IndigoESB esb") is False
         assert (
@@ -377,7 +382,7 @@ class SupportService:
                     ),
                     {"snapshot_id": manifest.snapshot_id},
                 ).scalar_one()
-                == 3
+                == 4
             )
             latest_evaluations = client.get(
                 f"/api/v1/repository-analysis/projects/{manifest.project_id}/evaluations"

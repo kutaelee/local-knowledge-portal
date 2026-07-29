@@ -32,31 +32,31 @@ _ROLE_RULES = (
         "STARTUP",
         ("__main__", "main", "bootstrap", "startup", "entry", "cli"),
         "실행 시작",
-        "실행 요청을 받아 저장소 분석 절차를 시작합니다.",
+        "실행 진입점과 초기화 코드가 런타임 구성을 시작합니다.",
     ),
     (
         "DISCOVERY",
         ("discover", "scanner", "scan", "fingerprint", "watcher", "source"),
         "대상 탐색",
-        "분석할 파일을 찾고 변경 여부를 판별할 지문을 만듭니다.",
+        "처리 대상, 리소스 또는 구성 정보를 탐색합니다.",
     ),
     (
         "VALIDATION",
         ("validat", "verify", "guard", "check", "evaluation", "test"),
-        "근거 검증",
-        "분석 결과가 실제 파일과 위치에 근거하는지 확인합니다.",
+        "조건 검증",
+        "입력, 구성 또는 처리 결과가 요구 조건을 만족하는지 확인합니다.",
     ),
     (
         "PERSISTENCE",
         ("repository", "store", "persist", "database", "db", "migration"),
-        "결과 저장",
-        "검증된 분석 결과와 근거를 데이터베이스에 저장합니다.",
+        "데이터 저장",
+        "데이터 저장소와 영속화 경계를 담당합니다.",
     ),
     (
         "OUTPUT",
         ("route", "controller", "api", "view", "page", "present", "search"),
-        "결과 제공",
-        "저장된 분석 결과를 조회 화면이나 API로 제공합니다.",
+        "외부 제공",
+        "라우트, API, 화면 또는 출력 채널을 통해 결과를 외부에 제공합니다.",
     ),
     (
         "SHUTDOWN",
@@ -68,7 +68,7 @@ _ROLE_RULES = (
         "INPUT",
         ("ingest", "input", "consumer", "receive", "reader", "load"),
         "입력 수집",
-        "분석에 필요한 입력과 설정을 읽습니다.",
+        "외부 입력, 메시지, 파일 또는 설정을 읽습니다.",
     ),
     (
         "PROCESSING",
@@ -83,7 +83,7 @@ _ROLE_RULES = (
             "domain",
         ),
         "핵심 처리",
-        "저장소 구조와 호출 관계를 분석하고 지식 항목을 구성합니다.",
+        "저장소의 도메인 규칙과 핵심 처리 로직을 수행합니다.",
     ),
 )
 
@@ -287,20 +287,20 @@ def build_repository_design(manifest: AnalysisManifest) -> None:
         if component_type == "화면":
             phase, role_title, responsibility = (
                 "OUTPUT",
-                "결과 제공",
-                "분석 결과를 사용자가 탐색할 수 있는 관리 화면으로 제공합니다.",
+                "화면 제공",
+                "사용자가 결과와 상태를 조회하거나 조작할 수 있는 화면을 제공합니다.",
             )
         elif component_type == "API":
             phase, role_title, responsibility = (
                 "OUTPUT",
-                "결과 제공",
-                "저장된 정보와 작업 상태를 조회 API로 제공합니다.",
+                "API 제공",
+                "외부 호출자가 기능과 상태에 접근할 수 있는 API를 제공합니다.",
             )
         elif component_type == "데이터베이스":
             phase, role_title, responsibility = (
                 "PERSISTENCE",
-                "결과 저장",
-                "분석 결과와 근거를 보존할 데이터 구조를 관리합니다.",
+                "데이터 저장",
+                "서비스 데이터와 상태를 보존할 데이터 구조를 관리합니다.",
             )
         elif component_type == "운영 도구":
             phase, role_title, responsibility = (
@@ -365,8 +365,8 @@ def build_repository_design(manifest: AnalysisManifest) -> None:
                 component_key=phase_components[0].key,
                 sequence=index,
                 evidence=evidence[:10],
-                validation_status=ValidationStatus.SOURCE_VERIFIED,
-                confidence=Confidence.HIGH,
+                validation_status=ValidationStatus.PARTIALLY_VERIFIED,
+                confidence=Confidence.MEDIUM,
             )
         )
     manifest.lifecycle_nodes = lifecycle_nodes

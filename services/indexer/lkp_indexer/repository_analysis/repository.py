@@ -202,6 +202,8 @@ class RepositoryAnalysisStore:
                       AND prompt_version IS NOT DISTINCT FROM :prompt_version
                       AND metrics ->> 'repository_report_contract'
                           IS NOT DISTINCT FROM :report_contract
+                      AND metrics ->> 'repository_report_mode'
+                          IS NOT DISTINCT FROM :report_mode
                       AND status = 'SUCCEEDED'
                     LIMIT 1
                     """
@@ -213,6 +215,7 @@ class RepositoryAnalysisStore:
                     "model_quantization": manifest.model_quantization,
                     "prompt_version": manifest.prompt_version,
                     "report_contract": manifest.metrics.get("repository_report_contract"),
+                    "report_mode": manifest.metrics.get("repository_report_mode"),
                 },
             ).first()
             is not None
