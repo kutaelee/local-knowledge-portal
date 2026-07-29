@@ -46,11 +46,12 @@ def process_repository_analysis_job(
                 provider=provider,
                 checkpoint_store=checkpoint_store,
             ).run(source_path)
-        persisted = RepositoryAnalysisStore(session).persist(
+        store = RepositoryAnalysisStore(session)
+        persisted = store.persist(
             manifest,
             category=str((job.error_details or {}).get("category") or "Library")[:100],
         )
-        if provider is not None:
+        if provider is not None and (persisted or store.has_analysis(manifest)):
             with Session(bind=session.get_bind()) as checkpoint_session:
                 RepositoryAnalysisCheckpointStore(
                     checkpoint_session

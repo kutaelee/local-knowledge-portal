@@ -153,22 +153,134 @@ _SUPPORT_RESPONSE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_REPORT_STATEMENT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "claim_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {"type": "string"},
+        },
+    },
+    "required": ["text", "claim_ids"],
+    "additionalProperties": False,
+}
+
+_REPOSITORY_REPORT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "purpose": _REPORT_STATEMENT_SCHEMA,
+        "capabilities": {
+            "type": "array",
+            "maxItems": 8,
+            "items": _REPORT_STATEMENT_SCHEMA,
+        },
+        "technologies": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "role": {"type": "string"},
+                    "claim_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["name", "role", "claim_ids"],
+                "additionalProperties": False,
+            },
+        },
+        "processing_flow": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "phase": {
+                        "type": "string",
+                        "enum": [
+                            "STARTUP",
+                            "DISCOVERY",
+                            "INPUT",
+                            "PROCESSING",
+                            "VALIDATION",
+                            "PERSISTENCE",
+                            "OUTPUT",
+                            "SHUTDOWN",
+                            "SUPPORT",
+                        ],
+                    },
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "claim_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["phase", "title", "description", "claim_ids"],
+                "additionalProperties": False,
+            },
+        },
+        "operational_notes": {
+            "type": "array",
+            "maxItems": 8,
+            "items": _REPORT_STATEMENT_SCHEMA,
+        },
+        "unknowns": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {"type": "string"},
+        },
+    },
+    "required": [
+        "purpose",
+        "capabilities",
+        "technologies",
+        "processing_flow",
+        "operational_notes",
+        "unknowns",
+    ],
+    "additionalProperties": False,
+}
+
 
 def _response_format(context: dict[str, Any]) -> dict[str, Any]:
+    repository_report = context.get("task_type") == "repository_report"
     support_answer = "question_type" in context
+    analysis_schema = _ANALYSIS_RESPONSE_SCHEMA
+    if not support_answer and not repository_report:
+        max_claims = min(max(int(context.get("max_claims", 5)), 1), 5)
+        analysis_schema = {
+            **_ANALYSIS_RESPONSE_SCHEMA,
+            "properties": {
+                **_ANALYSIS_RESPONSE_SCHEMA["properties"],
+                "claims": {
+                    **_ANALYSIS_RESPONSE_SCHEMA["properties"]["claims"],
+                    "maxItems": max_claims,
+                },
+            },
+        }
     return {
         "type": "json_schema",
         "json_schema": {
             "name": (
-                "repository_support_answer"
-                if support_answer
-                else "repository_analysis"
+                "repository_report"
+                if repository_report
+                else ("repository_support_answer" if support_answer else "repository_analysis")
             ),
             "strict": True,
             "schema": (
-                _SUPPORT_RESPONSE_SCHEMA
-                if support_answer
-                else _ANALYSIS_RESPONSE_SCHEMA
+                _REPOSITORY_REPORT_RESPONSE_SCHEMA
+                if repository_report
+                else (_SUPPORT_RESPONSE_SCHEMA if support_answer else analysis_schema)
             ),
         },
     }
@@ -228,14 +340,10 @@ class LocalModelProvider:
                 "http://host.docker.internal:11434/v1",
             ),
             model=os.environ["REPO_ANALYSIS_MODEL_NAME"],
-            timeout_seconds=float(
-                os.getenv("REPO_ANALYSIS_MODEL_TIMEOUT_SECONDS", "90")
-            ),
+            timeout_seconds=float(os.getenv("REPO_ANALYSIS_MODEL_TIMEOUT_SECONDS", "90")),
             max_context=int(os.getenv("REPO_ANALYSIS_MODEL_MAX_CONTEXT", "32768")),
             max_output=int(os.getenv("REPO_ANALYSIS_MODEL_MAX_OUTPUT", "2048")),
-            max_concurrency=int(
-                os.getenv("REPO_ANALYSIS_MODEL_MAX_CONCURRENCY", "1")
-            ),
+            max_concurrency=int(os.getenv("REPO_ANALYSIS_MODEL_MAX_CONCURRENCY", "1")),
             model_quantization=os.getenv("REPO_ANALYSIS_MODEL_QUANTIZATION"),
             prompt_version=os.getenv(
                 "REPO_ANALYSIS_MODEL_PROMPT_VERSION",
@@ -246,9 +354,7 @@ class LocalModelProvider:
                 "false",
             ).casefold()
             in {"1", "true", "yes", "on"},
-            max_source_chars=int(
-                os.getenv("REPO_ANALYSIS_MODEL_MAX_SOURCE_CHARS", "80000")
-            ),
+            max_source_chars=int(os.getenv("REPO_ANALYSIS_MODEL_MAX_SOURCE_CHARS", "80000")),
         )
 
     def analyze(self, *, system: str, context: dict[str, Any]) -> ModelInvocation:
@@ -285,4 +391,15 @@ class LocalModelProvider:
             latency_ms=int((time.perf_counter() - started) * 1000),
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
+        )
+
+    def synthesize_report(
+        self,
+        *,
+        system: str,
+        context: dict[str, Any],
+    ) -> ModelInvocation:
+        return self.analyze(
+            system=system,
+            context={"task_type": "repository_report", **context},
         )

@@ -179,6 +179,14 @@ _TOKEN_NAMES = {
 def _component_key(relative_path: str) -> str:
     path = PurePosixPath(relative_path)
     parts = path.parts
+    if len(parts) >= 2 and parts[0] in {".decompiled", ".normalized"}:
+        return "/".join(parts[:2])
+    if len(parts) >= 4 and parts[:3] == ("data", "indigo", "components"):
+        return "/".join(parts[:4])
+    if len(parts) >= 4 and parts[:3] == ("data", "indigo", "service-assemblies"):
+        return "/".join(parts[:4])
+    if len(parts) >= 4 and parts[:3] == ("data", "indigo", "sharedlibs"):
+        return "/".join(parts[:4])
     if (
         len(parts) >= 4
         and parts[0] == "services"
@@ -196,6 +204,9 @@ def _component_key(relative_path: str) -> str:
 
 def _humanize(value: str) -> str:
     leaf = value.split("/")[-1]
+    if value.startswith((".decompiled/", ".normalized/")):
+        artifact = leaf.split("__", 1)[0]
+        return artifact.replace("_", " ").replace("-", " ")
     if leaf in _DISPLAY_NAMES:
         return _DISPLAY_NAMES[leaf]
     tokens = [token for token in re.split(r"[_-]+", leaf.casefold()) if token]
@@ -340,9 +351,7 @@ def build_repository_design(manifest: AnalysisManifest) -> None:
         phase_components = lifecycle_components[phase]
         _, role_title, responsibility = component_roles[phase_components[0].key]
         evidence = tuple(
-            reference
-            for component in phase_components
-            for reference in component.evidence[:2]
+            reference for component in phase_components for reference in component.evidence[:2]
         )
         lifecycle_nodes.append(
             LifecycleNode(

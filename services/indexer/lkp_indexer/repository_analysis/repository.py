@@ -24,7 +24,7 @@ class RepositoryAnalysisStore:
         self.session = session
 
     def persist(self, manifest: AnalysisManifest, *, category: str = "Library") -> bool:
-        """Persist one immutable snapshot. Returns False when it already exists."""
+        """Persist source facts once and append each distinct analysis result once."""
         now = datetime.now(timezone.utc)
         project = self.session.execute(
             text(
@@ -78,19 +78,58 @@ class RepositoryAnalysisStore:
             {"project_id": project, "source_hash": manifest.source_hash},
         ).scalar_one_or_none()
         if existing is not None:
-            return False
+            manifest.snapshot_id = existing
+            if self.has_analysis(manifest):
+                return False
+            self._replace_snapshot_facts(manifest)
+            self._persist_job(manifest, project, now)
+            self._persist_evaluation(manifest, project, now)
+            self.session.execute(
+                text(
+                    """
+                    UPDATE repository_snapshot
+                    SET snapshot_name = :snapshot_name,
+                        git_commit = :git_commit,
+                        git_branch = :git_branch,
+                        dirty_worktree = :dirty_worktree,
+                        analysis_base_time = :analysis_base_time,
+                        file_count = :file_count,
+                        languages = CAST(:languages AS text[]),
+                        build_systems = CAST(:build_systems AS text[]),
+                        status = :status,
+                        stale = false
+                    WHERE id = :snapshot_id
+                    """
+                ),
+                {
+                    "snapshot_id": existing,
+                    "snapshot_name": manifest.snapshot_name,
+                    "git_commit": manifest.git_commit,
+                    "git_branch": manifest.git_branch,
+                    "dirty_worktree": manifest.dirty_worktree,
+                    "analysis_base_time": manifest.started_at,
+                    "file_count": len(manifest.files),
+                    "languages": sorted({item.language for item in manifest.files}),
+                    "build_systems": self._build_systems(manifest),
+                    "status": manifest.stage.value,
+                    "updated_at": now,
+                },
+            )
+            self.session.execute(
+                text(
+                    """
+                    UPDATE repository_project
+                    SET updated_at = :updated_at, status = 'ACTIVE'
+                    WHERE id = :project_id
+                    """
+                ),
+                {"updated_at": now, "project_id": project},
+            )
+            self.session.commit()
+            return True
 
         languages = sorted({item.language for item in manifest.files})
-        build_systems = sorted(
-            {
-                {
-                    "MAVEN": "Maven",
-                    "NPM": "Node",
-                    "PYPI": "Python",
-                }.get(item.artifact_type, item.artifact_type)
-                for item in manifest.dependencies
-            }
-        )
+        build_systems = self._build_systems(manifest)
         self.session.execute(
             text(
                 """
@@ -146,6 +185,72 @@ class RepositoryAnalysisStore:
         )
         self.session.commit()
         return True
+
+    def has_analysis(self, manifest: AnalysisManifest) -> bool:
+        """Return whether this exact analysis provenance is already durable."""
+
+        return (
+            self.session.execute(
+                text(
+                    """
+                    SELECT 1
+                    FROM repository_analysis_job
+                    WHERE snapshot_id = :snapshot_id
+                      AND analysis_version = :analysis_version
+                      AND model IS NOT DISTINCT FROM :model
+                      AND model_quantization IS NOT DISTINCT FROM :model_quantization
+                      AND prompt_version IS NOT DISTINCT FROM :prompt_version
+                      AND metrics ->> 'repository_report_contract'
+                          IS NOT DISTINCT FROM :report_contract
+                      AND status = 'SUCCEEDED'
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "snapshot_id": manifest.snapshot_id,
+                    "analysis_version": manifest.analysis_version,
+                    "model": manifest.model,
+                    "model_quantization": manifest.model_quantization,
+                    "prompt_version": manifest.prompt_version,
+                    "report_contract": manifest.metrics.get("repository_report_contract"),
+                },
+            ).first()
+            is not None
+        )
+
+    @staticmethod
+    def _build_systems(manifest: AnalysisManifest) -> list[str]:
+        return sorted(
+            {
+                {
+                    "MAVEN": "Maven",
+                    "NPM": "Node",
+                    "PYPI": "Python",
+                }.get(item.artifact_type, item.artifact_type)
+                for item in manifest.dependencies
+            }
+        )
+
+    def _replace_snapshot_facts(self, manifest: AnalysisManifest) -> None:
+        """Atomically refresh rebuildable analysis rows for an unchanged source."""
+
+        for table in (
+            "repository_knowledge_item",
+            "repository_dependency_usage",
+            "repository_lifecycle_edge",
+            "repository_lifecycle_node",
+            "repository_component",
+            "repository_dependency_artifact",
+            "repository_configuration_reference",
+            "repository_source_relation",
+            "repository_source_symbol",
+            "repository_source_file",
+        ):
+            self.session.execute(
+                text(f"DELETE FROM {table} WHERE snapshot_id = :snapshot_id"),
+                {"snapshot_id": manifest.snapshot_id},
+            )
+        self._persist_facts(manifest)
 
     def _available_display_name(
         self,
@@ -404,20 +509,17 @@ class RepositoryAnalysisStore:
                     """
                 ),
                 {
-                    "id": uuid.UUID(str(task["task_id"])),
+                    "id": uuid.uuid4(),
                     "job_id": job_id,
                     "task_type": (
                         "EMBEDDED_JAR"
                         if key.startswith("jar:")
-                        else (
-                            "DERIVED_SOURCE"
-                            if key.startswith("derived:")
-                            else "COMPONENT"
-                        )
+                        else ("DERIVED_SOURCE" if key.startswith("derived:") else "COMPONENT")
                     ),
                     "scope": _json(
                         {
                             "analysis_unit": key,
+                            "analysis_task_id": str(task.get("task_id", "")),
                             "source_files": task.get("source_files", []),
                             "claims_accepted": task.get("claims_accepted", 0),
                             "claims_rejected": task.get("claims_rejected", 0),
@@ -430,9 +532,7 @@ class RepositoryAnalysisStore:
                             ),
                             "codex_intervened": task.get("codex_intervened", False),
                             "codex_source_scope": task.get("codex_source_scope", []),
-                            "codex_claims_authored": task.get(
-                                "codex_claims_authored", 0
-                            ),
+                            "codex_claims_authored": task.get("codex_claims_authored", 0),
                             "codex_intervention_policy": task.get(
                                 "codex_intervention_policy",
                                 "RECORD_FAILURE_AND_CONTINUE",
@@ -445,9 +545,7 @@ class RepositoryAnalysisStore:
                             ),
                         }
                     ),
-                    "status": task.get(
-                        "status", "ADDITIONAL_ANALYSIS_REQUIRED"
-                    ),
+                    "status": task.get("status", "ADDITIONAL_ANALYSIS_REQUIRED"),
                     "attempt_count": int(task.get("attempts", 0)),
                     "failure_code": task.get("failure_code"),
                     "started_at": task.get("started_at"),
@@ -510,6 +608,7 @@ class RepositoryAnalysisStore:
                       CAST(:grading_criteria AS jsonb), :difficulty, :scenario_type,
                       :created_at
                     )
+                    ON CONFLICT (id) DO NOTHING
                     """
                 ),
                 {
@@ -517,9 +616,7 @@ class RepositoryAnalysisStore:
                     "project_id": project_id,
                     "question": case.question,
                     "question_type": case.question_type,
-                    "expected_evidence": _json(
-                        [asdict(item) for item in case.expected_evidence]
-                    ),
+                    "expected_evidence": _json([asdict(item) for item in case.expected_evidence]),
                     "required_files": case.required_files,
                     "acceptable_answer": case.acceptable_answer,
                     "forbidden_assertions": _json(case.forbidden_assertions),

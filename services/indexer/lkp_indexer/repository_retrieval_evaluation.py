@@ -10,6 +10,7 @@ answer quality.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import time
@@ -39,6 +40,21 @@ _REQUIRED_ARRAYS = (
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _support_evaluation_run_id(
+    package_bytes: bytes,
+    *,
+    model: str,
+    prompt_version: str,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(package_bytes)
+    digest.update(b"\0")
+    digest.update(model.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(prompt_version.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _reference_key(value: dict[str, Any]) -> tuple[Any, ...]:
@@ -119,10 +135,7 @@ def _expected_rank(
 ) -> int | None:
     expected_keys = {_reference_key(item) for item in expected}
     for rank, item in enumerate(retrieved, start=1):
-        item_keys = {
-            _reference_key(reference)
-            for reference in item.get("source_references") or []
-        }
+        item_keys = {_reference_key(reference) for reference in item.get("source_references") or []}
         if expected_keys & item_keys:
             return rank
     return None
@@ -373,18 +386,27 @@ def _answer_failures(
 
 
 def answer_package(package_path: Path) -> dict[str, Any]:
-    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package_bytes = package_path.read_bytes()
+    package = json.loads(package_bytes.decode("utf-8"))
     provider = LocalModelProvider.from_environment()
     if provider is None:
         raise RuntimeError("REPO_ANALYSIS_MODEL_ENABLED must be true")
+    evaluation_run_id = _support_evaluation_run_id(
+        package_bytes,
+        model=provider.model,
+        prompt_version=provider.prompt_version,
+    )
     summary: dict[str, Any] = {
         "projects": 0,
         "cases": 0,
         "passed": 0,
         "retries": 0,
+        "restored_cases": 0,
+        "saved_cases": 0,
         "failure_counts": Counter(),
         "model": provider.model,
         "prompt_version": provider.prompt_version,
+        "evaluation_run_id": evaluation_run_id,
     }
     with SessionLocal() as session:
         for project in package["projects"]:
@@ -408,6 +430,40 @@ def answer_package(package_path: Path) -> dict[str, Any]:
             for case in project["cases"]:
                 summary["cases"] += 1
                 started = time.perf_counter()
+                case_id = uuid.UUID(str(case["case_id"]))
+                restored = (
+                    session.execute(
+                        text(
+                            """
+                            SELECT passed, failure_category
+                            FROM repository_evaluation_result
+                            WHERE case_id = :case_id
+                              AND snapshot_id = :snapshot_id
+                              AND details->>'scope'
+                                  = 'post_persistence_support_answer'
+                              AND details->>'evaluation_run_id'
+                                  = :evaluation_run_id
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {
+                            "case_id": case_id,
+                            "snapshot_id": snapshot_id,
+                            "evaluation_run_id": evaluation_run_id,
+                        },
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                session.commit()
+                if restored is not None:
+                    summary["restored_cases"] += 1
+                    if restored["passed"]:
+                        summary["passed"] += 1
+                    elif restored["failure_category"]:
+                        summary["failure_counts"][restored["failure_category"]] += 1
+                    continue
                 answer: dict[str, Any] | None = None
                 rejected_answer: dict[str, Any] | None = None
                 error_name: str | None = None
@@ -467,11 +523,12 @@ def answer_package(package_path: Path) -> dict[str, Any]:
                         current_failures = _answer_failures(
                             invocation.payload,
                             allowed_references=allowed,
-                            reference_validator=lambda reference,
-                            current_snapshot_id=snapshot_id: _valid_source_reference(
-                                session,
-                                snapshot_id=current_snapshot_id,
-                                reference=reference,
+                            reference_validator=lambda reference, current_snapshot_id=snapshot_id: (
+                                _valid_source_reference(
+                                    session,
+                                    snapshot_id=current_snapshot_id,
+                                    reference=reference,
+                                )
                             ),
                             evidence_texts=[
                                 str(value)
@@ -489,17 +546,17 @@ def answer_package(package_path: Path) -> dict[str, Any]:
                             0.0,
                             1.0 - min(len(current_failures), 4) * 0.25,
                         )
-                        candidates.append(
-                            (candidate_score, invocation.payload, current_failures)
-                        )
+                        candidates.append((candidate_score, invocation.payload, current_failures))
                         if not current_failures:
                             answer = invocation.payload
                             failures = []
                             break
+                        session.commit()
                         repair_failures = current_failures
                         if attempt == 0:
                             summary["retries"] += 1
                     except Exception as exc:
+                        session.rollback()
                         error_name = type(exc).__name__
                         repair_failures = [f"model_answer_failure:{error_name}"]
                         if attempt == 0:
@@ -515,17 +572,12 @@ def answer_package(package_path: Path) -> dict[str, Any]:
                     else:
                         failures = [f"model_answer_failure:{error_name}"]
                     if failures:
-                        if all(
-                            failure.startswith("model_answer_failure:")
-                            for failure in failures
-                        ):
+                        if all(failure.startswith("model_answer_failure:") for failure in failures):
                             failure_category = "MODEL_REASONING_FAILURE"
                         else:
                             failure_category = (
                                 "EVIDENCE_VALIDATION_FAILURE"
-                                if any(
-                                    "reference" in failure for failure in failures
-                                )
+                                if any("reference" in failure for failure in failures)
                                 else "INSUFFICIENT_EVIDENCE"
                             )
                 passed = not failures
@@ -537,6 +589,7 @@ def answer_package(package_path: Path) -> dict[str, Any]:
                     "snapshot_id": str(snapshot_id),
                     "model": provider.model,
                     "prompt_version": provider.prompt_version,
+                    "evaluation_run_id": evaluation_run_id,
                     "retrieved_count": len(case["knowledge"]),
                     "failures": sorted(set(failures)),
                     "answer": answer,
@@ -547,7 +600,7 @@ def answer_package(package_path: Path) -> dict[str, Any]:
                 }
                 _insert_result(
                     session,
-                    case_id=uuid.UUID(str(case["case_id"])),
+                    case_id=case_id,
                     snapshot_id=snapshot_id,
                     passed=passed,
                     score=score,
@@ -555,6 +608,8 @@ def answer_package(package_path: Path) -> dict[str, Any]:
                     details=details,
                     duration_ms=int((time.perf_counter() - started) * 1000),
                 )
+                session.commit()
+                summary["saved_cases"] += 1
                 if passed:
                     summary["passed"] += 1
                 elif failure_category:

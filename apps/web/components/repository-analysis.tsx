@@ -49,6 +49,7 @@ type ProjectDetail = {
     repository_origin_hash: string;
   };
   counts: Record<string, number>;
+  report: KnowledgeItem | null;
   visualization: {
     relation_groups: { key: string; count: number }[];
     dependency_groups: { type: string; classification: string; count: number }[];
@@ -117,6 +118,51 @@ type AnalysisJob = {
   finished_at: string | null;
 };
 type JobList = { items: AnalysisJob[]; total: number };
+type KnowledgeItem = {
+  id: string;
+  knowledge_type: string;
+  title: string;
+  summary: string;
+  detail: string;
+  processing_steps: string[];
+  source_references: { file: string; start_line: number }[];
+  validation_status: string;
+  unknowns: string[];
+};
+type KnowledgeList = { items: KnowledgeItem[]; total: number };
+type ConfigurationItem = {
+  config_key: string;
+  relative_path: string;
+  declaration_line: number;
+  referenced_by: string[];
+  has_default: boolean;
+};
+type ConfigurationList = { items: ConfigurationItem[]; total: number };
+type EvaluationItem = {
+  id: string;
+  question: string;
+  question_type: string;
+  scenario_type: string | null;
+  passed: boolean;
+  score: number;
+  failure_category: string | null;
+};
+type EvaluationList = { items: EvaluationItem[]; total: number };
+type SnapshotItem = {
+  id: string;
+  snapshot_name: string;
+  file_count: number;
+  status: string;
+  stale: boolean;
+  created_at: string;
+};
+type SnapshotList = { items: SnapshotItem[]; total: number };
+type VisualizationDetail = {
+  components?: ProjectDetail["visualization"]["components"];
+  lifecycle?: ProjectDetail["visualization"]["lifecycle"];
+  dependencies?: ProjectDetail["visualization"]["dependency_items"];
+  usages?: ProjectDetail["visualization"]["dependency_usages"];
+};
 type SourceRootList = {
   items: { id: string; name: string; canonical_path: string; read_only: boolean }[];
   total: number;
@@ -229,6 +275,25 @@ function dependencyStateLabel(value: string) {
   return labels[value] ?? "확인됨";
 }
 
+function knowledgeTypeLabel(value: string) {
+  const labels: Record<string, string> = {
+    ARCHITECTURE: "전체 구조",
+    COMPONENT: "구성요소",
+    COMPONENT_FLOW: "구성요소 흐름",
+    LOGIC_FLOW: "처리 흐름",
+    DATA_FLOW: "데이터 흐름",
+    MESSAGE_FLOW: "메시지 흐름",
+    CONFIGURATION: "설정",
+    DEPENDENCY: "의존 관계",
+    EMBEDDED_JAR: "내장 자바 파일",
+    TROUBLESHOOTING: "문제 해결",
+    ERROR_HANDLING: "오류 처리",
+    RETRY_TIMEOUT: "재시도와 시간 제한",
+    CHANGE_IMPACT: "변경 영향",
+  };
+  return labels[value] ?? "기술지원";
+}
+
 export function RepositoryAnalysisConsole({
   embedded = false,
 }: {
@@ -287,6 +352,50 @@ export function RepositoryAnalysisConsole({
     queryFn: () =>
       api<ProjectDetail>(`/api/v1/repository-analysis/projects/${selectedId}`),
     enabled: Boolean(selectedId),
+  });
+  const visualizationSection =
+    tab === "architecture" || tab === "logic" || tab === "dependencies"
+      ? tab
+      : null;
+  const visualization = useQuery({
+    queryKey: ["repository-analysis-visualization", selectedId, visualizationSection],
+    queryFn: () =>
+      api<VisualizationDetail>(
+        `/api/v1/repository-analysis/projects/${selectedId}/visualization?section=${visualizationSection}`,
+      ),
+    enabled: Boolean(selectedId && visualizationSection),
+  });
+  const knowledge = useQuery({
+    queryKey: ["repository-analysis-knowledge", selectedId],
+    queryFn: () =>
+      api<KnowledgeList>(
+        `/api/v1/repository-analysis/projects/${selectedId}/knowledge?limit=200`,
+      ),
+    enabled: Boolean(selectedId && (tab === "support" || tab === "unknowns")),
+  });
+  const configurations = useQuery({
+    queryKey: ["repository-analysis-configurations", selectedId],
+    queryFn: () =>
+      api<ConfigurationList>(
+        `/api/v1/repository-analysis/projects/${selectedId}/configurations?limit=100`,
+      ),
+    enabled: Boolean(selectedId && tab === "configuration"),
+  });
+  const evaluations = useQuery({
+    queryKey: ["repository-analysis-evaluations", selectedId],
+    queryFn: () =>
+      api<EvaluationList>(
+        `/api/v1/repository-analysis/projects/${selectedId}/evaluations`,
+      ),
+    enabled: Boolean(selectedId && tab === "evaluation"),
+  });
+  const snapshots = useQuery({
+    queryKey: ["repository-analysis-snapshots", selectedId],
+    queryFn: () =>
+      api<SnapshotList>(
+        `/api/v1/repository-analysis/projects/${selectedId}/snapshots`,
+      ),
+    enabled: Boolean(selectedId && tab === "snapshots"),
   });
   const jobs = useQuery({
     queryKey: ["repository-analysis-jobs", selectedId],
@@ -454,17 +563,33 @@ export function RepositoryAnalysisConsole({
                     tab={tab}
                     project={selected}
                     counts={counts}
+                    report={detail.data?.report ?? null}
                     latestJob={latestJob}
                     jobs={jobs.data?.items ?? []}
-                    visualization={detail.data?.visualization ?? {
-                      relation_groups: [],
-                      dependency_groups: [],
-                      flow_items: [],
-                      dependency_items: [],
-                      components: [],
-                      lifecycle: { nodes: [], edges: [] },
-                      dependency_usages: [],
+                    visualization={{
+                      ...(detail.data?.visualization ?? {
+                        relation_groups: [],
+                        dependency_groups: [],
+                        flow_items: [],
+                        dependency_items: [],
+                        components: [],
+                        lifecycle: { nodes: [], edges: [] },
+                        dependency_usages: [],
+                      }),
+                      components: visualization.data?.components ?? [],
+                      lifecycle: visualization.data?.lifecycle ?? { nodes: [], edges: [] },
+                      dependency_items: visualization.data?.dependencies ?? [],
+                      dependency_usages: visualization.data?.usages ?? [],
                     }}
+                    visualizationLoading={visualization.isLoading}
+                    knowledge={knowledge.data}
+                    knowledgeLoading={knowledge.isLoading}
+                    configurations={configurations.data}
+                    configurationsLoading={configurations.isLoading}
+                    evaluations={evaluations.data}
+                    evaluationsLoading={evaluations.isLoading}
+                    snapshots={snapshots.data}
+                    snapshotsLoading={snapshots.isLoading}
                   />
                 </>
               )}
@@ -497,16 +622,36 @@ function RepoTab({
   tab,
   project,
   counts,
+  report,
   latestJob,
   jobs,
   visualization,
+  visualizationLoading,
+  knowledge,
+  knowledgeLoading,
+  configurations,
+  configurationsLoading,
+  evaluations,
+  evaluationsLoading,
+  snapshots,
+  snapshotsLoading,
 }: {
   tab: DetailTab;
   project: ProjectDetail["project"];
   counts: Record<string, number>;
+  report: KnowledgeItem | null;
   latestJob: AnalysisJob | undefined;
   jobs: AnalysisJob[];
   visualization: ProjectDetail["visualization"];
+  visualizationLoading: boolean;
+  knowledge: KnowledgeList | undefined;
+  knowledgeLoading: boolean;
+  configurations: ConfigurationList | undefined;
+  configurationsLoading: boolean;
+  evaluations: EvaluationList | undefined;
+  evaluationsLoading: boolean;
+  snapshots: SnapshotList | undefined;
+  snapshotsLoading: boolean;
 }) {
   if (tab === "jobs") {
     return (
@@ -525,9 +670,11 @@ function RepoTab({
     );
   }
   if (tab === "logic") {
+    if (visualizationLoading) return <TabLoading />;
     return <LifecycleGraph lifecycle={visualization.lifecycle} />;
   }
   if (tab === "dependencies") {
+    if (visualizationLoading) return <TabLoading />;
     return (
       <DependencyVenn
         components={visualization.components}
@@ -537,62 +684,215 @@ function RepoTab({
     );
   }
   if (tab === "architecture") {
+    if (visualizationLoading) return <TabLoading />;
     return <ComponentStructure components={visualization.components} />;
   }
-  const content: Record<
-    Exclude<DetailTab, "jobs" | "logic" | "dependencies" | "architecture">,
-    { title: string; facts: string[] }
-  > = {
-    overview: {
-      title: "분석 요약",
-      facts: [
-        `상태 · ${statusLabel(project.analysis_status)}`,
-        `사용 언어 · ${languageList(project.languages)}`,
-        `빌드 방식 · ${(project.build_systems ?? []).join(", ") || "감지되지 않음"}`,
-        `분석 파일 · ${(project.file_count ?? 0).toLocaleString()}개`,
-        `원본 확인 지식 · ${(counts.knowledge_source_verified ?? 0).toLocaleString()}개`,
-        `부분 확인 지식 · ${(counts.knowledge_partially_verified ?? 0).toLocaleString()}개`,
-        `추가 자료 필요 · ${(counts.knowledge_additional_data_needed ?? 0).toLocaleString()}개`,
-      ],
-    },
-    configuration: {
-      title: "설정",
-      facts: [`확인된 설정 연결 · ${(counts.configurations ?? 0).toLocaleString()}개`],
-    },
-    support: {
-      title: "기술지원",
-      facts: [`확인된 지식 · ${(counts.knowledge_items ?? 0).toLocaleString()}개`],
-    },
-    evaluation: {
-      title: "검증 결과",
-      facts: [
-        `전체 검증 · ${(counts.evaluation_results ?? 0).toLocaleString()}건`,
-        `통과 · ${(counts.evaluation_passed ?? 0).toLocaleString()}건`,
-        `장애 상황 점검 · ${(counts.evaluation_scenarios ?? 0).toLocaleString()}건`,
-      ],
-    },
-    unknowns: {
-      title: "확인 필요",
-      facts: [
-        `확인할 항목 · ${latestJob?.warnings.length ?? 0}건`,
-        latestJob?.error_code ? "최근 분석에서 오류가 발견되었습니다" : "최근 분석 오류 없음",
-      ],
-    },
-    snapshots: {
-      title: "분석 이력",
-      facts: [
-        `최근 분석 · ${new Date(project.analyzed_at ?? Date.now()).toLocaleString("ko-KR")}`,
-        `작업 이력 · ${jobs.length.toLocaleString()}건`,
-      ],
-    },
-  };
-  const selected = content[tab];
+  if (tab === "configuration") {
+    if (configurationsLoading) return <TabLoading />;
+    return (
+      <div className="panel repo-tab-panel">
+        <div className="panel-head">
+          <h2>설정</h2>
+          <span>{(configurations?.total ?? 0).toLocaleString()}개</span>
+        </div>
+        <div className="repo-content-list">
+          {configurations?.items.map((item) => (
+            <article key={`${item.relative_path}:${item.declaration_line}:${item.config_key}`}>
+              <div>
+                <h3>{item.config_key}</h3>
+                <span>{item.has_default ? "기본값 있음" : "기본값 없음"}</span>
+              </div>
+              <p>{item.relative_path} · {item.declaration_line.toLocaleString()}번째 줄</p>
+              <small>
+                {item.referenced_by.length
+                  ? `사용 위치 ${item.referenced_by.slice(0, 4).join(", ")}`
+                  : "사용 위치가 추가로 확인되지 않음"}
+              </small>
+            </article>
+          ))}
+          {!configurations?.items.length && <p className="repo-no-data">확인된 설정이 없습니다.</p>}
+        </div>
+      </div>
+    );
+  }
+  if (tab === "support") {
+    if (knowledgeLoading) return <TabLoading />;
+    return (
+      <div className="panel repo-tab-panel">
+        <div className="panel-head">
+          <h2>기술지원 지식</h2>
+          <span>{(knowledge?.total ?? 0).toLocaleString()}개</span>
+        </div>
+        <div className="repo-knowledge-list">
+          {knowledge?.items.map((item) => (
+            <article key={item.id}>
+              <div className="repo-knowledge-head">
+                <span>{knowledgeTypeLabel(item.knowledge_type)}</span>
+                <small>{item.validation_status === "SOURCE_VERIFIED" ? "원본 확인" : "일부 확인"}</small>
+              </div>
+              <h3>{item.title}</h3>
+              <p>{item.summary}</p>
+              {item.processing_steps.length > 1 && (
+                <ol>{item.processing_steps.map((step) => <li key={step}>{step}</li>)}</ol>
+              )}
+              {item.source_references.length > 0 && (
+                <small>
+                  근거 · {item.source_references.slice(0, 3).map((reference) =>
+                    `${reference.file}:${reference.start_line}`,
+                  ).join(", ")}
+                </small>
+              )}
+            </article>
+          ))}
+          {!knowledge?.items.length && (
+            <p className="repo-no-data">
+              저장된 기술지원 지식이 없습니다. 완료된 분석 결과의 저장 상태를 확인해 주세요.
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+  if (tab === "evaluation") {
+    if (evaluationsLoading) return <TabLoading />;
+    return (
+      <div className="panel repo-tab-panel">
+        <div className="panel-head">
+          <h2>검증 결과</h2>
+          <span>{(evaluations?.total ?? 0).toLocaleString()}건</span>
+        </div>
+        <div className="repo-content-list">
+          {evaluations?.items.map((item) => (
+            <article key={`${item.id}:${item.scenario_type ?? ""}`}>
+              <div>
+                <h3>{item.question}</h3>
+                <span className={item.passed ? "success" : "danger"}>
+                  {item.passed ? "통과" : "미통과"} · {Math.round(item.score * 100)}점
+                </span>
+              </div>
+              <p>{item.scenario_type ?? item.question_type}</p>
+              {item.failure_category && <small>확인 필요 · {item.failure_category}</small>}
+            </article>
+          ))}
+          {!evaluations?.items.length && <p className="repo-no-data">검증 결과가 없습니다.</p>}
+        </div>
+      </div>
+    );
+  }
+  if (tab === "unknowns") {
+    if (knowledgeLoading) return <TabLoading />;
+    const unknowns = [
+      ...(latestJob?.warnings ?? []),
+      ...(knowledge?.items.flatMap((item) => item.unknowns) ?? []),
+    ];
+    return (
+      <div className="panel repo-tab-panel">
+        <div className="panel-head"><h2>확인 필요</h2><span>{unknowns.length.toLocaleString()}건</span></div>
+        <ul className="repo-warning-list">
+          {unknowns.map((item, index) => <li key={`${index}:${item}`}><AlertTriangle size={14} />{item}</li>)}
+          {unknowns.length === 0 && <li><CheckCircle2 size={14} />추가로 확인할 항목이 없습니다.</li>}
+        </ul>
+      </div>
+    );
+  }
+  if (tab === "snapshots") {
+    if (snapshotsLoading) return <TabLoading />;
+    return (
+      <div className="panel repo-tab-panel">
+        <div className="panel-head"><h2>분석 이력</h2><span>{snapshots?.total ?? 0}건</span></div>
+        <div className="repo-content-list">
+          {snapshots?.items.map((item) => (
+            <article key={item.id}>
+              <div><h3>{item.snapshot_name}</h3><span>{item.stale ? "이전 결과" : "현재 결과"}</span></div>
+              <p>{new Date(item.created_at).toLocaleString("ko-KR")} · 파일 {item.file_count.toLocaleString()}개</p>
+            </article>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  const facts = [
+    `상태 · ${statusLabel(project.analysis_status)}`,
+    `사용 언어 · ${languageList(project.languages)}`,
+    `빌드 방식 · ${(project.build_systems ?? []).join(", ") || "감지되지 않음"}`,
+    `분석 파일 · ${(project.file_count ?? 0).toLocaleString()}개`,
+    `원본 확인 지식 · ${(counts.knowledge_source_verified ?? 0).toLocaleString()}개`,
+    `부분 확인 지식 · ${(counts.knowledge_partially_verified ?? 0).toLocaleString()}개`,
+    `추가 자료 필요 · ${(counts.knowledge_additional_data_needed ?? 0).toLocaleString()}개`,
+  ];
+  const reportSections = report?.detail
+    .split(/^## /m)
+    .map((section) => section.trim())
+    .filter(Boolean)
+    .map((section) => {
+      const [title, ...lines] = section.split("\n");
+      return {
+        title,
+        lines: lines.map((line) => line.replace(/^- /, "").trim()).filter(Boolean),
+      };
+    }) ?? [];
   return (
     <div className="panel repo-tab-panel">
-      <div className="panel-head"><h2>{selected.title}</h2></div>
+      <div className="panel-head">
+        <h2>{report?.title ?? "분석 요약"}</h2>
+        {report && (
+          <span>
+            {report.validation_status === "SOURCE_VERIFIED" ? "원본 확인" : "근거 기반 종합"}
+          </span>
+        )}
+      </div>
+      {report ? (
+        <div className="repo-report">
+          <section className="repo-report-purpose">
+            <span>무엇을 하는 저장소인가</span>
+            <p>{report.summary}</p>
+          </section>
+          {reportSections.length > 0 && (
+            <div className="repo-report-sections">
+              {reportSections.map((section) => (
+                <section key={section.title}>
+                  <h3>{section.title}</h3>
+                  <ul>
+                    {section.lines.map((line) => <li key={line}>{line}</li>)}
+                  </ul>
+                </section>
+              ))}
+            </div>
+          )}
+          {report.processing_steps.length > 0 && (
+            <section className="repo-report-flow">
+              <h3>처리 라이프사이클</h3>
+              <ol>
+                {report.processing_steps.map((step) => <li key={step}>{step}</li>)}
+              </ol>
+            </section>
+          )}
+          {report.source_references.length > 0 && (
+            <small className="repo-report-evidence">
+              근거 · {report.source_references.slice(0, 6).map((reference) =>
+                `${reference.file}:${reference.start_line}`,
+              ).join(", ")}
+            </small>
+          )}
+        </div>
+      ) : (
+        <p className="repo-report-missing">
+          이 Snapshot에는 저장소 전체 보고서가 없습니다. 최신 분석을 다시 실행하면
+          목적·기술·처리 흐름을 근거와 함께 생성합니다.
+        </p>
+      )}
       <ul className="repo-fact-list">
-        {selected.facts.map((fact) => <li key={fact}><CheckCircle2 size={14} /> {fact}</li>)}
+        {facts.map((fact) => <li key={fact}><CheckCircle2 size={14} /> {fact}</li>)}
       </ul>
+    </div>
+  );
+}
+
+function TabLoading() {
+  return (
+    <div className="panel empty repo-tab-panel">
+      <LoaderCircle className="spin" />
+      <strong>내용 불러오는 중</strong>
     </div>
   );
 }

@@ -2,6 +2,7 @@ from lkp.repository_rag_quality import infer_repository_types, repository_reward
 from lkp_indexer.repository_retrieval_evaluation import (
     _answer_failures,
     _reference_key,
+    _support_evaluation_run_id,
 )
 
 
@@ -174,3 +175,23 @@ def test_repository_answer_verifier_rejects_unsupported_confirmed_fact() -> None
     )
 
     assert "unsupported_confirmed_fact:0" in failures
+
+
+def test_support_evaluation_run_id_is_stable_and_model_scoped() -> None:
+    package = b'{"schema_version":1,"projects":[]}'
+    first = _support_evaluation_run_id(
+        package,
+        model="qwen3.6-27b-nvfp4",
+        prompt_version="repository-analysis-v1",
+    )
+
+    assert first == _support_evaluation_run_id(
+        package,
+        model="qwen3.6-27b-nvfp4",
+        prompt_version="repository-analysis-v1",
+    )
+    assert first != _support_evaluation_run_id(
+        package,
+        model="qwen3.6-27b-nvfp4-revised",
+        prompt_version="repository-analysis-v1",
+    )

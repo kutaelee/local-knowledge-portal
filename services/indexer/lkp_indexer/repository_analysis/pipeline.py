@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 import uuid
@@ -36,6 +37,7 @@ from .evaluation import (
     evaluate_support_answers,
 )
 from .provider import LocalModelProvider
+from .report import synthesize_repository_report
 from .validator import validate_claim
 
 _PROJECT_NAMESPACE = uuid.UUID("fce6c5be-41f7-4d29-a35f-1b67c85019fc")
@@ -50,10 +52,7 @@ def _display_name(root: Path) -> str:
 
 def _claim_for_symbol(source_hash: str, symbol: Any) -> Claim:
     return Claim(
-        claim=(
-            f"{symbol.symbol} is declared as {symbol.symbol_type} in "
-            f"{symbol.relative_path}."
-        ),
+        claim=(f"{symbol.symbol} is declared as {symbol.symbol_type} in {symbol.relative_path}."),
         claim_type="CODE_FACT",
         component=symbol.symbol,
         evidence=[
@@ -154,9 +153,7 @@ class RepositoryAnalysisPipeline:
             files=files,
             skipped_files=skipped_files,
             model=getattr(self.provider, "model", None),
-            model_quantization=(
-                getattr(self.provider, "model_quantization", None)
-            ),
+            model_quantization=(getattr(self.provider, "model_quantization", None)),
             prompt_version=getattr(self.provider, "prompt_version", None),
         )
         discovery_ms = int((time.perf_counter() - started_clock) * 1000)
@@ -216,9 +213,7 @@ class RepositoryAnalysisPipeline:
                 )
                 for item in extra.dependencies
             )
-            facts.warnings.extend(
-                f"{prefix}/{warning}" for warning in extra.warnings
-            )
+            facts.warnings.extend(f"{prefix}/{warning}" for warning in extra.warnings)
         manifest.symbols = facts.symbols
         manifest.relations = facts.relations
         manifest.configurations = facts.configurations
@@ -233,16 +228,12 @@ class RepositoryAnalysisPipeline:
         manifest.metrics.update(
             {
                 "planned_analysis_tasks": len(analysis_tasks),
-                "planned_analysis_files": sum(
-                    len(task["files"]) for task in analysis_tasks
-                ),
+                "planned_analysis_files": sum(len(task["files"]) for task in analysis_tasks),
             }
         )
         if self.provider is None:
             for symbol in manifest.symbols[: self.max_claims]:
-                manifest.claims.append(
-                    _claim_for_symbol(file_hashes[symbol.relative_path], symbol)
-                )
+                manifest.claims.append(_claim_for_symbol(file_hashes[symbol.relative_path], symbol))
         else:
             self._add_model_claims(manifest, discovery.root, analysis_tasks)
 
@@ -261,19 +252,24 @@ class RepositoryAnalysisPipeline:
         validation_ms = int((time.perf_counter() - validation_started) * 1000)
 
         manifest.stage = AnalysisStage.SYNTHESIZING
-        manifest.knowledge_items = (
-            self._synthesize_model(manifest)
-            if self.provider is not None
-            else self._synthesize_legacy(manifest)
-        )
+        repository_report = synthesize_repository_report(manifest, self.provider)
+        structural_items = self._synthesize_legacy(manifest)
+        model_items = self._synthesize_model(manifest) if self.provider is not None else []
+        manifest.knowledge_items = [repository_report, *structural_items, *model_items]
         manifest.stage = AnalysisStage.EVALUATING
         manifest.evaluation_cases = build_evaluation_cases(manifest)
         evaluation_metrics: dict[str, Any] = {}
-        if self.provider is None:
+        defer_model_evaluation = os.getenv(
+            "REPO_ANALYSIS_DEFER_MODEL_EVALUATION",
+            "false",
+        ).casefold() in {"1", "true", "yes", "on"}
+        if self.provider is None or defer_model_evaluation:
             manifest.evaluation_results = evaluate_evidence_integrity(
                 manifest,
                 manifest.evaluation_cases,
             )
+            if self.provider is not None:
+                evaluation_metrics["support_answer_evaluation_deferred"] = True
         else:
             (
                 manifest.evaluation_results,
@@ -302,15 +298,11 @@ class RepositoryAnalysisPipeline:
                     or hashlib.sha256(source_path.read_bytes()).hexdigest()
                     != payload.get("source_sha256")
                 ):
-                    manifest.warnings.append(
-                        f"{prefix}:derived_evidence:source_hash_mismatch"
-                    )
+                    manifest.warnings.append(f"{prefix}:derived_evidence:source_hash_mismatch")
                     continue
                 expected_files = {
                     str(item.get("file")): str(item.get("content_sha256"))
-                    for item in (
-                        payload.get("chunks") or payload.get("members") or []
-                    )
+                    for item in (payload.get("chunks") or payload.get("members") or [])
                 }
                 actual_files = {
                     item.relative_path: item.content_hash
@@ -321,9 +313,7 @@ class RepositoryAnalysisPipeline:
                     actual_files.get(path) != content_hash
                     for path, content_hash in expected_files.items()
                 ):
-                    manifest.warnings.append(
-                        f"{prefix}:derived_evidence:content_hash_mismatch"
-                    )
+                    manifest.warnings.append(f"{prefix}:derived_evidence:content_hash_mismatch")
                     continue
                 derived_replacements.append(
                     {
@@ -333,19 +323,13 @@ class RepositoryAnalysisPipeline:
                         "kind": payload.get("kind"),
                     }
                 )
-        skipped_paths = {
-            item.get("path") for item in manifest.skipped_files
-        }
+        skipped_paths = {item.get("path") for item in manifest.skipped_files}
         derived_replacements = [
-            item
-            for item in derived_replacements
-            if item["source_path"] in skipped_paths
+            item for item in derived_replacements if item["source_path"] in skipped_paths
         ]
         resolved_paths = {item["source_path"] for item in derived_replacements}
         unresolved_skipped = [
-            item
-            for item in manifest.skipped_files
-            if item.get("path") not in resolved_paths
+            item for item in manifest.skipped_files if item.get("path") not in resolved_paths
         ]
         answer_quality_count = sum(
             bool(item.details.get("answer_quality_evaluated"))
@@ -364,16 +348,14 @@ class RepositoryAnalysisPipeline:
                 "unresolved_skipped_file_count": len(unresolved_skipped),
                 "evaluation_cases": len(manifest.evaluation_cases),
                 "evaluation_scenarios": sum(
-                    item.scenario_type is not None
-                    for item in manifest.evaluation_cases
+                    item.scenario_type is not None for item in manifest.evaluation_cases
                 ),
                 "evaluation_evidence_integrity_passed": sum(
                     item.passed for item in manifest.evaluation_results
                 ),
                 "evaluation_answer_quality_executed": answer_quality_count,
                 "evaluation_answer_quality_passed": sum(
-                    item.passed
-                    and bool(item.details.get("answer_quality_evaluated"))
+                    item.passed and bool(item.details.get("answer_quality_evaluated"))
                     for item in manifest.evaluation_results
                 ),
                 "evaluation_model_metrics": evaluation_metrics,
@@ -401,9 +383,7 @@ class RepositoryAnalysisPipeline:
                 symbols_by_file.setdefault(symbol.relative_path, []).append(symbol)
 
         selected_manifest_files = [
-            file
-            for file in manifest.files
-            if file.relative_path in selected_files
+            file for file in manifest.files if file.relative_path in selected_files
         ]
         for file_index, file in enumerate(selected_manifest_files):
             if remaining <= 0:
@@ -478,9 +458,7 @@ class RepositoryAnalysisPipeline:
                 batch_key = f"{key}:batch:{batch_index}"
                 tasks.append(
                     {
-                        "task_id": str(
-                            uuid.uuid5(manifest.snapshot_id, batch_key)
-                        ),
+                        "task_id": str(uuid.uuid5(manifest.snapshot_id, batch_key)),
                         "key": batch_key,
                         "purpose": (
                             "내부 개발 JAR의 실제 클래스·메서드·호출·설정·"
@@ -561,16 +539,25 @@ class RepositoryAnalysisPipeline:
                 fingerprint=fingerprint,
                 planned_task_count=len(tasks),
             )
-            restored_tasks = self.checkpoint_store.restore(checkpoint, tasks)
+            retry_exhausted = os.getenv(
+                "REPO_ANALYSIS_RETRY_EXHAUSTED_CHECKPOINT_TASKS",
+                "false",
+            ).casefold() in {"1", "true", "yes", "on"}
+            if retry_exhausted:
+                restored_tasks = self.checkpoint_store.restore(
+                    checkpoint,
+                    tasks,
+                    retry_exhausted=True,
+                )
+            else:
+                restored_tasks = self.checkpoint_store.restore(checkpoint, tasks)
             manifest.metrics.update(
                 {
                     "analysis_checkpoint_id": str(checkpoint),
                     "analysis_checkpoint_fingerprint": fingerprint,
                 }
             )
-        seen_claims: set[
-            tuple[str, tuple[tuple[str, int, int, str | None], ...]]
-        ] = set()
+        seen_claims: set[tuple[str, tuple[tuple[str, int, int, str | None], ...]]] = set()
         for task in tasks:
             restored = restored_tasks.get(str(task["task_id"]))
             if restored is not None:
@@ -596,35 +583,19 @@ class RepositoryAnalysisPipeline:
                     accepted_claims += 1
                     totals["unknowns"] += len(claim.unknowns)
                 remaining_claims -= accepted_claims
-                totals["requests"] += int(
-                    task_outcome.get("model_requests", 0)
-                )
-                totals["latency_ms"] += int(
-                    task_outcome.get("model_latency_ms", 0)
-                )
-                totals["prompt_tokens"] += int(
-                    task_outcome.get("model_prompt_tokens", 0)
-                )
-                totals["completion_tokens"] += int(
-                    task_outcome.get("model_completion_tokens", 0)
-                )
+                totals["requests"] += int(task_outcome.get("model_requests", 0))
+                totals["latency_ms"] += int(task_outcome.get("model_latency_ms", 0))
+                totals["prompt_tokens"] += int(task_outcome.get("model_prompt_tokens", 0))
+                totals["completion_tokens"] += int(task_outcome.get("model_completion_tokens", 0))
                 totals["accepted"] += accepted_claims
-                totals["rejected"] += int(
-                    task_outcome.get("claims_rejected", 0)
-                )
+                totals["rejected"] += int(task_outcome.get("claims_rejected", 0))
                 contradictions = task_outcome.get("contradictions", [])
                 missing = task_outcome.get("missing_knowledge", [])
                 totals["contradictions"] += (
-                    len(contradictions)
-                    if isinstance(contradictions, list)
-                    else 1
+                    len(contradictions) if isinstance(contradictions, list) else 1
                 )
-                totals["missing_knowledge"] += (
-                    len(missing) if isinstance(missing, list) else 1
-                )
-                totals["failed_tasks"] += int(
-                    bool(task_outcome.get("request_failures_exhausted"))
-                )
+                totals["missing_knowledge"] += len(missing) if isinstance(missing, list) else 1
+                totals["failed_tasks"] += int(bool(task_outcome.get("request_failures_exhausted")))
                 if task_outcome["status"] != "SOURCE_EXTRACTED":
                     totals["unresolved_tasks"] += 1
                 if task_outcome.get("failure_code") == "CLAIM_LIMIT_REACHED":
@@ -633,16 +604,10 @@ class RepositoryAnalysisPipeline:
                 restored_task_count += 1
                 continue
             selected = set(task["files"])
-            task_symbols = [
-                item for item in manifest.symbols if item.relative_path in selected
-            ]
-            task_relations = [
-                item for item in manifest.relations if item.relative_path in selected
-            ]
+            task_symbols = [item for item in manifest.symbols if item.relative_path in selected]
+            task_relations = [item for item in manifest.relations if item.relative_path in selected]
             task_configs = [
-                item
-                for item in manifest.configurations
-                if item.relative_path in selected
+                item for item in manifest.configurations if item.relative_path in selected
             ]
             task_dependencies = [
                 item for item in manifest.dependencies if item.relative_path in selected
@@ -709,9 +674,7 @@ class RepositoryAnalysisPipeline:
                     "task_id": task["task_id"],
                     "analysis_unit": task["key"],
                     "artifact": (
-                        task["key"]
-                        .split(":batch:", 1)[0]
-                        .removeprefix("jar:")
+                        task["key"].split(":batch:", 1)[0].removeprefix("jar:")
                         if task["key"].startswith("jar:")
                         else None
                     ),
@@ -778,9 +741,10 @@ class RepositoryAnalysisPipeline:
                         if attempt == 0
                         else (
                             "이전 응답이 실패했습니다. 범위를 줄여 검증 가능한 "
-                            "핵심 Claim만 반환하세요."
+                            "핵심 Claim을 최대 2개만 간결하게 반환하세요."
                         )
                     ),
+                    "max_claims": 5 if attempt == 0 else 2,
                 }
                 try:
                     totals["requests"] += 1
@@ -808,12 +772,8 @@ class RepositoryAnalysisPipeline:
                     totals["prompt_tokens"] += invocation.prompt_tokens or 0
                     totals["completion_tokens"] += invocation.completion_tokens or 0
                     task_outcome["model_latency_ms"] += invocation.latency_ms
-                    task_outcome["model_prompt_tokens"] += (
-                        invocation.prompt_tokens or 0
-                    )
-                    task_outcome["model_completion_tokens"] += (
-                        invocation.completion_tokens or 0
-                    )
+                    task_outcome["model_prompt_tokens"] += invocation.prompt_tokens or 0
+                    task_outcome["model_completion_tokens"] += invocation.completion_tokens or 0
                     claims_payload = invocation.payload.get("claims")
                     if not isinstance(claims_payload, list):
                         raise ValueError("claims must be an array")
@@ -843,38 +803,24 @@ class RepositoryAnalysisPipeline:
                                 source_hash=str(value["source_hash"]),
                                 start_line=int(value["start_line"]),
                                 end_line=int(value["end_line"]),
-                                symbol=(
-                                    str(value["symbol"])
-                                    if value.get("symbol")
-                                    else None
-                                ),
+                                symbol=(str(value["symbol"]) if value.get("symbol") else None),
                             )
                             for value in item.get("evidence", [])
                         ]
                         claim = Claim(
                             claim=str(item["claim"]),
-                            claim_type=str(
-                                item.get("claim_type", "DESIGN_INFERENCE")
-                            ),
+                            claim_type=str(item.get("claim_type", "DESIGN_INFERENCE")),
                             component=str(item.get("component", task["key"])),
                             evidence=evidence,
                             related_configs=self._related_config_values(
                                 item.get("related_configs", [])
                             ),
-                            assumptions=[
-                                str(value)
-                                for value in item.get("assumptions", [])
-                            ],
-                            unknowns=[
-                                str(value) for value in item.get("unknowns", [])
-                            ],
+                            assumptions=[str(value) for value in item.get("assumptions", [])],
+                            unknowns=[str(value) for value in item.get("unknowns", [])],
                             counter_evidence=[
-                                str(value)
-                                for value in item.get("counter_evidence", [])
+                                str(value) for value in item.get("counter_evidence", [])
                             ],
-                            confidence=Confidence(
-                                str(item.get("confidence", "LOW"))
-                            ),
+                            confidence=Confidence(str(item.get("confidence", "LOW"))),
                         )
                         claim_key = (
                             claim.claim,
@@ -913,9 +859,7 @@ class RepositoryAnalysisPipeline:
                 totals["contradictions"] += (
                     len(contradictions) if isinstance(contradictions, list) else 1
                 )
-                totals["missing_knowledge"] += (
-                    len(missing) if isinstance(missing, list) else 1
-                )
+                totals["missing_knowledge"] += len(missing) if isinstance(missing, list) else 1
                 needs_follow_up = bool(contradictions or missing)
                 task_outcome["status"] = (
                     "SOURCE_EXTRACTED"
@@ -952,9 +896,7 @@ class RepositoryAnalysisPipeline:
                 "llm_prompt_tokens": totals["prompt_tokens"],
                 "llm_completion_tokens": totals["completion_tokens"],
                 "llm_tasks": len(tasks),
-                "llm_tasks_executed": sum(
-                    1 for item in outcomes if item["attempts"] > 0
-                ),
+                "llm_tasks_executed": sum(1 for item in outcomes if item["attempts"] > 0),
                 "llm_tasks_skipped_claim_limit": totals["skipped_claim_limit"],
                 "llm_failed_tasks": totals["failed_tasks"],
                 "llm_unresolved_tasks": totals["unresolved_tasks"],
@@ -1006,11 +948,7 @@ class RepositoryAnalysisPipeline:
                         references.append(reference)
             configurations = sorted(
                 {
-                    (
-                        str(value["key"])
-                        if isinstance(value, dict)
-                        else value
-                    )
+                    (str(value["key"]) if isinstance(value, dict) else value)
                     for claim in claims
                     for value in claim.related_configs
                 }
@@ -1042,9 +980,7 @@ class RepositoryAnalysisPipeline:
                     else Confidence.HIGH
                 )
             )
-            detail_lines = [
-                f"- [{claim.claim_type}] {claim.claim}" for claim in claims
-            ]
+            detail_lines = [f"- [{claim.claim_type}] {claim.claim}" for claim in claims]
             if configurations:
                 detail_lines.append(f"- 관련 설정: {', '.join(configurations)}")
             if dependencies:
@@ -1080,9 +1016,7 @@ class RepositoryAnalysisPipeline:
         references = [evidence for claim in verified for evidence in claim.evidence]
         component_names = [item.display_name for item in manifest.components]
         component_references = [
-            reference
-            for component in manifest.components
-            for reference in component.evidence
+            reference for component in manifest.components for reference in component.evidence
         ]
         lifecycle_steps = [
             f"{item.title}: {item.description}"
@@ -1103,6 +1037,7 @@ class RepositoryAnalysisPipeline:
                 if relation.relation_type in relation_types
                 and relation.relative_path in source_hashes
             ][:100]
+
         items = [
             KnowledgeItem(
                 knowledge_type="ARCHITECTURE",
@@ -1165,9 +1100,7 @@ class RepositoryAnalysisPipeline:
             )
         if manifest.lifecycle_nodes:
             lifecycle_references = [
-                reference
-                for node in manifest.lifecycle_nodes
-                for reference in node.evidence
+                reference for node in manifest.lifecycle_nodes for reference in node.evidence
             ]
             items.append(
                 KnowledgeItem(
@@ -1178,8 +1111,7 @@ class RepositoryAnalysisPipeline:
                         f"{len(manifest.lifecycle_edges)}개 연결로 수행 흐름을 구성했습니다."
                     ),
                     detail=(
-                        "직접 호출로 확인된 연결과 구조상 추론한 다음 단계를 "
-                        "구분해 저장했습니다."
+                        "직접 호출로 확인된 연결과 구조상 추론한 다음 단계를 구분해 저장했습니다."
                     ),
                     processing_steps=lifecycle_steps,
                     components=[

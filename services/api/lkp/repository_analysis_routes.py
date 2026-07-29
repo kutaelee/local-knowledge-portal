@@ -74,9 +74,10 @@ def request_repository_analysis(
     db: Session = Depends(get_db),
 ) -> dict:
     source_path = _normalize_source_path(request.source_path)
-    source_root = db.execute(
-        text(
-            """
+    source_root = (
+        db.execute(
+            text(
+                """
             SELECT id, name, canonical_path
             FROM source_root
             WHERE enabled = true AND read_only = true
@@ -87,16 +88,17 @@ def request_repository_analysis(
             ORDER BY length(canonical_path) DESC
             LIMIT 1
             """
-        ),
-        {"source_path": source_path},
-    ).mappings().one_or_none()
+            ),
+            {"source_path": source_path},
+        )
+        .mappings()
+        .one_or_none()
+    )
     if source_root is None:
         raise HTTPException(422, "허용된 읽기 전용 원본 경로 안의 폴더를 입력해 주세요.")
 
     request_id = uuid.uuid4()
-    digest = hashlib.sha256(
-        f"{source_root['id']}:{source_path}:{request_id}".encode()
-    ).hexdigest()
+    digest = hashlib.sha256(f"{source_root['id']}:{source_path}:{request_id}".encode()).hexdigest()
     job = enqueue(
         db,
         key=f"repository-analysis:{digest}"[:128],
@@ -131,18 +133,22 @@ def get_repository_analysis_request(
     job_id: uuid.UUID,
     db: Session = Depends(get_db),
 ) -> dict:
-    row = db.execute(
-        text(
-            """
+    row = (
+        db.execute(
+            text(
+                """
             SELECT id, canonical_path AS source_path, status, attempt_count,
                    max_attempts, leased_by, started_at, finished_at,
                    error_type, error_message, error_details, created_at, updated_at
             FROM ingest_job
             WHERE id = :job_id AND job_type = 'repository_analysis'
             """
-        ),
-        {"job_id": job_id},
-    ).mappings().one_or_none()
+            ),
+            {"job_id": job_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
     if row is None:
         raise HTTPException(404, "분석 요청을 찾을 수 없습니다.")
     return dict(row)
@@ -157,7 +163,7 @@ def list_repository_projects(db: Session = Depends(get_db)) -> dict:
                p.updated_at, s.id AS snapshot_id, s.snapshot_name, s.source_hash,
                s.git_commit, s.git_branch, s.dirty_worktree, s.languages,
                s.build_systems, s.file_count, s.status AS analysis_status,
-               s.created_at AS analyzed_at, s.stale,
+               COALESCE(j.finished_at, s.created_at) AS analyzed_at, s.stale,
                COALESCE(j.metrics, '{}'::jsonb) AS metrics,
                COALESCE(jsonb_array_length(j.warnings), 0) AS warning_count
         FROM repository_project p
@@ -168,7 +174,7 @@ def list_repository_projects(db: Session = Depends(get_db)) -> dict:
           LIMIT 1
         ) s ON true
         LEFT JOIN LATERAL (
-          SELECT metrics, warnings FROM repository_analysis_job raj
+          SELECT metrics, warnings, finished_at FROM repository_analysis_job raj
           WHERE raj.snapshot_id = s.id
           ORDER BY raj.started_at DESC
           LIMIT 1
@@ -181,13 +187,19 @@ def list_repository_projects(db: Session = Depends(get_db)) -> dict:
 
 @router.get("/projects/{project_id}")
 def get_repository_project(project_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
-    project = db.execute(
-        text(
-            """
+    project = (
+        db.execute(
+            text(
+                """
             SELECT p.*, s.id AS snapshot_id, s.snapshot_name, s.source_hash,
                    s.git_commit, s.git_branch, s.dirty_worktree, s.languages,
                    s.build_systems, s.file_count, s.status AS analysis_status,
-                   s.created_at AS analyzed_at
+                   COALESCE(
+                     (SELECT max(j.finished_at)
+                      FROM repository_analysis_job j
+                      WHERE j.snapshot_id = s.id),
+                     s.created_at
+                   ) AS analyzed_at
             FROM repository_project p
             LEFT JOIN LATERAL (
               SELECT * FROM repository_snapshot rs
@@ -196,21 +208,19 @@ def get_repository_project(project_id: uuid.UUID, db: Session = Depends(get_db))
             ) s ON true
             WHERE p.id = :project_id
             """
-        ),
-        {"project_id": project_id},
-    ).mappings().one_or_none()
+            ),
+            {"project_id": project_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
     if project is None:
         raise HTTPException(404, "repository project not found")
     snapshot_id = project["snapshot_id"]
     counts = {}
     relation_groups = []
     dependency_groups = []
-    flow_items = []
-    dependency_items = []
-    components = []
-    lifecycle_nodes = []
-    lifecycle_edges = []
-    dependency_usages = []
+    report = None
     if snapshot_id:
         counts = dict(
             db.execute(
@@ -244,18 +254,58 @@ def get_repository_project(project_id: uuid.UUID, db: Session = Depends(get_db))
                        WHERE snapshot_id = :snapshot_id AND searchable
                          AND validation_status = 'ADDITIONAL_DATA_NEEDED')
                        AS knowledge_additional_data_needed,
-                      (SELECT count(*) FROM repository_evaluation_result
-                       WHERE snapshot_id = :snapshot_id) AS evaluation_results,
-                      (SELECT count(*) FROM repository_evaluation_result
-                       WHERE snapshot_id = :snapshot_id AND passed) AS evaluation_passed,
-                      (SELECT count(*) FROM repository_evaluation_case c
-                       JOIN repository_evaluation_result r ON r.case_id = c.id
-                       WHERE r.snapshot_id = :snapshot_id
-                         AND c.scenario_type IS NOT NULL) AS evaluation_scenarios
+                      (SELECT count(*)
+                       FROM (
+                         SELECT DISTINCT c.question, c.question_type,
+                                COALESCE(c.scenario_type, '')
+                         FROM repository_evaluation_case c
+                         JOIN repository_evaluation_result r ON r.case_id = c.id
+                         WHERE r.snapshot_id = :snapshot_id
+                           AND r.created_at >= COALESCE(
+                             (SELECT max(j.started_at)
+                              FROM repository_analysis_job j
+                              WHERE j.snapshot_id = :snapshot_id),
+                             r.created_at
+                           )
+                       ) distinct_case) AS evaluation_results,
+                      (SELECT count(*)
+                       FROM (
+                         SELECT DISTINCT ON (
+                           c.question, c.question_type, COALESCE(c.scenario_type, '')
+                         ) r.passed
+                         FROM repository_evaluation_case c
+                         JOIN repository_evaluation_result r ON r.case_id = c.id
+                         WHERE r.snapshot_id = :snapshot_id
+                           AND r.created_at >= COALESCE(
+                             (SELECT max(j.started_at)
+                              FROM repository_analysis_job j
+                              WHERE j.snapshot_id = :snapshot_id),
+                             r.created_at
+                           )
+                         ORDER BY c.question, c.question_type,
+                                  COALESCE(c.scenario_type, ''), r.created_at DESC
+                       ) latest
+                       WHERE latest.passed) AS evaluation_passed,
+                      (SELECT count(*)
+                       FROM (
+                         SELECT DISTINCT c.question, c.question_type, c.scenario_type
+                         FROM repository_evaluation_case c
+                         JOIN repository_evaluation_result r ON r.case_id = c.id
+                         WHERE r.snapshot_id = :snapshot_id
+                           AND c.scenario_type IS NOT NULL
+                           AND r.created_at >= COALESCE(
+                             (SELECT max(j.started_at)
+                              FROM repository_analysis_job j
+                              WHERE j.snapshot_id = :snapshot_id),
+                             r.created_at
+                           )
+                       ) distinct_scenario) AS evaluation_scenarios
                     """
                 ),
                 {"snapshot_id": snapshot_id},
-            ).mappings().one()
+            )
+            .mappings()
+            .one()
         )
         relation_groups = _rows(
             db,
@@ -279,42 +329,72 @@ def get_repository_project(project_id: uuid.UUID, db: Session = Depends(get_db))
             """,
             {"snapshot_id": snapshot_id},
         )
-        flow_items = _rows(
-            db,
-            """
-            SELECT r.relative_path AS source_file,
-                   target.relative_path AS target_file,
-                   r.relation_type AS relation_type,
-                   count(*) AS count
-            FROM repository_source_relation r
-            LEFT JOIN LATERAL (
-              SELECT s.relative_path
-              FROM repository_source_symbol s
-              WHERE s.snapshot_id = r.snapshot_id
-                AND s.symbol = r.target_symbol
-              ORDER BY s.relative_path
-              LIMIT 1
-            ) target ON true
-            WHERE r.snapshot_id = :snapshot_id
-            GROUP BY r.relative_path, target.relative_path, r.relation_type
-            ORDER BY count(*) DESC, r.relative_path, target.relative_path NULLS LAST
-            LIMIT 40
-            """,
-            {"snapshot_id": snapshot_id},
+        report = (
+            db.execute(
+                text(
+                    """
+                SELECT k.id, k.knowledge_type, k.title, k.summary, k.detail,
+                       k.processing_steps, k.components, k.configurations,
+                       k.dependencies, k.source_references, k.validation_status,
+                       k.confidence, k.unknowns, k.analysis_version,
+                       k.prompt_version, k.created_at
+                FROM repository_knowledge_item k
+                WHERE k.snapshot_id = :snapshot_id
+                  AND k.knowledge_type = 'REPOSITORY_OVERVIEW'
+                  AND k.searchable = true
+                  AND k.validation_status NOT IN ('REJECTED', 'STALE')
+                ORDER BY k.created_at DESC
+                LIMIT 1
+                """
+                ),
+                {"snapshot_id": snapshot_id},
+            )
+            .mappings()
+            .one_or_none()
         )
-        dependency_items = _rows(
-            db,
+    return {
+        "project": dict(project),
+        "counts": counts,
+        "report": dict(report) if report is not None else None,
+        "visualization": {
+            "relation_groups": relation_groups,
+            "dependency_groups": dependency_groups,
+            "flow_items": [],
+            "dependency_items": [],
+            "components": [],
+            "lifecycle": {
+                "nodes": [],
+                "edges": [],
+            },
+            "dependency_usages": [],
+        },
+    }
+
+
+@router.get("/projects/{project_id}/visualization")
+def get_repository_visualization(
+    project_id: uuid.UUID,
+    section: Literal["architecture", "logic", "dependencies"] = Query(),
+    db: Session = Depends(get_db),
+) -> dict:
+    snapshot_id = db.execute(
+        text(
             """
-            SELECT name, version, artifact_type, classification, relative_path,
-                   scope, analysis_status
-            FROM repository_dependency_artifact
-            WHERE snapshot_id = :snapshot_id
-            ORDER BY name, version NULLS LAST
-            LIMIT 100
-            """,
-            {"snapshot_id": snapshot_id},
-        )
-        components = _rows(
+            SELECT id
+            FROM repository_snapshot
+            WHERE project_id = :project_id
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"project_id": project_id},
+    ).scalar_one_or_none()
+    if snapshot_id is None:
+        raise HTTPException(404, "repository snapshot not found")
+
+    result: dict = {"section": section, "snapshot_id": snapshot_id}
+    if section == "architecture":
+        result["components"] = _rows(
             db,
             """
             SELECT component_key AS key, display_name, component_type,
@@ -335,57 +415,157 @@ def get_repository_project(project_id: uuid.UUID, db: Session = Depends(get_db))
             """,
             {"snapshot_id": snapshot_id},
         )
-        lifecycle_nodes = _rows(
+    elif section == "logic":
+        result["lifecycle"] = {
+            "nodes": _rows(
+                db,
+                """
+                SELECT node_key AS key, phase, title, description, component_key,
+                       sequence, validation_status, confidence
+                FROM repository_lifecycle_node
+                WHERE snapshot_id = :snapshot_id
+                ORDER BY sequence
+                """,
+                {"snapshot_id": snapshot_id},
+            ),
+            "edges": _rows(
+                db,
+                """
+                SELECT source_key, target_key, relation_type, label, provenance
+                FROM repository_lifecycle_edge
+                WHERE snapshot_id = :snapshot_id
+                ORDER BY
+                  CASE provenance WHEN 'STATIC_CONFIRMED' THEN 0 ELSE 1 END,
+                  source_key, target_key
+                """,
+                {"snapshot_id": snapshot_id},
+            ),
+        }
+    else:
+        result["components"] = _rows(
             db,
             """
-            SELECT node_key AS key, phase, title, description, component_key,
-                   sequence, validation_status, confidence
-            FROM repository_lifecycle_node
+            SELECT component_key AS key, display_name, component_type,
+                   responsibility, cardinality(relative_paths) AS file_count,
+                   cardinality(entry_points) AS entry_point_count,
+                   validation_status, confidence
+            FROM repository_component
             WHERE snapshot_id = :snapshot_id
-            ORDER BY sequence
+            ORDER BY display_name
             """,
             {"snapshot_id": snapshot_id},
         )
-        lifecycle_edges = _rows(
+        result["dependencies"] = _rows(
             db,
             """
-            SELECT source_key, target_key, relation_type, label, provenance
-            FROM repository_lifecycle_edge
+            SELECT name, version, artifact_type, classification, relative_path,
+                   scope, analysis_status
+            FROM repository_dependency_artifact
             WHERE snapshot_id = :snapshot_id
-            ORDER BY
-              CASE provenance WHEN 'STATIC_CONFIRMED' THEN 0 ELSE 1 END,
-              source_key, target_key
+            ORDER BY name, version NULLS LAST
+            LIMIT 100
             """,
             {"snapshot_id": snapshot_id},
         )
-        dependency_usages = _rows(
+        result["usages"] = _rows(
             db,
             """
-            SELECT dependency_name, component_key, usage_type, provenance,
+            WITH visible_dependency AS (
+              SELECT DISTINCT name
+              FROM repository_dependency_artifact
+              WHERE snapshot_id = :snapshot_id
+              ORDER BY name
+              LIMIT 100
+            )
+            SELECT u.dependency_name, u.component_key, u.usage_type, u.provenance,
                    count(*) AS occurrence_count
-            FROM repository_dependency_usage
-            WHERE snapshot_id = :snapshot_id
-            GROUP BY dependency_name, component_key, usage_type, provenance
-            ORDER BY occurrence_count DESC, dependency_name, component_key
+            FROM repository_dependency_usage u
+            JOIN visible_dependency d ON d.name = u.dependency_name
+            WHERE u.snapshot_id = :snapshot_id
+            GROUP BY u.dependency_name, u.component_key, u.usage_type, u.provenance
+            ORDER BY occurrence_count DESC, u.dependency_name, u.component_key
+            LIMIT 1000
             """,
             {"snapshot_id": snapshot_id},
         )
-    return {
-        "project": dict(project),
-        "counts": counts,
-        "visualization": {
-            "relation_groups": relation_groups,
-            "dependency_groups": dependency_groups,
-            "flow_items": flow_items,
-            "dependency_items": dependency_items,
-            "components": components,
-            "lifecycle": {
-                "nodes": lifecycle_nodes,
-                "edges": lifecycle_edges,
-            },
-            "dependency_usages": dependency_usages,
-        },
-    }
+    return result
+
+
+@router.get("/projects/{project_id}/knowledge")
+def list_repository_knowledge(
+    project_id: uuid.UUID,
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    rows = _rows(
+        db,
+        """
+        SELECT k.id, k.knowledge_type, k.title, k.summary, k.detail,
+               k.processing_steps, k.components, k.configurations,
+               k.dependencies, k.source_references, k.validation_status,
+               k.confidence, k.unknowns, k.analysis_version, k.prompt_version,
+               k.created_at
+        FROM repository_knowledge_item k
+        JOIN repository_snapshot s ON s.id = k.snapshot_id
+        WHERE s.project_id = :project_id
+          AND s.stale = false
+          AND k.searchable = true
+          AND k.validation_status != 'REJECTED'
+        ORDER BY k.created_at DESC, k.title
+        LIMIT :limit OFFSET :offset
+        """,
+        {"project_id": project_id, "limit": limit, "offset": offset},
+    )
+    total = db.execute(
+        text(
+            """
+            SELECT count(*)
+            FROM repository_knowledge_item k
+            JOIN repository_snapshot s ON s.id = k.snapshot_id
+            WHERE s.project_id = :project_id
+              AND s.stale = false
+              AND k.searchable = true
+              AND k.validation_status != 'REJECTED'
+            """
+        ),
+        {"project_id": project_id},
+    ).scalar_one()
+    return {"items": rows, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/projects/{project_id}/configurations")
+def list_repository_configurations(
+    project_id: uuid.UUID,
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    rows = _rows(
+        db,
+        """
+        SELECT c.config_key, c.relative_path, c.declaration_line,
+               c.referenced_by, c.has_default, c.runtime_value_verified
+        FROM repository_configuration_reference c
+        JOIN repository_snapshot s ON s.id = c.snapshot_id
+        WHERE s.project_id = :project_id AND s.stale = false
+        ORDER BY c.config_key, c.relative_path, c.declaration_line
+        LIMIT :limit OFFSET :offset
+        """,
+        {"project_id": project_id, "limit": limit, "offset": offset},
+    )
+    total = db.execute(
+        text(
+            """
+            SELECT count(*)
+            FROM repository_configuration_reference c
+            JOIN repository_snapshot s ON s.id = c.snapshot_id
+            WHERE s.project_id = :project_id AND s.stale = false
+            """
+        ),
+        {"project_id": project_id},
+    ).scalar_one()
+    return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/projects/{project_id}/status")
@@ -436,20 +616,34 @@ def list_repository_evaluations(
     rows = _rows(
         db,
         """
-        SELECT c.id, c.question, c.question_type, c.expected_evidence,
-               c.required_files, c.acceptable_answer, c.forbidden_assertions,
-               c.grading_criteria, c.difficulty, c.scenario_type,
-               r.snapshot_id, r.passed, r.score, r.failure_category,
-               r.details, r.duration_ms, r.created_at
-        FROM repository_evaluation_case c
-        JOIN repository_evaluation_result r ON r.case_id = c.id
-        JOIN repository_snapshot s ON s.id = r.snapshot_id
-        WHERE c.project_id = :project_id
-          AND (
-            CAST(:snapshot_id AS uuid) IS NULL OR
-            r.snapshot_id = CAST(:snapshot_id AS uuid)
-          )
-        ORDER BY r.created_at DESC, c.scenario_type NULLS FIRST, c.question
+        SELECT *
+        FROM (
+          SELECT DISTINCT ON (
+                   c.question, c.question_type, COALESCE(c.scenario_type, '')
+                 )
+                 c.id, c.question, c.question_type, c.expected_evidence,
+                 c.required_files, c.acceptable_answer, c.forbidden_assertions,
+                 c.grading_criteria, c.difficulty, c.scenario_type,
+                 r.snapshot_id, r.passed, r.score, r.failure_category,
+                 r.details, r.duration_ms, r.created_at
+          FROM repository_evaluation_case c
+          JOIN repository_evaluation_result r ON r.case_id = c.id
+          JOIN repository_snapshot s ON s.id = r.snapshot_id
+          WHERE c.project_id = :project_id
+            AND (
+              CAST(:snapshot_id AS uuid) IS NULL OR
+              r.snapshot_id = CAST(:snapshot_id AS uuid)
+            )
+            AND r.created_at >= COALESCE(
+              (SELECT max(j.started_at)
+               FROM repository_analysis_job j
+               WHERE j.snapshot_id = r.snapshot_id),
+              r.created_at
+            )
+          ORDER BY c.question, c.question_type, COALESCE(c.scenario_type, ''),
+                   r.created_at DESC
+        ) latest
+        ORDER BY created_at DESC, scenario_type NULLS FIRST, question
         LIMIT 200
         """,
         {"project_id": project_id, "snapshot_id": snapshot_id},
@@ -460,14 +654,12 @@ def list_repository_evaluations(
         "scope": (
             "support_answer_quality"
             if any(
-                bool((item.get("details") or {}).get("answer_quality_evaluated"))
-                for item in rows
+                bool((item.get("details") or {}).get("answer_quality_evaluated")) for item in rows
             )
             else "evidence_integrity"
         ),
         "answer_quality_evaluated": any(
-            bool((item.get("details") or {}).get("answer_quality_evaluated"))
-            for item in rows
+            bool((item.get("details") or {}).get("answer_quality_evaluated")) for item in rows
         ),
     }
 

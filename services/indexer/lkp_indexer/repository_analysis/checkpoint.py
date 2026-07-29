@@ -94,9 +94,7 @@ def _claim_from_payload(payload: dict[str, Any]) -> Claim:
         related_configs=list(payload.get("related_configs", [])),
         assumptions=[str(item) for item in payload.get("assumptions", [])],
         unknowns=[str(item) for item in payload.get("unknowns", [])],
-        counter_evidence=[
-            str(item) for item in payload.get("counter_evidence", [])
-        ],
+        counter_evidence=[str(item) for item in payload.get("counter_evidence", [])],
         confidence=Confidence(str(payload.get("confidence", "LOW"))),
         validation_status=ValidationStatus.ADDITIONAL_DATA_NEEDED,
         validation_errors=[],
@@ -160,6 +158,8 @@ class RepositoryAnalysisCheckpointStore:
         self,
         checkpoint: uuid.UUID,
         tasks: list[dict[str, Any]],
+        *,
+        retry_exhausted: bool = False,
     ) -> dict[str, tuple[dict[str, Any], list[Claim]]]:
         planned = {str(item["task_id"]): item for item in tasks}
         rows = self.session.execute(
@@ -179,22 +179,19 @@ class RepositoryAnalysisCheckpointStore:
             if task is None or row["status"] not in _TERMINAL_TASK_STATUSES:
                 continue
             outcome = dict(row["outcome"])
+            if retry_exhausted and outcome.get("request_failures_exhausted"):
+                continue
             for field in ("started_at", "finished_at"):
                 value = outcome.get(field)
                 if isinstance(value, str):
                     outcome[field] = datetime.fromisoformat(value)
-            if (
-                str(row["analysis_unit"]) != str(task["key"])
-                or sorted(outcome.get("source_files", []))
-                != sorted(task.get("files", []))
-            ):
+            if str(row["analysis_unit"]) != str(task["key"]) or sorted(
+                outcome.get("source_files", [])
+            ) != sorted(task.get("files", [])):
                 continue
             restored[task_id] = (
                 outcome,
-                [
-                    _claim_from_payload(dict(item))
-                    for item in list(row["claims"])
-                ],
+                [_claim_from_payload(dict(item)) for item in list(row["claims"])],
             )
         return restored
 

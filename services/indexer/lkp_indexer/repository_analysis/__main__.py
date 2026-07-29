@@ -44,9 +44,7 @@ def main() -> int:
         engine = create_engine(args.database_url)
         with Session(engine) as session:
             checkpoint_store = (
-                RepositoryAnalysisCheckpointStore(session)
-                if provider is not None
-                else None
+                RepositoryAnalysisCheckpointStore(session) if provider is not None else None
             )
             manifest = RepositoryAnalysisPipeline(
                 allowed_roots=args.allowed_root or [args.source_root],
@@ -55,16 +53,17 @@ def main() -> int:
                 evidence_roots=evidence_roots,
                 checkpoint_store=checkpoint_store,
             ).run(args.source_root)
-            persisted = RepositoryAnalysisStore(session).persist(
+            store = RepositoryAnalysisStore(session)
+            persisted = store.persist(
                 manifest,
                 category=args.category,
             )
-            if checkpoint_store is not None:
+            if checkpoint_store is not None and (
+                persisted or store.has_analysis(manifest)
+            ):
                 checkpoint_store.mark_promoted(
                     manifest,
-                    fingerprint=str(
-                        manifest.metrics["analysis_checkpoint_fingerprint"]
-                    ),
+                    fingerprint=str(manifest.metrics["analysis_checkpoint_fingerprint"]),
                 )
     else:
         manifest = RepositoryAnalysisPipeline(
@@ -86,6 +85,7 @@ def main() -> int:
                 "source_text_stored": False,
             },
             ensure_ascii=False,
+            default=str,
         )
     )
     return 0

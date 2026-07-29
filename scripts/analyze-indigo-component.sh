@@ -51,8 +51,12 @@ if [[ -n "$normalized_source" ]]; then
 fi
 port="${LKP_REPOSITORY_VLLM_PORT:-18000}"
 model_max_context="${LKP_REPOSITORY_VLLM_MAX_MODEL_LEN:-14000}"
+model_max_output="${LKP_REPOSITORY_MODEL_MAX_OUTPUT:-2048}"
 kv_cache_memory_bytes="${LKP_REPOSITORY_VLLM_KV_CACHE_MEMORY_BYTES:-1350000000}"
 max_num_batched_tokens="${LKP_REPOSITORY_VLLM_MAX_NUM_BATCHED_TOKENS:-256}"
+external_vllm="${LKP_REPOSITORY_EXTERNAL_VLLM:-false}"
+model_name="${LKP_REPOSITORY_MODEL_NAME:-qwen3.6-27b-mtp-q4-k-m}"
+model_quantization="${LKP_REPOSITORY_MODEL_QUANTIZATION:-Q4_K_M}"
 export LKP_REPOSITORY_VLLM_MAX_MODEL_LEN="$model_max_context"
 export LKP_REPOSITORY_VLLM_KV_CACHE_MEMORY_BYTES="$kv_cache_memory_bytes"
 export LKP_REPOSITORY_VLLM_MAX_NUM_BATCHED_TOKENS="$max_num_batched_tokens"
@@ -63,6 +67,9 @@ run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 server_log="$server_log_dir/qwen36-mtp1-${component}-${run_stamp}.log"
 result_file="$result_dir/${component}-${run_stamp}.json"
 server_pid=""
+if [[ "$external_vllm" == "true" ]]; then
+  server_log="${LKP_REPOSITORY_EXTERNAL_VLLM_LOG:-$server_log}"
+fi
 
 cleanup() {
   if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
@@ -75,23 +82,34 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"$repo_dir/scripts/check-repository-vllm-readiness.sh"
-"$repo_dir/scripts/run-gpu-repository-vllm.sh" >"$server_log" 2>&1 &
-server_pid=$!
+if [[ "$external_vllm" != "true" ]]; then
+  "$repo_dir/scripts/check-repository-vllm-readiness.sh"
+  "$repo_dir/scripts/run-gpu-repository-vllm.sh" >"$server_log" 2>&1 &
+  server_pid=$!
+fi
 
 ready=0
-for _ in $(seq 1 240); do
-  if curl --fail --silent --max-time 2 "http://127.0.0.1:${port}/health" >/dev/null; then
-    ready=1
-    break
-  fi
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    break
-  fi
-  sleep 2
-done
+if [[ "$external_vllm" == "true" ]]; then
+  # The Windows-native server is intentionally loopback-only. WSL localhost
+  # is a separate network namespace, so the application-container probe below
+  # is the authoritative cross-runtime readiness check.
+  ready=1
+else
+  for _ in $(seq 1 240); do
+    if curl --fail --silent --max-time 2 "http://127.0.0.1:${port}/health" >/dev/null; then
+      ready=1
+      break
+    fi
+    if [[ -n "$server_pid" ]] && ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 2
+  done
+fi
 if [[ "$ready" != "1" ]]; then
-  tail -n 120 "$server_log" >&2
+  if [[ -f "$server_log" ]]; then
+    tail -n 120 "$server_log" >&2
+  fi
   echo "repository vLLM failed readiness for $component" >&2
   exit 1
 fi
@@ -111,14 +129,16 @@ docker compose \
   run --rm --no-deps \
   -e REPO_ANALYSIS_MODEL_ENABLED=true \
   -e "REPO_ANALYSIS_MODEL_BASE_URL=http://host.docker.internal:${port}/v1" \
-  -e REPO_ANALYSIS_MODEL_NAME=qwen3.6-27b-mtp-q4-k-m \
-  -e REPO_ANALYSIS_MODEL_QUANTIZATION=Q4_K_M \
+  -e "REPO_ANALYSIS_MODEL_NAME=$model_name" \
+  -e "REPO_ANALYSIS_MODEL_QUANTIZATION=$model_quantization" \
   -e REPO_ANALYSIS_MODEL_MAX_CONCURRENCY=1 \
   -e "REPO_ANALYSIS_MODEL_MAX_CONTEXT=$model_max_context" \
   -e REPO_ANALYSIS_MODEL_INCLUDE_SOURCE_EXCERPTS=true \
   -e REPO_ANALYSIS_MODEL_MAX_SOURCE_CHARS=4500 \
   -e REPO_ANALYSIS_MODEL_TIMEOUT_SECONDS=300 \
-  -e REPO_ANALYSIS_MODEL_MAX_OUTPUT=2048 \
+  -e "REPO_ANALYSIS_MODEL_MAX_OUTPUT=$model_max_output" \
+  -e REPO_ANALYSIS_RETRY_EXHAUSTED_CHECKPOINT_TASKS=true \
+  -e REPO_ANALYSIS_DEFER_MODEL_EVALUATION=true \
   -v /mnt/c/Dev/Repos:/sources/windows-repositories:ro \
   api python -m lkp_indexer.repository_analysis \
   "$source_root" \

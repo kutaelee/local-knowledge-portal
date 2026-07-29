@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from lkp_indexer.repository_analysis import __main__ as repository_analysis_main
 from lkp_indexer.repository_analysis import provider as provider_module
 from lkp_indexer.repository_analysis.analyzers import ConfigurationAnalyzer, XmlAnalyzer
+from lkp_indexer.repository_analysis.design import _component_key, _humanize
 from lkp_indexer.repository_analysis.discovery import discover
 from lkp_indexer.repository_analysis.domain import (
     Claim,
@@ -20,6 +23,7 @@ from lkp_indexer.repository_analysis.domain import (
 )
 from lkp_indexer.repository_analysis.pipeline import RepositoryAnalysisPipeline
 from lkp_indexer.repository_analysis.provider import LocalModelProvider, ModelInvocation
+from lkp_indexer.repository_analysis.report import synthesize_repository_report
 from lkp_indexer.repository_analysis.validator import validate_claim
 from lkp_indexer.repository_embedding_reindex import embedding_text
 from lkp_indexer.repository_retrieval_evaluation import _expected_rank
@@ -76,8 +80,7 @@ def test_xml_analyzer_parses_escaped_euc_kr_declaration_without_stopping_reposit
     tmp_path: Path,
 ) -> None:
     content = (
-        '<?xml version=\\"1.0\\" encoding=\\"EUC-KR\\"?>'
-        '<beans><bean id="한글서비스"/></beans>'
+        '<?xml version=\\"1.0\\" encoding=\\"EUC-KR\\"?><beans><bean id="한글서비스"/></beans>'
     ).encode("euc-kr")
     path = tmp_path / "legacy.xml"
     path.write_bytes(content)
@@ -153,13 +156,17 @@ def test_pipeline_produces_verified_metadata_without_source_text(
         for item in manifest.knowledge_items
     )
     assert any(
-        item.knowledge_type == "COMPONENT" and item.summary
-        for item in manifest.knowledge_items
+        item.knowledge_type == "COMPONENT" and item.summary for item in manifest.knowledge_items
     )
+    overview = next(
+        item for item in manifest.knowledge_items if item.knowledge_type == "REPOSITORY_OVERVIEW"
+    )
+    assert overview.summary
+    assert "## 기술 구성" in overview.detail
+    assert overview.source_references
     assert manifest.claims
     assert all(
-        item.validation_status == ValidationStatus.SOURCE_VERIFIED
-        for item in manifest.claims
+        item.validation_status == ValidationStatus.SOURCE_VERIFIED for item in manifest.claims
     )
     assert "never-store-this" not in serialized
     assert '"content":' not in serialized
@@ -169,13 +176,9 @@ def test_pipeline_produces_verified_metadata_without_source_text(
     assert manifest.metrics["evaluation_evidence_integrity_passed"] == 15
     assert manifest.metrics["evaluation_answer_quality_executed"] == 0
     assert all(
-        "retrieval_answerable" in item.grading_criteria
-        for item in manifest.evaluation_cases
+        "retrieval_answerable" in item.grading_criteria for item in manifest.evaluation_cases
     )
-    assert any(
-        item.grading_criteria["retrieval_answerable"]
-        for item in manifest.evaluation_cases
-    )
+    assert any(item.grading_criteria["retrieval_answerable"] for item in manifest.evaluation_cases)
 
 
 def test_typescript_imports_are_connected_to_declared_dependencies(
@@ -200,8 +203,7 @@ def test_typescript_imports_are_connected_to_declared_dependencies(
         for item in manifest.dependency_usages
     )
     assert not any(
-        item.relation_type == "CALLS"
-        and item.target_symbol in {"Page", "return"}
+        item.relation_type == "CALLS" and item.target_symbol in {"Page", "return"}
         for item in manifest.relations
     )
 
@@ -260,6 +262,80 @@ def test_repository_lifecycle_connects_detected_phases(tmp_path: Path) -> None:
     )
 
 
+def test_derived_java_artifacts_are_components_instead_of_one_evidence_bucket() -> None:
+    first = ".decompiled/indigo-core-1.4.0__abc/com/indigo/esb/Core.java"
+    second = ".decompiled/indigo-jms-1.4.0__def/com/indigo/esb/Jms.java"
+
+    assert _component_key(first) == ".decompiled/indigo-core-1.4.0__abc"
+    assert _component_key(second) == ".decompiled/indigo-jms-1.4.0__def"
+    assert _humanize(_component_key(first)) == "indigo core 1.4.0"
+
+
+def test_repository_report_uses_only_claim_ids_that_pass_the_evidence_gate(
+    sample_repository: Path,
+) -> None:
+    manifest = RepositoryAnalysisPipeline(allowed_roots=[sample_repository]).run(sample_repository)
+
+    class ReportProvider:
+        def synthesize_report(self, *, system, context):
+            assert "claim_catalog" in context
+            return ModelInvocation(
+                payload={
+                    "purpose": {
+                        "text": "검증된 서비스 코드와 설정을 묶어 요청을 처리하는 저장소입니다.",
+                        "claim_ids": ["C001"],
+                    },
+                    "capabilities": [
+                        {
+                            "text": "서비스 핸들러가 입력을 직렬화합니다.",
+                            "claim_ids": ["C001"],
+                        },
+                        {
+                            "text": "근거가 없는 기능입니다.",
+                            "claim_ids": ["C999"],
+                        },
+                    ],
+                    "technologies": [
+                        {
+                            "name": "Python",
+                            "role": "서비스 처리 코드를 구현합니다.",
+                            "claim_ids": ["C001"],
+                        }
+                    ],
+                    "processing_flow": [
+                        {
+                            "phase": "INPUT",
+                            "title": "입력",
+                            "description": "서비스가 입력을 받습니다.",
+                            "claim_ids": ["C001"],
+                        },
+                        {
+                            "phase": "PROCESSING",
+                            "title": "직렬화",
+                            "description": "핸들러가 값을 직렬화합니다.",
+                            "claim_ids": ["C002"],
+                        },
+                    ],
+                    "operational_notes": [],
+                    "unknowns": ["실행 환경의 실제 호출자는 정적 근거만으로 확정할 수 없습니다."],
+                },
+                model="test-model",
+                prompt_version="test-report",
+                latency_ms=1,
+                prompt_tokens=10,
+                completion_tokens=10,
+            )
+
+    report = synthesize_repository_report(manifest, ReportProvider())
+
+    assert report.knowledge_type == "REPOSITORY_OVERVIEW"
+    assert report.summary.startswith("검증된 서비스")
+    assert "근거가 없는 기능" not in report.detail
+    assert manifest.metrics["repository_report_evidence_rejected_statements"] == 1
+    assert len(manifest.lifecycle_nodes) == 2
+    assert manifest.lifecycle_edges[0].provenance == "EVIDENCE_SYNTHESIZED"
+
+
 def test_pipeline_snapshot_identity_is_deterministic(sample_repository: Path) -> None:
     pipeline = RepositoryAnalysisPipeline(allowed_roots=[sample_repository])
     first = pipeline.run(sample_repository)
@@ -271,9 +347,7 @@ def test_pipeline_snapshot_identity_is_deterministic(sample_repository: Path) ->
 
 
 def test_claim_validator_rejects_wrong_hash(sample_repository: Path) -> None:
-    manifest = RepositoryAnalysisPipeline(allowed_roots=[sample_repository]).run(
-        sample_repository
-    )
+    manifest = RepositoryAnalysisPipeline(allowed_roots=[sample_repository]).run(sample_repository)
     symbol = manifest.symbols[0]
     claim = Claim(
         claim="invalid evidence",
@@ -307,15 +381,9 @@ def test_claim_validator_rejects_wrong_hash(sample_repository: Path) -> None:
 def test_claim_validator_checks_structured_configuration_evidence(
     sample_repository: Path,
 ) -> None:
-    manifest = RepositoryAnalysisPipeline(allowed_roots=[sample_repository]).run(
-        sample_repository
-    )
+    manifest = RepositoryAnalysisPipeline(allowed_roots=[sample_repository]).run(sample_repository)
     symbol = next(item for item in manifest.symbols if item.symbol == "Service")
-    source = next(
-        item
-        for item in manifest.files
-        if item.relative_path == symbol.relative_path
-    )
+    source = next(item for item in manifest.files if item.relative_path == symbol.relative_path)
     claim = Claim(
         claim="Service uses the declared timeout configuration.",
         claim_type="CONFIGURATION_FACT",
@@ -391,6 +459,25 @@ def test_local_model_provider_reads_qwen36_mtp_environment(monkeypatch) -> None:
     assert provider.model == "qwen3.6-27b-mtp-q4-k-m"
     assert provider.include_source_excerpts is True
     assert provider.max_source_chars == 12000
+
+
+def test_analysis_response_format_reduces_retry_claim_limit() -> None:
+    initial = provider_module._response_format({"max_claims": 5})
+    retry = provider_module._response_format({"max_claims": 2})
+
+    assert initial["json_schema"]["schema"]["properties"]["claims"]["maxItems"] == 5
+    assert retry["json_schema"]["schema"]["properties"]["claims"]["maxItems"] == 2
+    assert provider_module._ANALYSIS_RESPONSE_SCHEMA["properties"]["claims"]["maxItems"] == 5
+    report = provider_module._response_format({"task_type": "repository_report"})
+    assert report["json_schema"]["name"] == "repository_report"
+    assert report["json_schema"]["schema"]["required"] == [
+        "purpose",
+        "capabilities",
+        "technologies",
+        "processing_flow",
+        "operational_notes",
+        "unknowns",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -553,8 +640,7 @@ def test_model_analysis_uses_bounded_evidence_excerpts(
     assert provider.analysis_contexts
     assert provider.analysis_contexts[0]["source_excerpts"]
     assert all(
-        sum(len(item["text"]) for item in context["source_excerpts"])
-        <= provider.max_source_chars
+        sum(len(item["text"]) for item in context["source_excerpts"]) <= provider.max_source_chars
         for context in provider.analysis_contexts
     )
     assert len(provider.evaluation_contexts) == 15
@@ -566,10 +652,7 @@ def test_model_analysis_uses_bounded_evidence_excerpts(
         for item in manifest.metrics["llm_task_outcomes"]
     )
     assert manifest.metrics["operator_intervention_required"] is False
-    assert (
-        manifest.metrics["codex_intervention_policy"]
-        == "RECORD_FAILURE_AND_CONTINUE"
-    )
+    assert manifest.metrics["codex_intervention_policy"] == "RECORD_FAILURE_AND_CONTINUE"
     assert manifest.metrics["codex_source_substitution_tasks"] == 0
     assert manifest.metrics["evaluation_answer_quality_executed"] == 15
     assert manifest.metrics["evaluation_answer_quality_passed"] == 15
@@ -578,6 +661,46 @@ def test_model_analysis_uses_bounded_evidence_excerpts(
         for context in provider.analysis_contexts
         for item in context["source_excerpts"]
     )
+
+
+def test_repository_analysis_cli_serializes_restored_task_datetimes(
+    monkeypatch,
+    capsys,
+) -> None:
+    restored_at = datetime(2026, 7, 29, tzinfo=timezone.utc)
+
+    class Manifest:
+        project_id = uuid.uuid4()
+        snapshot_id = uuid.uuid4()
+        source_hash = "a" * 64
+        metrics = {"llm_task_outcomes": [{"started_at": restored_at}]}
+        warnings = []
+
+        class Stage:
+            value = "COMPLETED"
+
+        stage = Stage()
+
+    class Pipeline:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, source_root):
+            return Manifest()
+
+    monkeypatch.setattr(
+        repository_analysis_main,
+        "RepositoryAnalysisPipeline",
+        Pipeline,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["repository-analysis", "/tmp/source", "--allowed-root", "/tmp/source"],
+    )
+
+    assert repository_analysis_main.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["metrics"]["llm_task_outcomes"][0]["started_at"] == str(restored_at)
 
 
 def test_model_analysis_resumes_from_completed_task_checkpoint(
@@ -644,10 +767,7 @@ def test_model_analysis_resumes_from_completed_task_checkpoint(
                 payload={
                     "claims": [
                         {
-                            "claim": (
-                                f"Checkpointed analysis for "
-                                f"{context['analysis_unit']}."
-                            ),
+                            "claim": (f"Checkpointed analysis for {context['analysis_unit']}."),
                             "claim_type": "CODE_FACT",
                             "component": context["analysis_unit"],
                             "evidence": [
@@ -697,16 +817,11 @@ def test_model_analysis_resumes_from_completed_task_checkpoint(
 
     assert checkpoint_store.completed is True
     assert manifest.metrics["checkpoint_restored_tasks"] == 1
-    assert (
-        second_provider.analysis_calls
-        == manifest.metrics["planned_analysis_tasks"] - 1
-    )
+    assert second_provider.analysis_calls == manifest.metrics["planned_analysis_tasks"] - 1
     assert manifest.metrics["checkpoint_saved_tasks"] == (
         manifest.metrics["planned_analysis_tasks"] - 1
     )
-    assert manifest.metrics["llm_tasks_executed"] == (
-        manifest.metrics["planned_analysis_tasks"]
-    )
+    assert manifest.metrics["llm_tasks_executed"] == (manifest.metrics["planned_analysis_tasks"])
 
 
 def test_repository_embedding_text_contains_support_context() -> None:
@@ -772,13 +887,10 @@ def test_pipeline_indexes_prefixed_decompiled_jar_evidence(tmp_path: Path) -> No
     evidence_path = ".decompiled/internal-agent/com/indigo/Agent.java"
     assert any(item.relative_path == evidence_path for item in manifest.files)
     assert any(
-        item.relative_path == evidence_path and item.symbol == "Agent"
-        for item in manifest.symbols
+        item.relative_path == evidence_path and item.symbol == "Agent" for item in manifest.symbols
     )
     assert any(
-        reference.file == evidence_path
-        for claim in manifest.claims
-        for reference in claim.evidence
+        reference.file == evidence_path for claim in manifest.claims for reference in claim.evidence
     )
     assert all(
         claim.validation_status != ValidationStatus.REJECTED
@@ -880,15 +992,13 @@ def test_model_analysis_batches_every_decompiled_file(tmp_path: Path) -> None:
     jar_contexts = [
         context
         for context in provider.contexts
-        if context["task_id"]
+        if context.get("task_id")
         and any(
             item["path"].startswith(".decompiled/internal.jar/")
-            for item in context["files"]
+            for item in context.get("files", [])
         )
     ]
-    analyzed_paths = {
-        item["path"] for context in jar_contexts for item in context["files"]
-    }
+    analyzed_paths = {item["path"] for context in jar_contexts for item in context["files"]}
     assert len(jar_contexts) == 13
     assert all(len(context["files"]) <= 5 for context in jar_contexts)
     assert len(analyzed_paths) == 61
@@ -934,13 +1044,9 @@ def test_model_analysis_records_reduced_retry_and_evidence_request(
     assert manifest.metrics["llm_unresolved_tasks"] == len(outcomes)
     assert manifest.metrics["llm_requests"] == len(outcomes) * 2
     assert manifest.metrics["operator_intervention_required"] is False
+    assert manifest.metrics["codex_intervention_policy"] == "RECORD_FAILURE_AND_CONTINUE"
     assert (
-        manifest.metrics["codex_intervention_policy"]
-        == "RECORD_FAILURE_AND_CONTINUE"
-    )
-    assert (
-        manifest.metrics["analysis_failures_recorded"]
-        == manifest.metrics["llm_unresolved_tasks"]
+        manifest.metrics["analysis_failures_recorded"] == manifest.metrics["llm_unresolved_tasks"]
     )
     assert manifest.metrics["codex_source_substitution_tasks"] == 0
     assert all(item["attempts"] == 2 for item in outcomes)
@@ -1049,14 +1155,11 @@ def test_model_analysis_records_every_task_when_claim_limit_is_reached(
     outcomes = manifest.metrics["llm_task_outcomes"]
     assert manifest.metrics["llm_tasks"] > 1
     assert len(outcomes) == manifest.metrics["llm_tasks"]
-    assert {
-        path for item in outcomes for path in item["source_files"]
-    } == {item.relative_path for item in manifest.files}
+    assert {path for item in outcomes for path in item["source_files"]} == {
+        item.relative_path for item in manifest.files
+    }
     assert manifest.metrics["llm_tasks_executed"] == 1
-    assert (
-        manifest.metrics["llm_tasks_skipped_claim_limit"]
-        == manifest.metrics["llm_tasks"] - 1
-    )
+    assert manifest.metrics["llm_tasks_skipped_claim_limit"] == manifest.metrics["llm_tasks"] - 1
     assert outcomes[0]["status"] == "SOURCE_EXTRACTED"
     assert all(
         item["status"] == "ADDITIONAL_ANALYSIS_REQUIRED"

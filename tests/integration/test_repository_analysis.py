@@ -70,6 +70,43 @@ class SupportService:
         store = RepositoryAnalysisStore(session)
         assert store.persist(manifest, category="IndigoESB esb") is True
         assert store.persist(manifest, category="IndigoESB esb") is False
+        overview = next(
+            item
+            for item in manifest.knowledge_items
+            if item.knowledge_type == "REPOSITORY_OVERVIEW"
+        )
+        overview.summary = "새 분석 계약으로 다시 생성한 저장소 전체 설명입니다."
+        manifest.metrics["repository_report_contract"] = "human-readable-v2"
+        assert store.persist(manifest, category="IndigoESB esb") is True
+        assert store.persist(manifest, category="IndigoESB esb") is False
+        assert (
+            session.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM repository_knowledge_item
+                    WHERE snapshot_id = :snapshot_id
+                      AND knowledge_type = 'REPOSITORY_OVERVIEW'
+                    """
+                ),
+                {"snapshot_id": manifest.snapshot_id},
+            ).scalar_one()
+            == 1
+        )
+        assert (
+            session.execute(
+                text(
+                    """
+                    SELECT summary
+                    FROM repository_knowledge_item
+                    WHERE snapshot_id = :snapshot_id
+                      AND knowledge_type = 'REPOSITORY_OVERVIEW'
+                    """
+                ),
+                {"snapshot_id": manifest.snapshot_id},
+            ).scalar_one()
+            == overview.summary
+        )
         source_columns = {
             item
             for item in session.execute(
@@ -84,18 +121,21 @@ class SupportService:
         }
         assert "content" not in source_columns
         assert "source_text" not in source_columns
-        assert session.execute(
-            text(
-                """
+        assert (
+            session.execute(
+                text(
+                    """
                 SELECT count(*) FROM repository_snapshot
                 WHERE project_id = :project_id AND source_hash = :source_hash
                 """
-            ),
-            {
-                "project_id": manifest.project_id,
-                "source_hash": manifest.source_hash,
-            },
-        ).scalar_one() == 1
+                ),
+                {
+                    "project_id": manifest.project_id,
+                    "source_hash": manifest.source_hash,
+                },
+            ).scalar_one()
+            == 1
+        )
         report = collect(lambda: Session(engine))
         assert len(report["projects"]) == 1
         assert report["projects"][0]["category"] == "IndigoESB esb"
@@ -105,20 +145,14 @@ class SupportService:
             "IndigoESB agent",
             "IndigoESB imc",
         ]
-        assert len(
-            report["completeness"]["missing_support_categories"][
-                "IndigoESB esb"
-            ]
-        ) == 15
+        assert len(report["completeness"]["missing_support_categories"]["IndigoESB esb"]) == 15
         assert all(
             scopes
             == [
                 "post_persistence_hybrid_retrieval",
                 "post_persistence_support_answer",
             ]
-            for scopes in report["completeness"]["missing_support_scopes"][
-                "IndigoESB esb"
-            ].values()
+            for scopes in report["completeness"]["missing_support_scopes"]["IndigoESB esb"].values()
         )
         assert report["invariants"]["raw_source_columns"] == 0
         assert report["invariants"]["forbidden_source_payloads"] == 0
@@ -136,6 +170,7 @@ class SupportService:
         )
         session.add(source_root)
         session.commit()
+
         def override_db():
             yield session
 
@@ -144,30 +179,51 @@ class SupportService:
         try:
             projects = client.get("/api/v1/repository-analysis/projects")
             assert projects.status_code == 200
-            assert any(
-                item["id"] == str(manifest.project_id)
-                for item in projects.json()["items"]
-            )
-            detail = client.get(
-                f"/api/v1/repository-analysis/projects/{manifest.project_id}"
-            )
+            assert any(item["id"] == str(manifest.project_id) for item in projects.json()["items"])
+            detail = client.get(f"/api/v1/repository-analysis/projects/{manifest.project_id}")
             assert detail.status_code == 200
             assert detail.json()["counts"]["symbols"] >= 2
             assert detail.json()["counts"]["components"] >= 1
             assert detail.json()["counts"]["lifecycle_nodes"] >= 1
-            assert detail.json()["visualization"]["components"]
-            assert detail.json()["visualization"]["lifecycle"]["nodes"]
-            assert detail.json()["visualization"]["lifecycle"]["edges"]
+            assert detail.json()["report"]["knowledge_type"] == "REPOSITORY_OVERVIEW"
+            assert detail.json()["report"]["summary"]
+            assert detail.json()["report"]["source_references"]
+            assert detail.json()["visualization"]["components"] == []
+            assert detail.json()["visualization"]["lifecycle"]["nodes"] == []
             assert detail.json()["visualization"]["relation_groups"]
             assert all(
                 set(item) == {"key", "count"}
                 for item in detail.json()["visualization"]["relation_groups"]
             )
-            assert detail.json()["visualization"]["flow_items"]
-            assert all(
-                "source_symbol" not in item and "target_symbol" not in item
-                for item in detail.json()["visualization"]["flow_items"]
+            architecture = client.get(
+                f"/api/v1/repository-analysis/projects/{manifest.project_id}/visualization",
+                params={"section": "architecture"},
             )
+            assert architecture.status_code == 200
+            assert architecture.json()["components"]
+            logic = client.get(
+                f"/api/v1/repository-analysis/projects/{manifest.project_id}/visualization",
+                params={"section": "logic"},
+            )
+            assert logic.status_code == 200
+            assert logic.json()["lifecycle"]["nodes"]
+            assert logic.json()["lifecycle"]["edges"]
+            dependencies = client.get(
+                f"/api/v1/repository-analysis/projects/{manifest.project_id}/visualization",
+                params={"section": "dependencies"},
+            )
+            assert dependencies.status_code == 200
+            assert "dependencies" in dependencies.json()
+            knowledge = client.get(
+                f"/api/v1/repository-analysis/projects/{manifest.project_id}/knowledge"
+            )
+            assert knowledge.status_code == 200
+            assert knowledge.json()["items"]
+            configurations = client.get(
+                f"/api/v1/repository-analysis/projects/{manifest.project_id}/configurations"
+            )
+            assert configurations.status_code == 200
+            assert configurations.json()["items"]
             search = client.get(
                 "/api/v1/repository-analysis/search",
                 params={
@@ -244,10 +300,9 @@ class SupportService:
             assert evaluations.status_code == 200
             assert evaluations.json()["total"] == 15
             assert evaluations.json()["answer_quality_evaluated"] is False
-            assert sum(
-                item["scenario_type"] is not None
-                for item in evaluations.json()["items"]
-            ) == 15
+            assert (
+                sum(item["scenario_type"] is not None for item in evaluations.json()["items"]) == 15
+            )
             analysis_job_id = session.execute(
                 text(
                     """
@@ -288,6 +343,47 @@ class SupportService:
                 {"analysis_job_id": analysis_job_id},
             )
             session.commit()
+            manifest.model = "test/new-analysis-model"
+            manifest.model_quantization = "NVFP4"
+            manifest.prompt_version = "repository-analysis-test-v2"
+            manifest.correlation_id = uuid.uuid4()
+            assert store.persist(manifest, category="IndigoESB esb") is True
+            assert store.persist(manifest, category="IndigoESB esb") is False
+            assert (
+                session.execute(
+                    text(
+                        """
+                        SELECT count(*)
+                        FROM repository_snapshot
+                        WHERE project_id = :project_id
+                          AND source_hash = :source_hash
+                        """
+                    ),
+                    {
+                        "project_id": manifest.project_id,
+                        "source_hash": manifest.source_hash,
+                    },
+                ).scalar_one()
+                == 1
+            )
+            assert (
+                session.execute(
+                    text(
+                        """
+                        SELECT count(*)
+                        FROM repository_analysis_job
+                        WHERE snapshot_id = :snapshot_id
+                        """
+                    ),
+                    {"snapshot_id": manifest.snapshot_id},
+                ).scalar_one()
+                == 3
+            )
+            latest_evaluations = client.get(
+                f"/api/v1/repository-analysis/projects/{manifest.project_id}/evaluations"
+            )
+            assert latest_evaluations.status_code == 200
+            assert latest_evaluations.json()["total"] == 15
         finally:
             app.dependency_overrides.clear()
 
@@ -311,11 +407,7 @@ def test_repository_analysis_task_checkpoint_round_trip(
     manifest = pipeline.run(source)
     tasks = pipeline._analysis_tasks(manifest)
     task = tasks[0]
-    file = next(
-        item
-        for item in manifest.files
-        if item.relative_path == task["files"][0]
-    )
+    file = next(item for item in manifest.files if item.relative_path == task["files"][0])
     claim = Claim(
         claim="The checkpoint preserves a verified candidate fact.",
         claim_type="CODE_FACT",
@@ -366,16 +458,22 @@ def test_repository_analysis_task_checkpoint_round_trip(
         assert restored_outcome["finished_at"] == finished_at
         assert restored_claims[0].claim == claim.claim
         assert restored_claims[0].evidence == claim.evidence
-        assert session.execute(
-            text(
-                """
+        outcome["request_failures_exhausted"] = True
+        store.save_task(checkpoint, outcome, [claim])
+        assert store.restore(checkpoint, tasks, retry_exhausted=True) == {}
+        assert (
+            session.execute(
+                text(
+                    """
                 SELECT count(*)
                 FROM repository_analysis_task_checkpoint
                 WHERE checkpoint_id = :checkpoint_id
                 """
-            ),
-            {"checkpoint_id": checkpoint},
-        ).scalar_one() == 1
+                ),
+                {"checkpoint_id": checkpoint},
+            ).scalar_one()
+            == 1
+        )
         checkpoint_columns = set(
             session.execute(
                 text(

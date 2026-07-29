@@ -21,6 +21,7 @@ allowlisted read-only repository
   -> bounded analysis units and optional localhost model
   -> claims
   -> source/hash/line/symbol/config/dependency validator
+  -> verifier-guided whole-repository report and lifecycle synthesis
   -> searchable knowledge metadata
   -> PostgreSQL repository_* tables
   -> FastAPI Hermes/query endpoints
@@ -30,6 +31,30 @@ allowlisted read-only repository
 The first analyzer set covers Python AST, bounded Java/JavaScript/TypeScript/Kotlin/shell/SQL
 declarations and calls, XML elements, YAML/JSON/TOML/properties keys, and Maven/NPM/PyPI dependency
 manifests. New analyzers implement `AnalyzerPlugin` and are added to `DEFAULT_PLUGINS`.
+
+Every completed Snapshot also contains one `REPOSITORY_OVERVIEW` item intended for a person who
+has never seen the repository. It explains what the repository does, the role of its main
+technologies, its processing flow, lifecycle, operational boundaries, and remaining unknowns.
+When a local model is enabled, it receives only a bounded catalog of already source-verified
+Claims. Every generated statement must cite catalog IDs; an unknown or missing ID rejects that
+statement. At least two accepted flow steps are required before synthesized lifecycle nodes can
+replace the deterministic fallback. The report is marked `PARTIALLY_VERIFIED` because its
+wording and ordering are a synthesis even though all retained references have passed the normal
+file/hash/line/symbol gate. If the model call or the purpose evidence gate fails, analysis remains
+usable and emits a deterministic evidence-backed report with an explicit warning and metric.
+
+Derived Java evidence is grouped by immutable artifact directory (for example,
+`.decompiled/indigo-core-1.4.0__<digest>`) rather than collapsing every decompiled class into a
+single `.decompiled` component. Installed IndigoESB component and service-assembly directories
+are likewise kept as separate architecture boundaries.
+
+The Snapshot identity remains the immutable repository source hash. A newer analysis contract for
+the same source does not create a duplicate Snapshot: it atomically replaces only rebuildable
+analysis rows (symbols, relations, components, lifecycle, knowledge, and embeddings through
+cascade), appends a provenance-preserving analysis job, and keeps older jobs for audit. The
+`repository_report_contract` metric participates in exact-analysis deduplication, so an older
+Snapshot that lacks the human-readable report is eligible for one refresh while an identical
+completed refresh is a no-op.
 
 ## Data model
 
@@ -181,6 +206,46 @@ total reported by the scheduler. The launcher omits `--gpu-memory-utilization` w
 KV cache byte count is provided because vLLM ignores utilization in that mode. Do not guess a
 larger cache or increase the queue reservation without a new measured qualification.
 
+The higher-throughput Windows-native path uses
+`Peutlefaire/Qwen3.6-27B-NVFP4` revision
+`71d46214a7ef0f1205dd536f63203e5b51b415ee` through the installed
+`qwen3.6-windows-server` Blackwell runtime. Its qualified extraction shape is
+180,000 tokens, FP8 E4M3 KV cache, MTP-6, one sequence, CUDA Graphs, and
+`gpu-memory-utilization=0.90`. The release-matched FlashInfer JIT cache must
+select `FlashInferCutlassNvFp4LinearKernel`; plain
+`CutlassNvFp4LinearKernel` is a failed preflight. A one-warmup, three-run,
+300-token qualification measured 91.76, 92.62, and 93.75 decode tokens/s
+(92.62 median). The observed 31,986 MiB total peak does not preserve the
+workstation's 2 GiB safety reserve, so this profile may run only as an
+exclusive queued workload after earlier GPU tasks finish.
+
+`scripts/run-windows-nvfp4-indigo-component.py` owns the complete lifecycle:
+it starts the loopback-only Windows server, verifies the FlashInfer kernel,
+proves strict JSON Schema output, invokes the container analysis through
+`host.docker.internal`, and closes the server and port. The companion
+`scripts/analyze-indigo-component.sh` uses
+`LKP_REPOSITORY_EXTERNAL_VLLM=true` only inside that admitted workload; it
+does not start or stop the external server itself. The same wrapper accepts
+`support-evaluation` after all component and embedding jobs have completed;
+that mode runs the answer evaluation against the qualified Windows NVFP4
+server instead of starting the legacy WSL model. Submit ESB, IMC, and Agent
+as separate jobs in that order. Workload titles must include the exact model,
+for example
+`local-knowledge-portal-analyze-indigoesb-esb-model-peutlefaire-qwen3.6-27b-nvfp4`.
+
+Repository extraction does not need the 180K benchmark cache. Prompt
+preflight measured at most 11,507 input tokens. Existing checkpoints must
+resume with their original output budget because it is part of the analysis
+fingerprint; the interrupted IMC run therefore resumes at 2,048 tokens. New
+component runs use `--max-output 2560` after production runs showed repeated
+strict-JSON truncation at 2,048. The resulting 14,067-token worst case remains
+below the operational 16,000-token limit. The Windows wrapper uses that limit
+and an explicit 2,000,000,000-byte KV cache.
+This changes the actual vLLM allocation rather than understating the gpuq
+reservation. The 180K/0.90 profile remains the performance reference; the
+16K/2.0GB shape must still pass server health, FlashInfer kernel selection,
+strict JSON Schema output, and the component run inside the same reservation.
+
 Keep `REPO_ANALYSIS_MODEL_ENABLED=false` until qualification succeeds. Afterward, use
 `REPO_ANALYSIS_MODEL_BASE_URL=http://host.docker.internal:18000/v1`,
 `REPO_ANALYSIS_MODEL_NAME=qwen3.6-27b-mtp-q4-k-m`, and enable bounded transient source excerpts.
@@ -205,8 +270,10 @@ rerun the same component command with the same source and analysis settings. The
 the completed tasks and resumes at the first unfinished task. It reports
 `checkpoint_restored_tasks` and `checkpoint_saved_tasks` in the bounded result metrics. Changing
 the source hash or analysis fingerprint intentionally starts a fresh checkpoint. Evaluation and
-final Snapshot promotion are still rerun after extraction recovery so a partial run cannot become
-searchable.
+final Snapshot promotion are still gated on complete extraction recovery so a partial run cannot
+become searchable. Support-answer evaluation commits each case independently and derives a stable
+run identifier from the retrieval package, model, and prompt version. Re-running the same package
+restores those case results and resumes at the first missing case.
 
 After qualification, `scripts/analyze-indigo-component.sh {esb|imc|agent}` performs exactly one
 component run: start the loopback-only model inside its gpuq reservation, prove the application
@@ -217,9 +284,10 @@ three components as separate gpuq jobs in `esb`, `imc`, `agent` order.
 After all three runs, submit `scripts/run-gpu-repository-postprocess.sh` through `gpuq`. It uses
 the workstation Ollama embedding model to create missing vectors and writes the source-free
 hybrid retrieval package to the portal data root. Then submit
-`scripts/evaluate-indigo-support.sh` through `gpuq`; it starts Qwen3.6 MTP-1, evaluates all 15
-categories for each latest IndigoESB Snapshot, persists retrieval and answer-quality results, and
-stops the model.
+`scripts/run-windows-nvfp4-indigo-component.py support-evaluation` through `gpuq`; it starts
+`Peutlefaire/Qwen3.6-27B-NVFP4` with MTP-6, evaluates all 15 categories for each latest IndigoESB
+Snapshot, persists each answer-quality result before the next case, resumes an interrupted package,
+and stops the model.
 
 ## API and UI
 
