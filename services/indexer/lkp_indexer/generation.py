@@ -450,6 +450,8 @@ class GenerationProvider(Protocol):
         prompt_version: str,
     ) -> tuple[DeveloperFeedDraft, str]: ...
 
+    def close(self) -> None: ...
+
 
 class OllamaGenerationProvider:
     provider = "ollama"
@@ -505,6 +507,20 @@ class OllamaGenerationProvider:
 
     def model_digest(self) -> str:
         return self._model_digest()
+
+    def close(self) -> None:
+        """Unload the exact task model and close the bounded HTTP client."""
+        try:
+            response = self.client.post(
+                f"{self.base_url}/api/generate",
+                json={"model": self.model, "keep_alive": 0},
+                timeout=10,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError:
+            pass
+        finally:
+            self.client.close()
 
     def _request_developer_feed(
         self,

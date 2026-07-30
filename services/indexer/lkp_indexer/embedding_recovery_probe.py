@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .cli import get_embedder
+from .embedding import Embedder
 
 
 def write_snapshot(path: Path, payload: dict[str, Any]) -> None:
@@ -105,14 +106,16 @@ def evaluate_probe_results(semantic, hybrid) -> dict[str, Any]:
     }
 
 
-def run() -> dict[str, Any]:
+def run(embedder: Embedder | None = None) -> dict[str, Any]:
     settings = get_settings()
     snapshot_path = settings.runtime_dir / "embedding-recovery-validation.json"
     checked_at = datetime.now(timezone.utc).isoformat()
+    owned_embedder = embedder is None
     try:
         if not settings.embedding_timeout_circuit_bypass:
             raise RuntimeError("GPU recovery probe requires timeout-circuit bypass")
-        embedder = get_embedder(settings, deterministic=False)
+        if embedder is None:
+            embedder = get_embedder(settings, deterministic=False)
         with SessionLocal() as session:
             anchor = _anchor(session, settings.embedding_revision)
             if not anchor or not anchor.strip():
@@ -155,6 +158,9 @@ def run() -> dict[str, Any]:
             "checked_at": checked_at,
             "embedding_revision": settings.embedding_revision,
         }
+    finally:
+        if owned_embedder and embedder is not None:
+            embedder.close()
     write_snapshot(snapshot_path, result)
     return result
 

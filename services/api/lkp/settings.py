@@ -126,6 +126,7 @@ class Settings(BaseSettings):
     developer_feed_enabled: bool = True
     developer_feed_interval_minutes: int = Field(default=180, ge=15, le=1440)
     developer_feed_daily_hour: int = Field(default=18, ge=0, le=23)
+    developer_feed_daily_summary_lag_days: int = Field(default=0, ge=0, le=7)
     developer_feed_timezone: str = "Asia/Seoul"
     developer_feed_initial_lookback_hours: int = Field(default=72, ge=1, le=720)
     developer_feed_max_sources_per_run: int = Field(default=12, ge=1, le=100)

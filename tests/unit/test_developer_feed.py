@@ -1,7 +1,8 @@
 import json
+from datetime import datetime, timezone
 
 from lkp.settings import Settings
-from lkp_indexer.developer_feed import _bounded_payload
+from lkp_indexer.developer_feed import _bounded_payload, _daily_summary_window
 from lkp_indexer.generation import DeveloperFeedDraft
 
 
@@ -115,3 +116,19 @@ def test_feed_defaults_to_three_hour_gemma_batch():
     assert settings.developer_feed_model == "gemma4:12b"
     assert settings.developer_feed_persona_version.endswith("-session-notes")
     assert settings.developer_feed_temperature == 0.65
+
+
+def test_nightly_feed_summarizes_the_previous_local_day():
+    settings = Settings(
+        developer_feed_daily_hour=0,
+        developer_feed_daily_summary_lag_days=1,
+        developer_feed_timezone="Asia/Seoul",
+    )
+    summary_date, start, end = _daily_summary_window(
+        settings,
+        now=datetime(2026, 7, 29, 15, 30, tzinfo=timezone.utc),
+    )
+
+    assert summary_date.isoformat() == "2026-07-29"
+    assert start == datetime(2026, 7, 28, 15, 0, tzinfo=timezone.utc)
+    assert end == datetime(2026, 7, 29, 15, 0, tzinfo=timezone.utc)

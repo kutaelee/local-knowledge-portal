@@ -86,18 +86,16 @@ terms, uses them to bound a pgvector cosine lookup of rebuildable candidate/case
 near matches `NEEDS_REVIEW`; it does not merge ambiguous cases automatically. No candidate is
 auto-published before this check completes.
 
-The job must never use the CPU Ollama service. Install the low-priority scheduler submission (it
-submits only when pending candidates exist) and inspect its state:
+The job must never use the CPU Ollama service. Production runs it as the first stage of the nightly
+maintenance reservation; inspect the pending count and nightly task with:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu\home\kutae\src\local-knowledge-portal\scripts\install-knowledge-dedup-schedule.ps1
-Get-ScheduledTask -TaskPath '\LocalKnowledgePortal\' -TaskName 'DeduplicateKnowledge'
+Get-ScheduledTask -TaskPath '\LocalKnowledgePortal\' -TaskName 'NightlyKnowledgeMaintenance'
 Invoke-RestMethod http://127.0.0.1:8010/api/v1/knowledge/dedup/status
 ```
 
-Each run submits an 8 GiB, priority-15 `gpuq` workload and shares the temporary GPU embedding
-container used by semantic recovery. It is queued behind higher-priority reservations and has no
-direct-GPU fallback.
+The semantic stage shares one embedder with retrieval verification, is queued behind earlier GPUQ
+reservations, and has no direct-GPU fallback.
 
 ### Canonical case search projection
 
@@ -169,10 +167,9 @@ must stop Windows Ollama first and preserve both model stores; never delete the 
 
 ### Evidence-bound developer feed
 
-`developer-feed` is a one-shot GPU-queued editor, not an always-on service. Task Scheduler invokes
-`publish-developer-feed.ps1` every three hours. Its read-only status preflight submits no GPU job
-when there is neither newly embedded verified information nor a daily summary due. An admitted job
-uses `gemma4:12b` only for the bounded edit and unloads it in `finally`.
+`developer-feed` is a one-shot GPU-queued editor, not an always-on service. The production
+schedule invokes it once inside the 00:30 nightly pipeline. It writes newly embedded information,
+summarizes the previous local calendar day, and unloads `gemma4:12b` in `finally`.
 
 The editor receives redacted verified journal facts plus excerpts from the current embedded document
 versions. Its prompt explicitly prohibits embedding/index/model-operation narration: posts must
@@ -200,13 +197,13 @@ the exact Gemma model digest and prompt version. A screenshot is only recommende
 explicitly identifies a stable non-secret visual artifact; capture remains a separate reviewed
 action.
 
-At 18:00 `Asia/Seoul`, the same one-shot entrypoint creates the idempotent
-`daily:YYYY-MM-DD` synthesis from the day's actual source catalog. A day with no verified update
-gets a deterministic transparent closeout without loading the model.
+At 00:30 `Asia/Seoul`, the nightly entrypoint creates the idempotent `daily:YYYY-MM-DD`
+synthesis for the previous local calendar day. A day with no verified update gets a deterministic
+transparent closeout without loading the model.
 
 ```powershell
-.\scripts\install-developer-feed-schedule.ps1
-.\scripts\publish-developer-feed.ps1
+.\scripts\install-nightly-maintenance-schedule.ps1
+.\scripts\nightly-maintenance.ps1
 Invoke-RestMethod http://127.0.0.1:8010/api/v1/developer-feed/status
 Invoke-RestMethod 'http://127.0.0.1:8010/api/v1/developer-feed?language=ko'
 ```
@@ -215,6 +212,33 @@ Rollback is application-safe: disable `\LocalKnowledgePortal\PublishInformationF
 prior API/web image, and restore the prior schedule only if the old persistent service is desired.
 Feed rows are derived, non-authoritative records. Do not downgrade the database during an ordinary
 rollback.
+
+### Nightly GPU maintenance
+
+The workstation registers only `\LocalKnowledgePortal\NightlyKnowledgeMaintenance` for automatic
+model work. It starts daily at 00:30, submits one 12,288 MiB GPUQ reservation, and waits for that
+reservation even when earlier interactive work delays admission. Task Scheduler uses `IgnoreNew`
+and a 48-hour bound, so a delayed run is not duplicated at the next trigger.
+
+The admitted wrapper runs three checkpointed stages in order:
+
+1. semantic duplicate checks and semantic/hybrid retrieval verification share one
+   `qwen3-embedding:0.6b` instance;
+2. knowledge curation and project-article refresh share one `qwen3.5:9b-q4_K_M` provider;
+3. the previous day's information feed uses `gemma4:12b`.
+
+Stage failures are logged and do not hide the remaining independent stages; the GPUQ job exits
+non-zero if any stage failed. Stable one-shot container names plus an exit trap remove only this
+pipeline's abandoned containers. Each embedder/editor closes its exact model before exit. The
+installer disables `CurateKnowledge`, `DeduplicateKnowledge`, `PublishInformationFeed`,
+`ValidateSemanticRecovery`, and `ReapGpuEmbeddingBatch` but leaves them registered for rollback.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\install-nightly-maintenance-schedule.ps1 -Hour 0 -Minute 30
+Get-ScheduledTask -TaskPath '\LocalKnowledgePortal\' |
+  Where-Object TaskName -Match 'Nightly|Curate|Deduplicate|Feed|Semantic|Embedding'
+```
 
 ### Current GPU-queued evidence editor
 
@@ -256,16 +280,16 @@ The external one-shot schedule is the retry clock, so each invocation probes the
 when the previous run recorded an internal backoff timestamp. Only the optional persistent loop
 honors `next_attempt_at` between its own polls.
 
-Register the hourly, non-overlapping submission task:
+Register the daily, non-overlapping maintenance task:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  .\scripts\install-curation-schedule.ps1 -IntervalMinutes 60
+  .\scripts\install-nightly-maintenance-schedule.ps1 -Hour 0 -Minute 30
 ```
 
-The installer copies the stable curation entrypoint and queue helper to
+The installer copies the stable nightly entrypoint and queue helper to
 `C:\Docker\local-knowledge-portal`, backs up a differing prior copy, and registers
-`\LocalKnowledgePortal\CurateKnowledge`. It does not store a scheduler token.
+`\LocalKnowledgePortal\NightlyKnowledgeMaintenance`. It does not store a scheduler token.
 
 Each run asks the API for both eligible knowledge cases and due project
 articles. It does not reserve the GPU when both counts are zero. A project
@@ -439,19 +463,9 @@ by the 8 GiB reservation and splits a timeout back to single inputs. This is
 not a change to watcher polling, CPU worker concurrency, or GPU scheduler
 parallelism.
 
-Install the restart-safe ten-minute follow-up scheduler once so this proof is
-submitted automatically after a successful long-running reindex:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  "\\wsl.localhost\Ubuntu\home\kutae\src\local-knowledge-portal\scripts\install-semantic-recovery-validation-schedule.ps1"
-```
-
-The task `\LocalKnowledgePortal\ValidateSemanticRecovery` only observes the
-host queue and the atomic validation snapshot. While a reindex is queued or
-running it exits successfully without submitting anything. It then submits at
-most one current `local-knowledge-portal-semantic-validation` GPU job; a
-snapshot newer than the succeeded reindex suppresses later repetitions.
+The former ten-minute `\LocalKnowledgePortal\ValidateSemanticRecovery` task is disabled. Retrieval
+verification now follows duplicate checking inside the shared nightly embedding stage and writes
+the same atomic validation snapshot.
 
 `ReapGpuEmbeddingBatch` is retired because embedding jobs no longer start a temporary Ollama
 container. Existing installations remain disabled for rollback history. The installer is now

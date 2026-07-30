@@ -208,15 +208,17 @@ token; the API uses a server-side token configured with
 `scripts/configure-gpu-queue-control.ps1`. See
 [ADR 0013](docs/adr/0013-local-llm-evidence-editor.md).
 
-Install the hourly, non-overlapping submission task after the GPU scheduler is available:
+Install the daily, non-overlapping maintenance task after the GPU scheduler is available:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  .\scripts\install-curation-schedule.ps1 -IntervalMinutes 60
+  .\scripts\install-nightly-maintenance-schedule.ps1
 ```
 
-The Scheduled Task only invokes the same `gpuq` entrypoint. A queued job waits under the host
-scheduler's bounded fairness and safety policy, so the task never bypasses GPU admission.
+At 00:30 `Asia/Seoul`, one GPUQ reservation waits behind earlier work and then runs semantic
+maintenance, curation/project articles, and the previous day's information feed sequentially.
+The installer disables the superseded repeating model schedules. Every stage uses a bounded
+one-shot container and unloads its exact model before the reservation exits.
 
 Production embedding uses Ollama `qwen3-embedding:0.6b`, digest
 `ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d`, dimension
@@ -284,8 +286,9 @@ host URL is restricted to loopback or `host.docker.internal`. The browser
 cannot call the host scheduler directly and never receives its token.
 
 `/api/v1/knowledge/dedup/status` reports pending non-exact candidates and rebuildable dedup-vector
-coverage. The optional low-priority Windows task `\LocalKnowledgePortal\DeduplicateKnowledge`
-submits a GPU-reserved worker only while that count is nonzero; see the operations runbook.
+coverage. Production duplicate checking and semantic verification share the first stage of
+`\LocalKnowledgePortal\NightlyKnowledgeMaintenance`; the former repeating dedup task remains
+disabled for rollback.
 
 Every retrieval result includes document, version, chunk, source root, canonical/relative path, source lines, content hash, indexed time, retrieval score, and match reason.
 

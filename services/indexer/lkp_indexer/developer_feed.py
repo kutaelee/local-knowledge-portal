@@ -5,7 +5,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import PurePath
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -239,7 +239,10 @@ def inspect_due(
     now = now or datetime.now(timezone.utc)
     batch = _eligible_batch(session, settings, now=now)
     local_now = now.astimezone(ZoneInfo(settings.developer_feed_timezone))
-    daily_key = f"daily:{local_now.date().isoformat()}:0"
+    summary_date = local_now.date() - timedelta(
+        days=settings.developer_feed_daily_summary_lag_days
+    )
+    daily_key = f"daily:{summary_date.isoformat()}:0"
     daily_exists = bool(
         session.scalar(
             select(DeveloperFeedPost.id).where(
@@ -253,6 +256,28 @@ def inspect_due(
         "daily_due": local_now.hour >= settings.developer_feed_daily_hour
         and not daily_exists,
     }
+
+
+def _daily_summary_window(
+    settings: Settings,
+    *,
+    now: datetime,
+) -> tuple[date, datetime, datetime]:
+    local_now = now.astimezone(ZoneInfo(settings.developer_feed_timezone))
+    summary_date = local_now.date() - timedelta(
+        days=settings.developer_feed_daily_summary_lag_days
+    )
+    start_local = datetime.combine(
+        summary_date,
+        datetime.min.time(),
+        tzinfo=local_now.tzinfo,
+    )
+    end_local = start_local + timedelta(days=1)
+    return (
+        summary_date,
+        start_local.astimezone(timezone.utc),
+        min(end_local.astimezone(timezone.utc), now),
+    )
 
 
 def _add_thread(
@@ -397,7 +422,8 @@ def publish_once(
 
     batch = _eligible_batch(session, settings, now=now)
     local_now = now.astimezone(ZoneInfo(settings.developer_feed_timezone))
-    local_date = local_now.date().isoformat()
+    summary_date, day_start, day_end = _daily_summary_window(settings, now=now)
+    local_date = summary_date.isoformat()
     daily_key = f"daily:{local_date}:0"
     daily_due = local_now.hour >= settings.developer_feed_daily_hour and not session.scalar(
         select(DeveloperFeedPost.id).where(
@@ -487,16 +513,13 @@ def publish_once(
         activity_threads = 1
 
     if daily_due:
-        day_start = datetime.combine(
-            local_now.date(), datetime.min.time(), tzinfo=local_now.tzinfo
-        ).astimezone(timezone.utc)
         activity_roots = list(
             session.scalars(
                 select(DeveloperFeedPost).where(
                     DeveloperFeedPost.post_type == "activity",
                     DeveloperFeedPost.sequence == 0,
                     DeveloperFeedPost.created_at >= day_start,
-                    DeveloperFeedPost.created_at <= now,
+                    DeveloperFeedPost.created_at < day_end,
                 )
             )
         )
