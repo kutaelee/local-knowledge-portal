@@ -64,7 +64,12 @@ def test_ollama_embedding_request_is_nonresident_and_close_unloads(monkeypatch):
             return None
 
         def json(self):
-            return {"embeddings": [[0.25, 0.75]]}
+            return {
+                "embeddings": [[0.25, 0.75]],
+                "prompt_eval_count": 20,
+                "total_duration": 110_000_000,
+                "load_duration": 10_000_000,
+            }
 
     def post(url, *, json, timeout):
         calls.append((url, json, timeout))
@@ -85,6 +90,15 @@ def test_ollama_embedding_request_is_nonresident_and_close_unloads(monkeypatch):
     assert calls[0][1]["keep_alive"] == "0"
     assert calls[1][0].endswith("/api/generate")
     assert calls[1][1] == {"model": "qwen3-embedding:0.6b", "keep_alive": 0}
+    assert embedder.performance_metrics() == {
+        "requests": 1,
+        "inputs": 1,
+        "prompt_tokens": 20,
+        "total_duration_ns": 110_000_000,
+        "load_duration_ns": 10_000_000,
+        "inputs_per_second": 10.0,
+        "prompt_tokens_per_second": 200.0,
+    }
 
 
 def test_markdown_heading_lines():

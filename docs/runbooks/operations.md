@@ -216,22 +216,66 @@ rollback.
 ### Nightly GPU maintenance
 
 The workstation registers only `\LocalKnowledgePortal\NightlyKnowledgeMaintenance` for automatic
-model work. It starts daily at 00:30, submits one 12,288 MiB GPUQ reservation, and waits for that
+model work. It starts daily at 00:30, submits one 14,336 MiB GPUQ reservation, and waits for that
 reservation even when earlier interactive work delays admission. Task Scheduler uses `IgnoreNew`
 and a 48-hour bound, so a delayed run is not duplicated at the next trigger.
 
-The admitted wrapper runs three checkpointed stages in order:
+The admitted wrapper runs four checkpointed stages in order:
 
-1. semantic duplicate checks and semantic/hybrid retrieval verification share one
-   `qwen3-embedding:0.6b` instance;
+1. after a bounded ingest-queue quiet check, deferred document reindexing, semantic duplicate
+   checks, and semantic/hybrid retrieval verification share one `qwen3-embedding:0.6b` instance;
 2. knowledge curation and project-article refresh share one `qwen3.5:9b-q4_K_M` provider;
-3. the previous day's information feed uses `gemma4:12b`.
+3. documents written during generation receive one incremental embedding refresh;
+4. only after that checkpoint, the previous day's information feed uses `gemma4:12b`.
 
 Stage failures are logged and do not hide the remaining independent stages; the GPUQ job exits
 non-zero if any stage failed. Stable one-shot container names plus an exit trap remove only this
 pipeline's abandoned containers. Each embedder/editor closes its exact model before exit. The
 installer disables `CurateKnowledge`, `DeduplicateKnowledge`, `PublishInformationFeed`,
 `ValidateSemanticRecovery`, and `ReapGpuEmbeddingBatch` but leaves them registered for rollback.
+Feed publication is skipped fail-closed when the post-generation embedding checkpoint is not
+ready. `OBSERVED_CHANGE` journals may enter the feed only when a matching current document is
+embedded; their claim scope cannot represent success, effects, causes, or metrics as verified.
+The feed reuses one bounded Gemma load while draining up to eight 12-source batches. Cursor order
+remains ascending so backlog is processed without skipping older embedded evidence.
+
+### Model-specific nightly performance profiles
+
+Do not copy one model's tuning values to another model or runtime. The GPU-only
+`qwen3-embedding:0.6b` profile uses `LKP_GPU_EMBEDDING_BATCH_SIZE=4` and
+`LKP_GPU_EMBEDDING_BATCH_COOLDOWN_SECONDS=0.05`; the ordinary CPU worker remains at batch one and
+one-second cooling. The previous GPU baseline embedded 293 deferred documents in 778 seconds with
+batch two and 0.5-second cooling while leaving substantial GPU headroom. Keep the recursive timeout
+split and compare the next equivalent run before increasing beyond four.
+
+Both generation models explicitly use llama.cpp/Ollama logical batch 1024, matching the observed
+Ollama runner and the workstation's other bounded Ollama workloads. `qwen3.5:9b-q4_K_M` uses a
+32,768-token context because the 2026-07-31 nightly run observed prompts up to 16,262 tokens at the
+former 16,384 limit, followed by truncated JSON and citation repair failures. The same run measured
+41 Qwen decode samples averaging 168.04 tokens/second and prompt processing averaging 9,103
+tokens/second. The shared nightly reservation is 14,336 MiB because the former 16K profile already
+peaked at about 11.33 GiB; this is admission headroom, not permission to keep the model resident.
+`gemma4:12b` keeps a 16,384-token context: its feed prompts were 12,173 and 13,045 tokens and decoded
+at 113.36 and 113.86 tokens/second without context truncation.
+
+The portal knowledge search found no reusable throughput profile for these exact model,
+quantization, and runtime triples. The local DOM translator does use batch 1024 for
+`gemma4:e4b`, and separately uses two-token MTP with Gemma 4 E2B QAT under vLLM. Those are useful
+cross-checks, but neither is the portal's Ollama `gemma4:12b` target, so only the independently
+observed batch setting is shared; its short translation context, concurrency, and MTP settings are
+not transplanted.
+
+Qwen's official 9B model card recommends MTP speculative decoding and Google documents a dedicated
+Gemma 4 draft model, but the active Ollama GGUFs expose no MTP/draft tensors and Ollama cannot attach
+the separate cached Gemma assistant artifact through the current API contract. Do not set
+`draft_num_predict` as a cosmetic flag. A future MTP change requires a separate runtime-qualified
+profile, digest-pinned target and assistant, quality comparison, VRAM measurement, and gpuq cleanup.
+Reference:
+
+- <https://huggingface.co/Qwen/Qwen3.5-9B>
+- <https://ai.google.dev/gemma/docs/core>
+- <https://arxiv.org/abs/2607.02770>
+- <https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md>
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
@@ -412,8 +456,9 @@ through the allowlisted graceful control without terminating Ollama or unrelated
 
 Use `scripts/reindex-embeddings.ps1` for documents marked `deferred_runtime`. It submits the
 one-shot reindex application through `gpuq`; it is not a direct GPU command. The wrapper
-reserves 8 GiB by default because a measured `qwen3-embedding:0.6b` batch consumed about 6.2 GiB
-above the concurrent baseline. Do not lower that reservation to 2 GiB. After admission, the
+reserves 10 GiB by default because a measured `qwen3-embedding:0.6b` Q8_0 batch-two run consumed
+about 6.2 GiB above the concurrent baseline and the GPU profile now uses batch four. Do not lower
+that reservation to the former 8 GiB estimate without a measured batch-four run. After admission, the
 one-shot container uses the private Compose `postgres` endpoint and the single Windows Ollama
 through `host.docker.internal`; it never starts a second Ollama daemon.
 
@@ -458,10 +503,10 @@ failed recovery; leave the CPU interlock in place and investigate the GPU job
 or embedding revision instead of claiming semantic retrieval is restored.
 
 The normal CPU worker stays at `LKP_EMBEDDING_BATCH_SIZE=1`. The independent
-GPU-only recovery may use `LKP_GPU_EMBEDDING_BATCH_SIZE=2`; it remains bounded
-by the 8 GiB reservation and splits a timeout back to single inputs. This is
-not a change to watcher polling, CPU worker concurrency, or GPU scheduler
-parallelism.
+GPU-only recovery uses `LKP_GPU_EMBEDDING_BATCH_SIZE=4` with
+`LKP_GPU_EMBEDDING_BATCH_COOLDOWN_SECONDS=0.05`; it remains gpuq-bounded and
+splits a timeout back to single inputs. This is not a change to watcher polling,
+CPU worker concurrency, or GPU scheduler parallelism.
 
 The former ten-minute `\LocalKnowledgePortal\ValidateSemanticRecovery` task is disabled. Retrieval
 verification now follows duplicate checking inside the shared nightly embedding stage and writes

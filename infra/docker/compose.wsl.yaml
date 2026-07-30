@@ -341,9 +341,10 @@ services:
       LKP_RUNTIME_DIR: /data/runtime
       LKP_OLLAMA_BASE_URL: ${LKP_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       # CPU worker ingestion remains at its separately configured batch size.
-      # The gpuq-reserved recovery service may safely use a small two-input
-      # request; Timeout handling still splits it down to single inputs.
-      LKP_EMBEDDING_BATCH_SIZE: "${LKP_GPU_EMBEDDING_BATCH_SIZE:-2}"
+      # The RTX 5090 gpuq profile uses four inputs after the two-input baseline
+      # left the GPU underutilized. Timeout handling still splits recursively.
+      LKP_EMBEDDING_BATCH_SIZE: "${LKP_GPU_EMBEDDING_BATCH_SIZE:-4}"
+      LKP_EMBEDDING_BATCH_COOLDOWN_SECONDS: "${LKP_GPU_EMBEDDING_BATCH_COOLDOWN_SECONDS:-0.05}"
       # Reuse the model only inside this gpuq-owned batch. Python unloads it in
       # a finally block before the reservation exits.
       LKP_EMBEDDING_KEEP_ALIVE: "2m"

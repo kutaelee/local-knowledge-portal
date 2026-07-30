@@ -115,7 +115,12 @@ def test_ollama_generation_uses_structured_output_and_records_digest():
                         },
                         ensure_ascii=False,
                     ),
-                }
+                },
+                "prompt_eval_count": 100,
+                "prompt_eval_duration": 20_000_000,
+                "eval_count": 50,
+                "eval_duration": 500_000_000,
+                "load_duration": 10_000_000,
             },
         )
 
@@ -130,6 +135,18 @@ def test_ollama_generation_uses_structured_output_and_records_digest():
     assert result.model_digest == "sha256:model-v1"
     assert result.content.summary == "검증된 요약"
     assert result.content.inferences_needing_confirmation
+    assert provider.performance_metrics() == {
+        "requests": 1,
+        "prompt_tokens": 100,
+        "prompt_duration_ns": 20_000_000,
+        "generated_tokens": 50,
+        "generation_duration_ns": 500_000_000,
+        "load_duration_ns": 10_000_000,
+        "prompt_tokens_per_second": 5000.0,
+        "decode_tokens_per_second": 100.0,
+        "context_window": 16_384,
+        "num_batch": 1_024,
+    }
 
 
 def test_ollama_generation_fails_closed_on_digest_change():
@@ -163,6 +180,7 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         attempts += 1
         payload = json.loads(request.content)
         assert payload["keep_alive"] == "0"
+        assert payload["options"]["num_batch"] == 1024
         assert "not about embedding" in payload["messages"][0]["content"]
         assert "untrusted data" in payload["messages"][0]["content"]
         assert "jotting down" in payload["messages"][0]["content"]
@@ -171,6 +189,7 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         if attempts == 1:
             posts = _valid_feed_posts()
             posts[0]["source_ids"] = ["INVENTED"]
+            posts[0]["sentences_ko"] = ["가" * 75, "나" * 75]
         else:
             assert "failed deterministic validation" in payload["messages"][-1]["content"]
             posts = _valid_feed_posts()
@@ -301,7 +320,7 @@ def test_developer_feed_repairs_manifesto_tone():
     assert draft.posts[3].role == "afterthought"
 
 
-def test_developer_feed_repairs_self_imposed_rule():
+def test_developer_feed_allows_casual_self_imposed_plan_without_calling_it_a_belief():
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -313,11 +332,10 @@ def test_developer_feed_repairs_self_imposed_rule():
             )
         attempts += 1
         posts = _valid_feed_posts()
-        if attempts == 1:
-            posts[3]["sentences_ko"] = [
-                "GPU를 오래 잡은 프로세스 때문에 잠깐 당황했어요.",
-                "앞으로는 서버와 연산 작업을 확실히 분리해서 관리해야겠어요.",
-            ]
+        posts[3]["sentences_ko"] = [
+            "GPU를 오래 잡은 프로세스 때문에 잠깐 당황했어요.",
+            "앞으로는 서버와 연산 작업을 확실히 분리해서 관리해야겠어요.",
+        ]
         return httpx.Response(
             200,
             json={
@@ -346,8 +364,8 @@ def test_developer_feed_repairs_self_imposed_rule():
         {"sources": [{"id": "D1", "content": "current document"}]},
         prompt_version="feed-test-v1",
     )
-    assert attempts == 2
-    assert "해야겠" not in draft.posts[3].content_ko
+    assert attempts == 1
+    assert "해야겠" in draft.posts[3].content_ko
 
 
 def test_developer_feed_repairs_formal_translated_korean():

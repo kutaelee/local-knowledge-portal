@@ -28,7 +28,10 @@ $modelName = if ($feed.generator_model) {
 else {
     "model-unresolved"
 }
-$modelSlug = $modelName -replace '[^A-Za-z0-9._-]', '-'
+$modelSlug = switch ($modelName) {
+    "gemma4:12b" { "gemma4-12b-q4_K_M" }
+    default { $modelName -replace '[^A-Za-z0-9._-]', '-' }
+}
 $workload = "local-knowledge-portal-write-information-feed-model-$modelSlug"
 $status = Invoke-RestMethod -Uri "http://127.0.0.1:8790/api/status" -TimeoutSec 3
 $existing = @(
@@ -45,14 +48,6 @@ if ($existing.Count -gt 0) {
 }
 
 $gpuq = Get-Command "gpuq" -ErrorAction Stop
-$linuxCommand = @(
-    "LKP_REPO_PATH=/mnt/c/Dev/Repos/local-knowledge-portal",
-    "docker", "compose",
-    "--env-file", "/mnt/c/Docker/local-knowledge-portal/.env",
-    "-f", "/mnt/c/Dev/Repos/local-knowledge-portal/infra/docker/compose.wsl.yaml",
-    "--profile", "manual-developer-feed",
-    "run", "--rm", "--no-deps", "developer-feed"
-) -join " "
 $command = @(
     "run",
     "--vram", [string]$VramMiB,
@@ -63,7 +58,7 @@ $command = @(
     "--workload", $workload,
     "--",
     "wsl.exe", "-d", "Ubuntu", "--",
-    "bash", "-lc", $linuxCommand
+    "sh", "/home/kutae/src/local-knowledge-portal/scripts/run-gpu-developer-feed.sh"
 )
 
 & $gpuq.Source @command

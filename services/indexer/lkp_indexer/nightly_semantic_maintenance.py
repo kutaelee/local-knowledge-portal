@@ -9,6 +9,12 @@ from lkp.settings import get_settings
 
 from .cli import get_embedder
 from .embedding_recovery_probe import run as run_recovery_probe
+from .embedding_reindex import (
+    run_with_embedder as run_document_reindex,
+)
+from .embedding_reindex import (
+    wait_for_ingest_quiescence,
+)
 from .knowledge_dedup import run_once as run_dedup
 from .service_runtime import assert_mount_guards, service_pid
 
@@ -22,6 +28,25 @@ def run() -> tuple[dict, int]:
     result: dict = {}
     failures = 0
     try:
+        ingest = wait_for_ingest_quiescence()
+        result["ingest"] = ingest
+        if ingest["state"] != "quiescent":
+            failures += 1
+            result["document_reindex"] = {"state": "skipped_ingest_busy"}
+        else:
+            try:
+                result["document_reindex"] = run_document_reindex(
+                    settings,
+                    embedder,
+                    None,
+                )
+            except Exception as exc:
+                failures += 1
+                result["document_reindex"] = {
+                    "state": "failed",
+                    "error_type": type(exc).__name__,
+                }
+
         try:
             with SessionLocal() as session:
                 result["deduplication"] = run_dedup(session, settings, embedder)

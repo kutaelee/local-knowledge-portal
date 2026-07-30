@@ -7,12 +7,13 @@ GPU-backed Ollama service over the private Compose network.
 
 import argparse
 import json
+import time
 from datetime import datetime, timezone
 
 from lkp.db import SessionLocal
-from lkp.models import Document, DocumentState, DocumentVersion
+from lkp.models import Document, DocumentState, DocumentVersion, IngestJob, JobStatus
 from lkp.settings import get_settings
-from sqlalchemy import select, text
+from sqlalchemy import func, or_, select, text
 
 from .cli import get_embedder
 from .worker import _embed_missing
@@ -24,12 +25,59 @@ def run(limit: int | None = None) -> dict[str, int | str]:
         raise RuntimeError("GPU reindex requires LKP_EMBEDDING_TIMEOUT_CIRCUIT_BYPASS=true")
     embedder = get_embedder(settings, deterministic=False)
     try:
-        return _run(settings, embedder, limit)
+        return run_with_embedder(settings, embedder, limit)
     finally:
         embedder.close()
 
 
-def _run(settings, embedder, limit: int | None) -> dict[str, int | str]:
+def wait_for_ingest_quiescence(
+    *,
+    timeout_seconds: int = 120,
+    poll_seconds: float = 2,
+    stable_checks: int = 2,
+) -> dict[str, int | float | str]:
+    """Wait for two quiet queue observations before freezing the reindex set."""
+
+    started = time.monotonic()
+    quiet = 0
+    active = 0
+    while True:
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as session:
+            active = int(
+                session.scalar(
+                    select(func.count(IngestJob.id)).where(
+                        or_(
+                            IngestJob.status.in_(
+                                [JobStatus.leased, JobStatus.processing]
+                            ),
+                            (
+                                (IngestJob.status == JobStatus.pending)
+                                & (IngestJob.available_at <= now)
+                            ),
+                        )
+                    )
+                )
+                or 0
+            )
+        quiet = quiet + 1 if active == 0 else 0
+        elapsed = time.monotonic() - started
+        if quiet >= stable_checks:
+            return {
+                "state": "quiescent",
+                "active_jobs": 0,
+                "waited_seconds": round(elapsed, 3),
+            }
+        if elapsed >= timeout_seconds:
+            return {
+                "state": "timeout",
+                "active_jobs": active,
+                "waited_seconds": round(elapsed, 3),
+            }
+        time.sleep(poll_seconds)
+
+
+def run_with_embedder(settings, embedder, limit: int | None) -> dict:
     result = {"examined": 0, "embedded": 0, "still_deferred": 0, "skipped": 0}
     with SessionLocal() as session:
         statement = (
@@ -60,7 +108,12 @@ def _run(settings, embedder, limit: int | None) -> dict[str, int | str]:
             else:
                 result["skipped"] += 1
             session.commit()
-    return {**result, "completed_at": datetime.now(timezone.utc).isoformat()}
+    metrics = getattr(embedder, "performance_metrics", None)
+    return {
+        **result,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "model_performance": metrics() if metrics is not None else None,
+    }
 
 
 def main() -> None:

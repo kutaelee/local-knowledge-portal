@@ -43,6 +43,13 @@ class OllamaEmbedder:
         self.dimension = dimension
         self.timeout_seconds = timeout_seconds
         self.keep_alive = keep_alive
+        self._performance = {
+            "requests": 0,
+            "inputs": 0,
+            "prompt_tokens": 0,
+            "total_duration_ns": 0,
+            "load_duration_ns": 0,
+        }
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         response = httpx.post(
@@ -55,7 +62,18 @@ class OllamaEmbedder:
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
-        vectors = response.json()["embeddings"]
+        payload = response.json()
+        vectors = payload["embeddings"]
+        self._performance["requests"] += 1
+        self._performance["inputs"] += len(texts)
+        for source, target in (
+            ("prompt_eval_count", "prompt_tokens"),
+            ("total_duration", "total_duration_ns"),
+            ("load_duration", "load_duration_ns"),
+        ):
+            value = payload.get(source)
+            if isinstance(value, int) and value >= 0:
+                self._performance[target] += value
         if any(len(vector) != self.dimension for vector in vectors):
             actual = sorted({len(vector) for vector in vectors})
             raise DimensionMismatch(
@@ -63,6 +81,31 @@ class OllamaEmbedder:
                 "reindex required"
             )
         return vectors
+
+    def performance_metrics(self) -> dict[str, int | float | None]:
+        active_duration = max(
+            0,
+            self._performance["total_duration_ns"]
+            - self._performance["load_duration_ns"],
+        )
+        return {
+            **self._performance,
+            "inputs_per_second": (
+                round(self._performance["inputs"] * 1_000_000_000 / active_duration, 3)
+                if active_duration
+                else None
+            ),
+            "prompt_tokens_per_second": (
+                round(
+                    self._performance["prompt_tokens"]
+                    * 1_000_000_000
+                    / active_duration,
+                    2,
+                )
+                if active_duration and self._performance["prompt_tokens"]
+                else None
+            ),
+        }
 
     def close(self) -> None:
         """Best-effort explicit unload; never mask the completed workload."""
@@ -132,6 +175,15 @@ class RateLimitedEmbedder:
         close = getattr(self.delegate, "close", None)
         if close is not None:
             close()
+
+    def performance_metrics(self) -> dict[str, int | float | None]:
+        metrics = getattr(self.delegate, "performance_metrics", None)
+        result = metrics() if metrics is not None else {}
+        return {
+            **result,
+            "batch_size": self.batch_size,
+            "cooldown_seconds": self.cooldown_seconds,
+        }
 
 
 class CachedEmbedder:

@@ -13,6 +13,7 @@ compose() {
 containers="
 local-knowledge-portal-nightly-semantic
 local-knowledge-portal-nightly-generation
+local-knowledge-portal-nightly-embedding-refresh
 local-knowledge-portal-nightly-feed
 "
 
@@ -56,13 +57,27 @@ stage generation-maintenance \
     knowledge-curator python -m lkp_indexer.nightly_generation_maintenance ||
   failures=$((failures + 1))
 
-stage information-feed \
-  compose --profile manual-developer-feed run --rm --no-deps \
-    --name local-knowledge-portal-nightly-feed \
-    -e LKP_DEVELOPER_FEED_DAILY_HOUR=0 \
-    -e LKP_DEVELOPER_FEED_DAILY_SUMMARY_LAG_DAYS=1 \
-    developer-feed ||
+feed_ready=true
+if ! stage post-generation-embedding \
+  compose --profile manual-embedding run --rm --no-deps \
+    --name local-knowledge-portal-nightly-embedding-refresh \
+    embedding-reindex python -m lkp_indexer.nightly_embedding_refresh
+then
   failures=$((failures + 1))
+  feed_ready=false
+fi
+
+if [ "$feed_ready" = true ]; then
+  stage information-feed \
+    compose --profile manual-developer-feed run --rm --no-deps \
+      --name local-knowledge-portal-nightly-feed \
+      -e LKP_DEVELOPER_FEED_DAILY_HOUR=0 \
+      -e LKP_DEVELOPER_FEED_DAILY_SUMMARY_LAG_DAYS=1 \
+      developer-feed ||
+    failures=$((failures + 1))
+else
+  printf '{"event":"stage_skipped","stage":"information-feed","reason":"embedding_not_ready"}\n'
+fi
 
 if [ "$failures" -ne 0 ]; then
   printf '{"event":"nightly_completed","state":"completed_with_errors","failed_stages":%s}\n' \

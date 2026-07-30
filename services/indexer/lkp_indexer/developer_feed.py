@@ -10,7 +10,6 @@ from pathlib import PurePath
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import httpx
 from lkp.db import SessionLocal
 from lkp.models import (
     ChunkEmbedding,
@@ -30,6 +29,7 @@ from .generation import DeveloperFeedDraft, GenerationProvider, OllamaGeneration
 from .service_runtime import assert_mount_guards, service_pid
 
 _LOCK_KEY = "developer_feed.publisher.v2"
+_FEED_JOURNAL_STATUSES = ("VERIFIED", "OBSERVED_CHANGE")
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +165,7 @@ def _eligible_batch(
         session.scalars(
             select(ProjectJournalEntry)
             .where(
-                ProjectJournalEntry.verification_status == "VERIFIED",
+                ProjectJournalEntry.verification_status.in_(_FEED_JOURNAL_STATUSES),
                 ProjectJournalEntry.occurred_at
                 >= now - timedelta(hours=settings.developer_feed_initial_lookback_hours),
             )
@@ -208,6 +208,12 @@ def _eligible_batch(
                 "intent": redact_text(journal.intent, max_chars=1500),
                 "change": redact_text(journal.change_summary, max_chars=3000),
                 "resolution": redact_text(journal.resolution, max_chars=1500),
+                "verification_status": journal.verification_status,
+                "claim_scope": (
+                    "verified_result"
+                    if journal.verification_status == "VERIFIED"
+                    else "observed_change_only"
+                ),
                 "passing_verification": passing_checks[:10],
             }
         )
@@ -331,7 +337,11 @@ def _add_thread(
     return posts
 
 
-def _provider(settings: Settings) -> OllamaGenerationProvider:
+def _provider(
+    settings: Settings,
+    *,
+    keep_alive: str = "0",
+) -> OllamaGenerationProvider:
     return OllamaGenerationProvider(
         settings.generation_base_url,
         settings.developer_feed_model,
@@ -339,7 +349,8 @@ def _provider(settings: Settings) -> OllamaGenerationProvider:
         settings.developer_feed_timeout_seconds,
         temperature=settings.developer_feed_temperature,
         context_window=settings.developer_feed_context_window,
-        keep_alive="0",
+        num_batch=settings.developer_feed_num_batch,
+        keep_alive=keep_alive,
     )
 
 
@@ -451,6 +462,9 @@ def publish_once(
                 "editorial_intent": (
                     "Tell one connected story: observed change, practical meaning, "
                     "a clearly proposed new use or experiment, and a casual afterthought."
+                    " Sources marked observed_change_only prove only that the current embedded "
+                    "change exists; do not present their claimed success, effect, or metric as "
+                    "verified."
                 ),
                 "window": {
                     "embedded_from": batch.embedded_from.isoformat(),
@@ -626,31 +640,52 @@ def publish_once(
     }
 
 
-def _unload_model(settings: Settings) -> None:
-    try:
-        httpx.post(
-            f"{settings.generation_base_url.rstrip('/')}/api/generate",
-            json={"model": settings.developer_feed_model, "keep_alive": 0},
-            timeout=15,
-        ).raise_for_status()
-    except Exception as exc:
-        print(f"warning: failed to unload {settings.developer_feed_model}: {exc}")
-
-
 def run(settings: Settings) -> int:
     assert_mount_guards(settings)
+    provider: OllamaGenerationProvider | None = None
     try:
         with SessionLocal() as session:
             due = inspect_due(session, settings)
             if not due["pending_sources"] and not due["daily_due"]:
                 print(json.dumps({"state": "idle", **due}, ensure_ascii=False))
                 return 0
-            result = publish_once(session, settings)
-            session.commit()
-        print(json.dumps(result, ensure_ascii=False))
+            provider = _provider(settings, keep_alive="2m")
+            totals = {
+                "activity_threads": 0,
+                "daily_threads": 0,
+                "posts": 0,
+                "batches": 0,
+            }
+            for _ in range(settings.developer_feed_max_batches_per_run):
+                result = publish_once(session, settings, provider=provider)
+                session.commit()
+                if result["state"] != "published":
+                    break
+                totals["activity_threads"] += int(result["activity_threads"])
+                totals["daily_threads"] += int(result["daily_threads"])
+                totals["posts"] += int(result["posts"])
+                totals["batches"] += 1
+                due = inspect_due(session, settings)
+                if not due["pending_sources"] and not due["daily_due"]:
+                    break
+            remaining = inspect_due(session, settings)
+            metrics = provider.performance_metrics()
+        print(
+            json.dumps(
+                {
+                    "state": "published",
+                    **totals,
+                    "remaining_pending_sources": remaining["pending_sources"],
+                    "remaining_daily_due": remaining["daily_due"],
+                    "model_performance": metrics,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
     finally:
-        _unload_model(settings)
+        if provider is not None:
+            provider.close()
 
 
 def main() -> int:

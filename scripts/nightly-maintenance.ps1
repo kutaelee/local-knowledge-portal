@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(12288, 65536)]
-    [int]$VramMiB = 12288,
+    # The 32K qwen3.5 generation profile needs more KV-cache headroom than
+    # the former 16K profile, whose measured peak was already about 11.33 GiB.
+    [ValidateRange(14336, 65536)]
+    [int]$VramMiB = 14336,
     [ValidateRange(300, 86400)]
     [int]$EstimatedSeconds = 3600,
     [ValidateRange(0, 100)]

@@ -58,6 +58,9 @@ def run() -> tuple[dict, int]:
                 ]
         else:
             result["project_articles"] = []
+        metrics = getattr(provider, "performance_metrics", None)
+        if metrics is not None:
+            result["model_performance"] = metrics()
     finally:
         close = getattr(provider, "close", None)
         if close is not None:

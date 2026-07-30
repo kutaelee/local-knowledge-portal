@@ -26,16 +26,19 @@ Describe "Nightly GPU maintenance schedule" {
         Assert-Contains $source '"qwen3-embedding:0.6b"'
         Assert-Contains $source '$curation.model'
         Assert-Contains $source '$feed.generator_model'
+        Assert-Contains $source '[int]$VramMiB = 14336'
         Assert-Contains $source 'gpuq.Source wait --poll 15'
     }
 
-    It "runs the three maintenance stages sequentially with cleanup" {
+    It "runs the four maintenance stages sequentially with cleanup" {
         $source = Get-Content (
             Join-Path $repoRoot "scripts/run-gpu-nightly-maintenance.sh"
         ) -Raw
         Assert-Contains $source 'nightly_semantic_maintenance'
         Assert-Contains $source 'nightly_generation_maintenance'
+        Assert-Contains $source 'nightly_embedding_refresh'
         Assert-Contains $source 'LKP_DEVELOPER_FEED_DAILY_SUMMARY_LAG_DAYS=1'
         Assert-Contains $source 'trap cleanup EXIT INT TERM'
+        Assert-Contains $source '"reason":"embedding_not_ready"'
     }
 }

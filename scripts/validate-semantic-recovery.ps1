@@ -13,8 +13,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$workload = "local-knowledge-portal-semantic-validation"
-$reindexWorkload = "local-knowledge-portal-embedding-reindex"
+$workload = "local-knowledge-portal-semantic-validation-model-qwen3-embedding-0.6b-q8_0"
+$reindexWorkload = "local-knowledge-portal-embedding-reindex-model-qwen3-embedding-0.6b-q8_0"
 $status = Invoke-RestMethod -Uri "http://127.0.0.1:8790/api/status" -TimeoutSec 3
 $current = @($status.jobs.active) + @($status.jobs.queued)
 $existing = @($current |

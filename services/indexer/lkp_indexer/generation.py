@@ -467,6 +467,7 @@ class OllamaGenerationProvider:
         article_max_chars: int = 10_000,
         temperature: float = 0,
         context_window: int = 16_384,
+        num_batch: int = 1_024,
         keep_alive: str = "2m",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -480,9 +481,60 @@ class OllamaGenerationProvider:
         self.generation_parameters = {
             "temperature": temperature,
             "context_window": context_window,
+            "num_batch": num_batch,
             "keep_alive": keep_alive,
         }
+        self._performance = {
+            "requests": 0,
+            "prompt_tokens": 0,
+            "prompt_duration_ns": 0,
+            "generated_tokens": 0,
+            "generation_duration_ns": 0,
+            "load_duration_ns": 0,
+        }
         self.client = httpx.Client(timeout=timeout_seconds, transport=transport)
+
+    def _response_content(self, response: httpx.Response) -> str:
+        payload = response.json()
+        self._performance["requests"] += 1
+        for source, target in (
+            ("prompt_eval_count", "prompt_tokens"),
+            ("prompt_eval_duration", "prompt_duration_ns"),
+            ("eval_count", "generated_tokens"),
+            ("eval_duration", "generation_duration_ns"),
+            ("load_duration", "load_duration_ns"),
+        ):
+            value = payload.get(source)
+            if isinstance(value, int) and value >= 0:
+                self._performance[target] += value
+        content = payload.get("message", {}).get("content")
+        if not isinstance(content, str):
+            raise RuntimeError("Ollama response did not contain message.content")
+        return content
+
+    def performance_metrics(self) -> dict[str, int | float | None]:
+        prompt_duration = self._performance["prompt_duration_ns"]
+        generation_duration = self._performance["generation_duration_ns"]
+        return {
+            **self._performance,
+            "prompt_tokens_per_second": (
+                round(self._performance["prompt_tokens"] * 1_000_000_000 / prompt_duration, 2)
+                if prompt_duration
+                else None
+            ),
+            "decode_tokens_per_second": (
+                round(
+                    self._performance["generated_tokens"]
+                    * 1_000_000_000
+                    / generation_duration,
+                    2,
+                )
+                if generation_duration
+                else None
+            ),
+            "context_window": self.generation_parameters["context_window"],
+            "num_batch": self.generation_parameters["num_batch"],
+        }
 
     def _model_digest(self) -> str:
         response = self.client.get(f"{self.base_url}/api/tags")
@@ -538,15 +590,13 @@ class OllamaGenerationProvider:
                 "options": {
                     "temperature": self.generation_parameters["temperature"],
                     "num_ctx": self.generation_parameters["context_window"],
+                    "num_batch": self.generation_parameters["num_batch"],
                 },
                 "keep_alive": self.generation_parameters["keep_alive"],
             },
         )
         response.raise_for_status()
-        value = response.json().get("message", {}).get("content")
-        if not isinstance(value, str):
-            raise RuntimeError("Ollama response did not contain message.content")
-        return value
+        return self._response_content(response)
 
     def generate(self, source_text: str) -> GenerationResult:
         digest = self._model_digest()
@@ -575,13 +625,16 @@ class OllamaGenerationProvider:
                 "stream": False,
                 "think": False,
                 "format": _ollama_format_schema(schema),
-                "options": {"temperature": 0},
+                "options": {
+                    "temperature": 0,
+                    "num_ctx": self.generation_parameters["context_window"],
+                    "num_batch": self.generation_parameters["num_batch"],
+                },
+                "keep_alive": self.generation_parameters["keep_alive"],
             },
         )
         response.raise_for_status()
-        content = response.json().get("message", {}).get("content")
-        if not isinstance(content, str):
-            raise RuntimeError("Ollama response did not contain message.content")
+        content = self._response_content(response)
         return GenerationResult(
             content=KnowledgeEnrichment.model_validate_json(content),
             provider=self.provider,
@@ -650,7 +703,11 @@ class OllamaGenerationProvider:
             "as an achieved or verified result. Every post must cite one or more exact IDs "
             "from sources in source_ids; IDs are metadata and must not appear in prose. Never "
             "invent a cause, result, metric, or source ID. Do not expose secrets or absolute "
-            "paths. If post_type is daily_summary, synthesize the whole supplied local day; do "
+            "paths. A source with claim_scope=observed_change_only supports only the existence "
+            "and content of its current embedded change. Never repeat its claimed success, "
+            "effect, cause, completion state, or metric as verified; describe it as work seen "
+            "or a change being tried. If post_type is daily_summary, synthesize the whole "
+            "supplied local day; do "
             "not merely list files or repeat embedding operations. Recommend a screenshot only "
             "when a supplied source explicitly identifies a stable, non-secret visual artifact; "
             "otherwise return null for both screenshot fields. "
@@ -711,9 +768,6 @@ class OllamaGenerationProvider:
             "되어야 한다",
             "가치라고 믿",
             "본질적인 가치",
-            "앞으로는",
-            "해야겠",
-            "할 필요가",
         )
         messages = [
             {"role": "system", "content": system},
@@ -834,7 +888,11 @@ class OllamaGenerationProvider:
             draft = validate(content)
         except (ValidationError, ValueError) as exc:
             validation_errors = (
-                exc.errors(include_input=False, include_url=False)
+                exc.errors(
+                    include_input=False,
+                    include_url=False,
+                    include_context=False,
+                )
                 if isinstance(exc, ValidationError)
                 else [{"type": type(exc).__name__, "msg": str(exc)}]
             )
@@ -943,15 +1001,13 @@ class OllamaGenerationProvider:
                     "options": {
                         "temperature": self.generation_parameters["temperature"],
                         "num_ctx": self.generation_parameters["context_window"],
+                        "num_batch": self.generation_parameters["num_batch"],
                     },
                     "keep_alive": self.generation_parameters["keep_alive"],
                 },
             )
             response.raise_for_status()
-            value = response.json().get("message", {}).get("content")
-            if not isinstance(value, str):
-                raise RuntimeError("Ollama response did not contain message.content")
-            return value
+            return self._response_content(response)
 
         content = request(messages)
         try:
@@ -964,7 +1020,11 @@ class OllamaGenerationProvider:
                 if isinstance(item, dict) and item.get("id")
             ]
             validation_errors = (
-                exc.errors(include_input=False, include_url=False)
+                exc.errors(
+                    include_input=False,
+                    include_url=False,
+                    include_context=False,
+                )
                 if isinstance(exc, ValidationError)
                 else [{"type": type(exc).__name__, "msg": str(exc)}]
             )
@@ -1067,15 +1127,13 @@ class OllamaGenerationProvider:
                     "options": {
                         "temperature": self.generation_parameters["temperature"],
                         "num_ctx": self.generation_parameters["context_window"],
+                        "num_batch": self.generation_parameters["num_batch"],
                     },
                     "keep_alive": self.generation_parameters["keep_alive"],
                 },
             )
             response.raise_for_status()
-            value = response.json().get("message", {}).get("content")
-            if not isinstance(value, str):
-                raise RuntimeError("Ollama response did not contain message.content")
-            return value
+            return self._response_content(response)
 
         content = request(messages)
         allowed_ids = {
@@ -1124,6 +1182,7 @@ def build_generation_provider(settings: Settings) -> GenerationProvider | None:
             article_max_chars=settings.knowledge_curation_max_article_chars,
             temperature=settings.generation_temperature,
             context_window=settings.generation_context_window,
+            num_batch=settings.generation_num_batch,
             keep_alive=settings.generation_keep_alive,
         )
     raise ValueError(f"unsupported generation provider: {settings.generation_provider}")

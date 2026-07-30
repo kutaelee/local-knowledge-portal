@@ -113,6 +113,7 @@ def test_feed_defaults_to_three_hour_gemma_batch():
     settings = Settings()
     assert settings.developer_feed_interval_minutes == 180
     assert settings.developer_feed_daily_hour == 18
+    assert settings.developer_feed_max_batches_per_run == 8
     assert settings.developer_feed_model == "gemma4:12b"
     assert settings.developer_feed_persona_version.endswith("-session-notes")
     assert settings.developer_feed_temperature == 0.65
@@ -132,3 +133,22 @@ def test_nightly_feed_summarizes_the_previous_local_day():
     assert summary_date.isoformat() == "2026-07-29"
     assert start == datetime(2026, 7, 28, 15, 0, tzinfo=timezone.utc)
     assert end == datetime(2026, 7, 29, 15, 0, tzinfo=timezone.utc)
+
+
+def test_observed_change_claim_scope_is_exposed_to_feed_prompt():
+    payload = {
+        "post_type": "information_update",
+        "sources": [
+            {
+                "id": "J1",
+                "source_type": "verified_project_journal",
+                "verification_status": "OBSERVED_CHANGE",
+                "claim_scope": "observed_change_only",
+                "change": "A current embedded file changed.",
+            }
+        ],
+    }
+
+    bounded = _bounded_payload(payload, 4000)
+
+    assert bounded["sources"][0]["claim_scope"] == "observed_change_only"

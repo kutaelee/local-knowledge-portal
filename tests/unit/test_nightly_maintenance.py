@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from lkp_indexer import nightly_embedding_refresh as embedding_refresh
 from lkp_indexer import nightly_generation_maintenance as generation
 from lkp_indexer import nightly_semantic_maintenance as semantic
 
@@ -36,6 +37,16 @@ def test_semantic_maintenance_reuses_and_closes_one_embedder(monkeypatch):
     monkeypatch.setattr(semantic, "SessionLocal", _Session)
     monkeypatch.setattr(
         semantic,
+        "wait_for_ingest_quiescence",
+        lambda: {"state": "quiescent", "active_jobs": 0, "waited_seconds": 0},
+    )
+    monkeypatch.setattr(
+        semantic,
+        "run_document_reindex",
+        lambda _settings, value, _limit: observed.append(value) or {"embedded": 2},
+    )
+    monkeypatch.setattr(
+        semantic,
         "run_dedup",
         lambda _session, _settings, value: observed.append(value) or {"passed": 1},
     )
@@ -49,7 +60,7 @@ def test_semantic_maintenance_reuses_and_closes_one_embedder(monkeypatch):
 
     assert failures == 0
     assert result["state"] == "succeeded"
-    assert observed == [embedder, embedder]
+    assert observed == [embedder, embedder, embedder]
     assert embedder.closed == 1
 
 
@@ -83,3 +94,44 @@ def test_generation_maintenance_reuses_and_closes_one_provider(monkeypatch):
     assert result["state"] == "succeeded"
     assert observed == [provider, provider]
     assert provider.closed == 1
+
+
+def test_post_generation_embedding_refresh_reindexes_after_quiescence(monkeypatch):
+    monkeypatch.setattr(
+        embedding_refresh,
+        "wait_for_ingest_quiescence",
+        lambda: {"state": "quiescent", "active_jobs": 0, "waited_seconds": 0},
+    )
+    monkeypatch.setattr(
+        embedding_refresh,
+        "run",
+        lambda: {"embedded": 4, "still_deferred": 0},
+    )
+
+    result, exit_code = embedding_refresh.refresh()
+
+    assert exit_code == 0
+    assert result["state"] == "succeeded"
+    assert result["document_reindex"]["embedded"] == 4
+
+
+def test_post_generation_embedding_refresh_fails_closed_when_ingest_is_busy(
+    monkeypatch,
+):
+    reindex_calls = []
+    monkeypatch.setattr(
+        embedding_refresh,
+        "wait_for_ingest_quiescence",
+        lambda: {"state": "timeout", "active_jobs": 1, "waited_seconds": 120},
+    )
+    monkeypatch.setattr(
+        embedding_refresh,
+        "run",
+        lambda: reindex_calls.append(True),
+    )
+
+    result, exit_code = embedding_refresh.refresh()
+
+    assert exit_code == 1
+    assert result["state"] == "ingest_timeout"
+    assert reindex_calls == []

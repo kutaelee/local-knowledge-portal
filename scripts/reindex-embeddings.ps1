@@ -1,10 +1,9 @@
 [CmdletBinding()]
 param(
-    # qwen3-embedding:0.6b used about 6.2 GiB alongside the service runtime
-    # in a measured production backfill. Reserve a conservative 8 GiB so the
-    # scheduler never admits this task on the old 2 GiB estimate.
-    [ValidateRange(8192, 65536)]
-    [int]$VramMiB = 8192,
+    # qwen3-embedding:0.6b Q8_0 used about 6.2 GiB above the service baseline
+    # at batch two. The RTX 5090 batch-four profile reserves 10 GiB.
+    [ValidateRange(10240, 65536)]
+    [int]$VramMiB = 10240,
     [ValidateRange(60, 86400)]
     [int]$EstimatedSeconds = 1800,
     [ValidateRange(0, 100)]
@@ -14,7 +13,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$workload = "local-knowledge-portal-embedding-reindex"
+$workload = "local-knowledge-portal-embedding-reindex-model-qwen3-embedding-0.6b-q8_0"
 $status = Invoke-RestMethod -Uri "http://127.0.0.1:8790/api/status" -TimeoutSec 3
 $existing = @($status.jobs.active) + @($status.jobs.queued) |
     Where-Object { $_.workload_key -eq $workload }
