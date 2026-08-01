@@ -18,6 +18,8 @@ def test_latest_snapshot_policy_requires_nonstale_deterministic_latest() -> None
     statement = latest_snapshot_sql("snapshot")
 
     assert "snapshot.stale IS FALSE" in statement
+    assert "SELECT count(*)" in statement
+    assert "eligible.stale IS FALSE" in statement
     assert "latest.project_id = snapshot.project_id" in statement
     assert "latest.created_at DESC, latest.id DESC" in statement
 

@@ -23,6 +23,7 @@ from lkp_indexer.repository_analysis.jobs import process_repository_analysis_job
 from lkp_indexer.repository_analysis.pipeline import RepositoryAnalysisPipeline
 from lkp_indexer.repository_analysis.repository import RepositoryAnalysisStore
 from lkp_indexer.repository_analysis_report import collect, render_markdown
+from lkp_indexer.repository_reference_policy import latest_snapshot_sql
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
@@ -622,3 +623,32 @@ def test_repository_snapshot_reactivation_is_single_and_latest(
         assert rows[0]["id"] == first_snapshot_id
         assert rows[0]["stale"] is False
         assert sum(row["stale"] is False for row in rows) == 1
+
+        # Even if external corruption creates two current snapshots, every
+        # shared retrieval path must fail closed instead of choosing one.
+        session.execute(
+            text(
+                """
+                UPDATE repository_snapshot
+                SET stale = false
+                WHERE project_id = :project_id AND id != :current_id
+                """
+            ),
+            {"project_id": first.project_id, "current_id": first_snapshot_id},
+        )
+        ambiguous = (
+            session.execute(
+                text(
+                    f"""
+                SELECT s.id
+                FROM repository_snapshot s
+                WHERE s.project_id = :project_id
+                  AND {latest_snapshot_sql("s")}
+                """
+                ),
+                {"project_id": first.project_id},
+            )
+            .scalars()
+            .all()
+        )
+        assert ambiguous == []

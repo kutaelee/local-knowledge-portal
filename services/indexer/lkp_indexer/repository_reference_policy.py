@@ -19,6 +19,12 @@ def latest_snapshot_sql(snapshot_alias: str = "s") -> str:
     snapshot = _alias(snapshot_alias)
     return f"""
         {snapshot}.stale IS FALSE
+        AND 1 = (
+          SELECT count(*)
+          FROM repository_snapshot eligible
+          WHERE eligible.project_id = {snapshot}.project_id
+            AND eligible.stale IS FALSE
+        )
         AND {snapshot}.id = (
           SELECT latest.id
           FROM repository_snapshot latest
