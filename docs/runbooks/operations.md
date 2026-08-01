@@ -486,9 +486,8 @@ through the allowlisted graceful control without terminating Ollama or unrelated
 
 Use `scripts/reindex-embeddings.ps1` for documents marked `deferred_runtime`. It submits the
 one-shot reindex application through `gpuq`; it is not a direct GPU command. The wrapper
-reserves 10 GiB by default because a measured `qwen3-embedding:0.6b` Q8_0 batch-two run consumed
-about 6.2 GiB above the concurrent baseline and the GPU profile now uses batch four. Do not lower
-that reservation to the former 8 GiB estimate without a measured batch-four run. After admission, the
+reserves 8 GiB by default because a measured `qwen3-embedding:0.6b` run consumed about 6.2 GiB
+above the concurrent baseline. Do not lower that reservation without a new measured run. After admission, the
 one-shot container uses the private Compose `postgres` endpoint and the single Windows Ollama
 through `host.docker.internal`; it never starts a second Ollama daemon.
 
@@ -537,6 +536,44 @@ GPU-only recovery uses `LKP_GPU_EMBEDDING_BATCH_SIZE=4` with
 `LKP_GPU_EMBEDDING_BATCH_COOLDOWN_SECONDS=0.05`; it remains gpuq-bounded and
 splits a timeout back to single inputs. This is not a change to watcher polling,
 CPU worker concurrency, or GPU scheduler parallelism.
+
+For a complete semantic refresh, submit
+`scripts/run-gpu-semantic-maintenance.sh` as the argv of one 8 GiB `gpuq`
+reservation. It waits for ingest quiescence, refreshes deferred document chunks,
+refreshes every searchable current repository-analysis item, prunes vectors that
+belong only to stale/rejected repository snapshots, performs knowledge duplicate
+checking, and runs the semantic recovery probe. All stages reuse one embedder.
+The embedder records whether the exact model was resident before the task; it
+never unloads a pre-existing shared model. A task-owned model is unloaded with
+Ollama `keep_alive=0` and `/api/ps` is checked afterward. Cleanup failure makes
+the GPU job fail instead of being hidden.
+
+Keep `LKP_QUERY_EMBEDDING_PREWARM=false`. While the query embedding circuit is
+open, hybrid search first finds current lexical anchors and averages up to three
+of their existing vectors to expand the candidate set. This model-free
+`hybrid-seeded-vector` path does not wake Ollama. Candidate generation remains
+at least 80 rows even when the caller requests Top-5; stale revision, project
+scope, invalid provenance, reported journals, and rejected repository items are
+gated before reward-guided Top-K selection.
+
+### Codex MCP retrieval contract
+
+Codex hook ingestion and knowledge retrieval are separate. Hooks append local
+activity for later indexing; they do not inject evidence into a task. The
+read-only `local_knowledge` MCP exposes `retrieve_context`, `verify_answer`, and
+`get_source`. Retrieval automatically routes architecture/lifecycle questions
+to the current repository-analysis snapshot, failure questions to verified
+cases plus repository evidence when available, and ordinary questions to
+current document chunks. Full clauses are preserved and at most two bounded
+subqueries are issued.
+
+Only high-confidence `source` or `verified` contexts may support an answer.
+Reported journals and derived summaries are navigation only. A factual answer
+must submit explicit claim/evidence-ID pairs to `verify_answer`; the server
+selects the strongest verified candidate, allows one repair after rejection,
+and returns strict no-answer after a second rejection. Exact repository
+references are checked against the selected snapshot path, source hash, and line
+bounds before they leave the API.
 
 The former ten-minute `\LocalKnowledgePortal\ValidateSemanticRecovery` task is disabled. Retrieval
 verification now follows duplicate checking inside the shared nightly embedding stage and writes

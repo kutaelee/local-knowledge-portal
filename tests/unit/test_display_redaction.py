@@ -2,7 +2,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from lkp.main import _journal_json, _redact_search_response
+from lkp.main import _journal_json, _redact_rag_contexts, _redact_search_response
 from lkp.models import ProjectJournalEntry
 from lkp.redaction import redact_text, redact_value
 from lkp.schemas import Provenance, SearchResponse, SearchResult
@@ -19,9 +19,7 @@ def test_pairing_token_is_redacted_in_collected_and_display_text():
 
 def test_recursive_redaction_masks_secret_fields_and_bounded_metadata():
     secret = "example-pairing-value-123456"
-    value = redact_value(
-        {"authorization": f"Bearer {secret}", "nested": {"token": secret}}
-    )
+    value = redact_value({"authorization": f"Bearer {secret}", "nested": {"token": secret}})
     assert value["authorization"] == "[REDACTED]"
     assert value["nested"]["token"] == "[REDACTED]"
 
@@ -88,3 +86,18 @@ def test_search_results_are_redacted_before_rag_or_ui_serialization():
         ],
     )
     assert secret not in _redact_search_response(response).results[0].snippet
+
+
+def test_expanded_rag_context_is_redacted_after_raw_chunk_lookup():
+    secret = "example-pairing-value-123456"
+    contexts = [
+        {
+            "content": f"authorization: Bearer {secret}",
+            "provenance": {"chunk_id": "current"},
+        }
+    ]
+
+    redacted = _redact_rag_contexts(contexts)
+
+    assert secret not in redacted[0]["content"]
+    assert "[REDACTED]" in redacted[0]["content"]

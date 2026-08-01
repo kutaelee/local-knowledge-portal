@@ -6,22 +6,29 @@ import json
 import re
 import sys
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
+from lkp.rag_quality import select_verified_answer, terms
+from lkp.redaction import redact_text
 
 SERVER_NAME = "local-knowledge"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 DEFAULT_BASE_URL = "http://127.0.0.1:8010"
 SERVER_INSTRUCTIONS = (
-    "Do not call retrieve_context before inspecting current source. Call it once when the user "
-    "explicitly requests local knowledge, or when one bounded source search fails and an exact "
-    "failure, regression, prior decision, or experiment may help. Do not call for architecture "
-    "explanations or exact identifiers already answered by current source. Pass the project key. "
-    "High-confidence cited context may support claims; low confidence is a navigation hint only. "
-    "A no-answer result is not evidence. Use get_source only to verify a selected citation."
+    "Inspect current source first for exact implementation questions. Call retrieve_context once "
+    "for unfamiliar repository architecture, prior decisions, regressions, verified experiments, "
+    "or failures where historical evidence can change the answer. Pass the project key and "
+    "purpose. "
+    "The tool automatically selects current source documents, verified cases, and current "
+    "repository-analysis knowledge. High-confidence contexts may support claims; navigation is not "
+    "evidence. For a factual answer based on retrieved context, call verify_answer with up to "
+    "three "
+    "candidates. If it rejects all candidates, repair once and call it one final time; then return "
+    "no-answer. Use get_source only when an exact document chunk must be inspected."
 )
 
 TOOLS = [
@@ -30,9 +37,10 @@ TOOLS = [
         "title": "Retrieve verified local knowledge context",
         "description": (
             "Conditionally retrieve a small, provenance-bearing context from the local knowledge "
-            "portal. Call when the user requests local knowledge, or after one bounded source "
-            "search misses and a failure, regression, prior decision, or experiment may help. "
-            "Do not call when current source already answers the question. The backend "
+            "portal. Call for unfamiliar architecture/lifecycle, a prior decision, a regression "
+            "or failure, verified experiment/A-B history, or when the user requests portal "
+            "evidence. Inspect current source first for exact implementation questions, and do "
+            "not call when it already answers the question. The backend "
             "performs scope routing, wide candidate generation, reward reranking, stale/revision "
             "gates, adjacent expansion, and no-answer handling."
         ),
@@ -70,6 +78,64 @@ TOOLS = [
         },
     },
     {
+        "name": "verify_answer",
+        "title": "Verify claim and citation support",
+        "description": (
+            "Select the best claim/citation-grounded answer for a prior retrieval. On rejection, "
+            "repair once and retry once; a second rejection is a strict no-answer."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "retrieval_id": {"type": "string", "minLength": 36, "maxLength": 36},
+                "candidates": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "minLength": 1, "maxLength": 12000},
+                            "claims": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 20,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "text": {
+                                            "type": "string",
+                                            "minLength": 1,
+                                            "maxLength": 2000,
+                                        },
+                                        "citations": {
+                                            "type": "array",
+                                            "minItems": 1,
+                                            "maxItems": 10,
+                                            "items": {"type": "string", "minLength": 1},
+                                        },
+                                    },
+                                    "required": ["text", "citations"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["text", "claims"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["retrieval_id", "candidates"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+    {
         "name": "get_source",
         "title": "Verify one retrieved source chunk",
         "description": (
@@ -95,26 +161,40 @@ TOOLS = [
 ]
 
 _CLAUSE_SPLIT = re.compile(r"\s*;\s*|[\r\n]+")
-_QUERY_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_.+-]{1,39}|[0-9]+[A-Za-z]+|[가-힣]{2,20}")
-_QUERY_STOPWORDS = {
-    "and",
-    "configuration",
-    "current",
+_FAILURE_MARKERS = (
+    "error",
+    "failure",
+    "failed",
+    "regression",
+    "오류",
+    "실패",
+    "장애",
+    "원인",
+    "재현",
+)
+_ARCHITECTURE_MARKERS = (
+    "architecture",
+    "structure",
+    "lifecycle",
+    "request flow",
+    "processing flow",
+    "아키텍처",
+    "구조",
+    "라이프사이클",
+    "요청 흐름",
+    "처리 흐름",
+    "뭐하는",
+    "무엇을 하는",
+)
+_DECISION_MARKERS = (
     "decision",
-    "final",
-    "for",
-    "past",
-    "passed",
-    "serving",
-    "the",
-    "what",
-    "why",
-    "구성",
-    "근거",
-    "무엇인지",
-    "이유",
-    "현재",
-}
+    "tradeoff",
+    "why choose",
+    "결정",
+    "선택",
+    "트레이드오프",
+    "채택",
+)
 
 
 class PortalClient:
@@ -129,6 +209,10 @@ class PortalClient:
             timeout=httpx.Timeout(10.0),
             transport=transport,
         )
+        self.runtime_cache: tuple[float, dict[str, Any]] | None = None
+        self.repository_projects: dict[str, dict[str, Any]] | None = None
+        self.retrievals: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+        self.verification_attempts: dict[str, int] = {}
 
     def get(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self.client.get(path, params=params)
@@ -142,6 +226,15 @@ class PortalClient:
 
     def close(self) -> None:
         self.client.close()
+
+    def store_retrieval(self, contexts: list[dict[str, Any]]) -> str:
+        retrieval_id = str(uuid4())
+        self.retrievals[retrieval_id] = contexts
+        self.retrievals.move_to_end(retrieval_id)
+        while len(self.retrievals) > 8:
+            expired, _ = self.retrievals.popitem(last=False)
+            self.verification_attempts.pop(expired, None)
+        return retrieval_id
 
 
 def _string(value: object, field: str, *, maximum: int) -> str:
@@ -182,47 +275,59 @@ def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> dict[str
 
 
 def _runtime_mode(client: PortalClient) -> dict[str, Any]:
+    now = time.monotonic()
+    if client.runtime_cache is not None and client.runtime_cache[0] > now:
+        return client.runtime_cache[1]
     try:
         recovery = client.get("/api/v1/embedding/recovery")
     except (httpx.HTTPError, ValueError):
         return {"mode": "unknown", "reason": "runtime_status_unavailable"}
     runtime = recovery.get("runtime") or {}
     if runtime.get("open"):
-        return {
+        result = {
             "mode": "keyword-fallback",
             "reason": runtime.get("reason") or "semantic_circuit_open",
         }
-    return {"mode": "hybrid", "reason": None}
+    else:
+        result = {"mode": "hybrid", "reason": None}
+    client.runtime_cache = (now + 30, result)
+    return result
 
 
 def _subqueries(query: str) -> list[str]:
     clauses = [item.strip(" .?!") for item in _CLAUSE_SPLIT.split(query) if item.strip(" .?!")]
-    return clauses[:3] if len(clauses) > 1 else [query]
+    bounded: list[str] = []
+    for clause in clauses or [query]:
+        remaining = re.sub(r"\s+", " ", clause).strip()
+        while remaining:
+            if len(remaining) <= 500:
+                bounded.append(remaining)
+                break
+            split_at = remaining.rfind(" ", 0, 501)
+            split_at = split_at if split_at >= 250 else 500
+            bounded.append(remaining[:split_at].rstrip())
+            remaining = remaining[split_at:].lstrip()
+            if len(bounded) >= 2:
+                break
+        if len(bounded) >= 2:
+            break
+    return bounded[:2]
 
 
-def _fallback_terms(query: str) -> list[str]:
-    unique: dict[str, str] = {}
-    for token in _QUERY_TOKEN.findall(query):
-        key = token.casefold()
-        if key in _QUERY_STOPWORDS or key in unique:
-            continue
-        unique[key] = token
-
-    return sorted(unique.values(), key=_term_score, reverse=True)[:2]
-
-
-def _term_score(token: str) -> tuple[int, int]:
-    has_digit = any(char.isdigit() for char in token)
-    is_upper = token.isalpha() and token.isupper()
-    has_inner_upper = any(char.isupper() for char in token[1:])
-    distinctive = 10 if is_upper else 9 if has_inner_upper else 8 if has_digit else 0
-    return distinctive, len(token)
+def _infer_purpose(query: str, requested: str) -> str:
+    if requested != "general":
+        return requested
+    normalized = query.casefold()
+    if any(marker in normalized for marker in _FAILURE_MARKERS):
+        return "failure"
+    if any(marker in normalized for marker in _ARCHITECTURE_MARKERS):
+        return "architecture"
+    if any(marker in normalized for marker in _DECISION_MARKERS):
+        return "decision"
+    return requested
 
 
 def _query_candidates(subquery: str) -> list[str]:
-    terms = _fallback_terms(subquery)
-    if terms and _term_score(terms[0])[0] > 0:
-        return [terms[0]]
     return [subquery]
 
 
@@ -242,7 +347,12 @@ def _bounded_contexts(
         provenance = item.get("provenance") or {}
         if not isinstance(content, str) or not content:
             continue
-        identity = str(provenance.get("chunk_id") or provenance.get("content_hash") or content)
+        identity = str(
+            provenance.get("evidence_id")
+            or provenance.get("chunk_id")
+            or provenance.get("content_hash")
+            or content
+        )
         if identity in seen:
             continue
         remaining = max_chars - total
@@ -260,15 +370,182 @@ def _bounded_contexts(
     return selected, total
 
 
+def _repository_project(
+    client: PortalClient,
+    project: str | None,
+    query: str,
+) -> dict[str, Any] | None:
+    # Refresh on every retrieval. This list is tiny, while a process-lifetime
+    # cache made newly analyzed snapshots invisible until Codex restarted.
+    payload = client.get("/api/v1/repository-analysis/projects")
+    indexed: dict[str, dict[str, Any]] = {}
+    for item in payload.get("items") or []:
+        if (
+            not isinstance(item, dict)
+            or item.get("stale") is not False
+            or not item.get("snapshot_id")
+        ):
+            continue
+        for key in ("canonical_name", "display_name"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                indexed[value.strip().casefold()] = item
+    client.repository_projects = indexed
+    if project:
+        return client.repository_projects.get(project.casefold())
+
+    normalized_query = re.sub(r"[^a-z0-9가-힣]+", "", query.casefold())
+    matches: dict[str, dict[str, Any]] = {}
+    for alias, item in client.repository_projects.items():
+        normalized_alias = re.sub(r"[^a-z0-9가-힣]+", "", alias)
+        if len(normalized_alias) >= 3 and normalized_alias in normalized_query:
+            matches[str(item.get("id"))] = item
+    return next(iter(matches.values())) if len(matches) == 1 else None
+
+
+def _valid_repository_references(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    valid: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        start = item.get("start_line")
+        end = item.get("end_line")
+        if (
+            isinstance(item.get("file"), str)
+            and len(str(item.get("source_hash") or "")) == 64
+            and isinstance(start, int)
+            and isinstance(end, int)
+            and start >= 1
+            and end >= start
+        ):
+            valid.append(item)
+    return valid[:8]
+
+
+def _repository_contexts(
+    client: PortalClient,
+    *,
+    query: str,
+    project: dict[str, Any],
+    top_k: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    payload = client.get(
+        "/api/v1/repository-analysis/search",
+        params={
+            "q": query,
+            "project_id": project["id"],
+            "snapshot_id": project["snapshot_id"],
+            "mode": "hybrid",
+            "limit": top_k,
+        },
+    )
+    contexts: list[dict[str, Any]] = []
+    for row in payload.get("items") or []:
+        if not isinstance(row, dict):
+            continue
+        references = _valid_repository_references(row.get("source_references"))
+        if not references:
+            continue
+        item_id = str(row.get("id") or "")
+        if not item_id:
+            continue
+        sections = [
+            str(row.get("title") or ""),
+            str(row.get("summary") or ""),
+            str(row.get("detail") or ""),
+        ]
+        steps = row.get("processing_steps")
+        if isinstance(steps, list) and steps:
+            sections.append("처리 단계: " + " / ".join(str(item) for item in steps[:12]))
+        content = redact_text("\n\n".join(item for item in sections if item).strip())
+        validation = str(row.get("validation_status") or "")
+        level = (
+            "verified"
+            if validation
+            in {"SOURCE_VERIFIED", "TEST_VERIFIED", "RUNTIME_VERIFIED", "HUMAN_APPROVED"}
+            else "derived"
+        )
+        evidence_id = f"repository:{item_id}"
+        contexts.append(
+            {
+                "content": content,
+                "retrieval_score": row.get("vector_similarity")
+                or min(1.0, float(row.get("keyword_matches") or 0) / 4),
+                "title": row.get("title"),
+                "project": row.get("project"),
+                "tags": [
+                    f"repository:{row.get('knowledge_type')}",
+                    f"validation:{validation}",
+                ],
+                "match_reason": [
+                    f"repository-mode:{payload.get('mode')}",
+                    f"knowledge-type:{row.get('knowledge_type')}",
+                ],
+                "evidence_level": level,
+                "_confidence": "high" if level == "verified" else "low",
+                "provenance": {
+                    "evidence_id": evidence_id,
+                    "source_kind": "repository_analysis",
+                    "repository_project_id": str(row.get("project_id") or project["id"]),
+                    "snapshot_id": str(row.get("snapshot_id") or project["snapshot_id"]),
+                    "snapshot_source_hash": str(row.get("source_hash") or ""),
+                    "knowledge_item_id": item_id,
+                    "validation_status": validation,
+                    "source_references": references,
+                },
+            }
+        )
+    return contexts, {
+        "mode": payload.get("mode"),
+        "snapshot_id": project.get("snapshot_id"),
+        "result_count": len(contexts),
+    }
+
+
+def _context_selection_score(item: dict[str, Any], query: str, purpose: str) -> float:
+    query_terms = terms(query)
+    searchable = " ".join(
+        [
+            str(item.get("title") or ""),
+            str(item.get("content") or ""),
+            " ".join(str(tag) for tag in item.get("tags") or []),
+        ]
+    )
+    coverage = len(query_terms.intersection(terms(searchable))) / max(1, len(query_terms))
+    level = str(item.get("evidence_level") or "derived")
+    evidence = {"verified": 1.0, "source": 0.85}.get(level, 0.0)
+    raw_retrieval = max(0.0, float(item.get("retrieval_score") or 0.0))
+    retrieval = min(1.0, raw_retrieval * 61 if raw_retrieval <= 0.05 else raw_retrieval)
+    provenance = item.get("provenance") or {}
+    tags = " ".join(str(tag).casefold() for tag in item.get("tags") or [])
+    purpose_bonus = 0.0
+    if purpose in {"architecture", "repository"} and provenance.get("source_kind") == (
+        "repository_analysis"
+    ):
+        purpose_bonus = 1.0
+    elif purpose == "failure" and any(
+        marker in tags for marker in ("error", "failure", "troubleshooting", "lifecycle:verified")
+    ):
+        purpose_bonus = 1.0
+    return round(0.48 * coverage + 0.27 * evidence + 0.15 * retrieval + 0.10 * purpose_bonus, 6)
+
+
 def retrieve_context(client: PortalClient, arguments: dict[str, Any]) -> dict[str, Any]:
     query = _string(arguments.get("query"), "query", maximum=1000)
     project_value = arguments.get("project")
-    project = (
-        _string(project_value, "project", maximum=200) if project_value is not None else None
-    )
-    purpose = arguments.get("purpose", "general")
-    if purpose not in {"failure", "architecture", "decision", "repository", "general"}:
+    project = _string(project_value, "project", maximum=200) if project_value is not None else None
+    requested_purpose = arguments.get("purpose", "general")
+    if requested_purpose not in {
+        "failure",
+        "architecture",
+        "decision",
+        "repository",
+        "general",
+    }:
         raise ValueError("purpose is not supported")
+    purpose = _infer_purpose(query, requested_purpose)
     top_k = _integer(arguments.get("top_k"), "top_k", default=5, minimum=1, maximum=10)
     max_chars = _integer(
         arguments.get("max_chars"),
@@ -277,18 +554,50 @@ def retrieve_context(client: PortalClient, arguments: dict[str, Any]) -> dict[st
         minimum=1000,
         maximum=8000,
     )
-    filters: dict[str, Any] = {}
-    if project:
-        filters["project"] = project
     started = time.perf_counter()
     planned = _subqueries(query)
     per_query_chars = max(1000, max_chars // len(planned))
     attempted = list(
         dict.fromkeys(candidate for item in planned for candidate in _query_candidates(item))
     )
+    repository_project: dict[str, Any] | None = None
+    if purpose in {"failure", "architecture", "repository"}:
+        try:
+            repository_project = _repository_project(client, project, query)
+        except (httpx.HTTPError, ValueError):
+            repository_project = None
+    effective_project = project
+    if repository_project and isinstance(repository_project.get("canonical_name"), str):
+        effective_project = repository_project["canonical_name"]
+    filters: dict[str, Any] = {}
+    if effective_project:
+        filters["project"] = effective_project
 
-    def fetch(candidate: str) -> dict[str, Any]:
-        return client.post(
+    tasks: list[tuple[str, str]] = []
+    if purpose in {"architecture", "repository"} and repository_project:
+        tasks.extend(("repository", candidate) for candidate in attempted)
+    else:
+        tasks.extend(("documents", candidate) for candidate in attempted)
+        if purpose == "failure" and repository_project:
+            tasks.append(("repository", attempted[0]))
+
+    def fetch(task: tuple[str, str]) -> dict[str, Any]:
+        kind, candidate = task
+        try:
+            if kind == "repository" and repository_project:
+                contexts, metadata = _repository_contexts(
+                    client,
+                    query=candidate,
+                    project=repository_project,
+                    top_k=top_k,
+                )
+                return {
+                    "kind": kind,
+                    "query": candidate,
+                    "contexts": contexts,
+                    "metadata": metadata,
+                }
+            response = client.post(
                 "/api/v1/rag/context",
                 {
                     "query": candidate,
@@ -297,44 +606,103 @@ def retrieve_context(client: PortalClient, arguments: dict[str, Any]) -> dict[st
                     "filters": filters,
                 },
             )
+            contexts: list[dict[str, Any]] = []
+            for raw in response.get("context") or []:
+                if not isinstance(raw, dict):
+                    continue
+                item = dict(raw)
+                provenance = dict(item.get("provenance") or {})
+                if provenance.get("chunk_id"):
+                    provenance.setdefault("evidence_id", str(provenance["chunk_id"]))
+                item["provenance"] = provenance
+                item["content"] = redact_text(str(item.get("content") or ""))
+                item.setdefault("evidence_level", "derived")
+                item["_confidence"] = str(response.get("confidence") or "low")
+                contexts.append(item)
+            return {
+                "kind": kind,
+                "query": candidate,
+                "contexts": contexts,
+                "metadata": {"confidence": response.get("confidence")},
+            }
+        except (httpx.HTTPError, ValueError) as exc:
+            return {
+                "kind": kind,
+                "query": candidate,
+                "contexts": [],
+                "metadata": {"error": type(exc).__name__},
+            }
 
-    with ThreadPoolExecutor(max_workers=min(3, len(attempted))) as executor:
-        responses = list(executor.map(fetch, attempted))
+    with ThreadPoolExecutor(max_workers=min(3, max(1, len(tasks)))) as executor:
+        responses = list(executor.map(fetch, tasks))
+    if (
+        purpose in {"architecture", "repository"}
+        and repository_project
+        and not any(response["contexts"] for response in responses)
+    ):
+        fallback_tasks = [("documents", candidate) for candidate in attempted]
+        with ThreadPoolExecutor(max_workers=min(2, len(fallback_tasks))) as executor:
+            fallback_responses = list(executor.map(fetch, fallback_tasks))
+        tasks.extend(fallback_tasks)
+        responses.extend(fallback_responses)
     raw_contexts: list[dict[str, Any]] = []
-    confidences: list[str] = []
     for response in responses:
-        contexts = response.get("context")
-        if isinstance(contexts, list) and contexts:
-            raw_contexts.extend(item for item in contexts if isinstance(item, dict))
-            confidences.append(str(response.get("confidence") or "low"))
-    api_calls = len(responses)
+        raw_contexts.extend(response["contexts"])
+    api_calls = len(tasks)
+    runtime = _runtime_mode(client)
+    supporting: list[dict[str, Any]] = []
+    navigation_source: list[dict[str, Any]] = []
+    for item in raw_contexts:
+        level = str(item.get("evidence_level") or "derived")
+        item_confidence = str(item.pop("_confidence", "low"))
+        item["selection_score"] = _context_selection_score(item, query, purpose)
+        if level in {"verified", "source"} and item_confidence == "high":
+            supporting.append(item)
+        else:
+            navigation_source.append(item)
+    supporting.sort(
+        key=lambda item: (
+            float(item.get("selection_score") or 0),
+            item.get("evidence_level") == "verified",
+        ),
+        reverse=True,
+    )
+    navigation_source.sort(
+        key=lambda item: float(item.get("selection_score") or 0),
+        reverse=True,
+    )
     contexts, context_chars = _bounded_contexts(
-        raw_contexts,
+        supporting,
         top_k=top_k,
         max_chars=max_chars,
     )
-    confidence = "high" if "high" in confidences else "low" if contexts else "none"
-    runtime = _runtime_mode(client)
-    if runtime["mode"] != "hybrid" and confidence == "high":
-        confidence = "low"
+    confidence = "high" if contexts else "low" if raw_contexts else "none"
     navigation: list[dict[str, Any]] = []
-    if confidence == "low":
-        for item in contexts:
+    if not contexts:
+        navigation_contexts, _ = _bounded_contexts(
+            navigation_source,
+            top_k=top_k,
+            max_chars=min(max_chars, 2000),
+        )
+        for item in navigation_contexts:
             content = str(item.get("content") or "")
             navigation.append(
                 {
                     "snippet": content[:240].rstrip() + ("…" if len(content) > 240 else ""),
                     "retrieval_score": item.get("retrieval_score"),
+                    "evidence_level": item.get("evidence_level"),
                     "provenance": item.get("provenance") or {},
                 }
             )
-        contexts = []
-        context_chars = 0
     navigation_chars = sum(len(item["snippet"]) for item in navigation)
+    retrieval_id = client.store_retrieval(contexts) if contexts else None
     return {
         "query": query,
         "project": project,
+        "effective_project": effective_project,
+        "requested_purpose": requested_purpose,
         "purpose": purpose,
+        "retrieval_id": retrieval_id,
         "confidence": confidence,
         "no_answer": not contexts,
         "navigation_available": bool(navigation),
@@ -344,6 +712,8 @@ def retrieve_context(client: PortalClient, arguments: dict[str, Any]) -> dict[st
         "metrics": {
             "api_calls": api_calls,
             "subqueries": attempted,
+            "ranges": [kind for kind, _ in tasks],
+            "range_results": [response["metadata"] for response in responses],
             "context_count": len(contexts),
             "context_chars": context_chars,
             "navigation_count": len(navigation),
@@ -385,12 +755,61 @@ def get_source(client: PortalClient, arguments: dict[str, Any]) -> dict[str, Any
     raise ValueError("chunk is not part of the current document version")
 
 
+def verify_answer(client: PortalClient, arguments: dict[str, Any]) -> dict[str, Any]:
+    retrieval_id = _string(arguments.get("retrieval_id"), "retrieval_id", maximum=36)
+    UUID(retrieval_id)
+    contexts = client.retrievals.get(retrieval_id)
+    if contexts is None:
+        raise ValueError("retrieval_id is unknown or expired")
+    attempt = client.verification_attempts.get(retrieval_id, 0) + 1
+    if attempt > 2:
+        raise ValueError("verification already used its single repair attempt")
+    candidates = arguments.get("candidates")
+    if not isinstance(candidates, list) or not 1 <= len(candidates) <= 3:
+        raise ValueError("candidates must contain between one and three answers")
+    for candidate_index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            raise ValueError("each candidate requires text and claims")
+        _string(candidate.get("text"), f"candidates[{candidate_index}].text", maximum=12000)
+        claims = candidate.get("claims")
+        if not isinstance(claims, list) or not 1 <= len(claims) <= 20:
+            raise ValueError("each candidate requires between one and twenty claims")
+        for claim_index, claim in enumerate(claims):
+            if not isinstance(claim, dict):
+                raise ValueError("each claim requires text and citations")
+            _string(
+                claim.get("text"),
+                f"candidates[{candidate_index}].claims[{claim_index}].text",
+                maximum=2000,
+            )
+            citations = claim.get("citations")
+            if not isinstance(citations, list) or not 1 <= len(citations) <= 10:
+                raise ValueError("each claim requires between one and ten citations")
+            if not all(isinstance(citation, str) and citation for citation in citations):
+                raise ValueError("citations must be evidence ID strings")
+    client.verification_attempts[retrieval_id] = attempt
+    selected = select_verified_answer(candidates, contexts)
+    valid = not selected["no_answer"]
+    repair_allowed = not valid and attempt == 1
+    return {
+        "retrieval_id": retrieval_id,
+        "attempt": attempt,
+        "status": "verified" if valid else "repair_required" if repair_allowed else "no_answer",
+        "answer": selected["answer"] if valid else None,
+        "verification": selected["verification"],
+        "repair_allowed": repair_allowed,
+        "no_answer": not valid and not repair_allowed,
+    }
+
+
 def call_tool(client: PortalClient, name: object, arguments: object) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         return _tool_result({"error": "arguments must be an object"}, is_error=True)
     try:
         if name == "retrieve_context":
             return _tool_result(retrieve_context(client, arguments))
+        if name == "verify_answer":
+            return _tool_result(verify_answer(client, arguments))
         if name == "get_source":
             return _tool_result(get_source(client, arguments))
         return _tool_result({"error": f"unknown tool: {name}"}, is_error=True)

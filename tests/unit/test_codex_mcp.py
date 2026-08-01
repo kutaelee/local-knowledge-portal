@@ -3,14 +3,20 @@ from __future__ import annotations
 import json
 
 import httpx
-from lkp_indexer.codex_mcp import PortalClient, call_tool, handle_message
+from lkp_indexer.codex_mcp import (
+    PortalClient,
+    _repository_project,
+    _subqueries,
+    call_tool,
+    handle_message,
+)
 
 
 def _transport(request: httpx.Request) -> httpx.Response:
     if request.url.path == "/api/v1/rag/context":
         payload = json.loads(request.content)
         assert payload == {
-            "query": "MTP",
+            "query": "MTP 번역 런타임 실패 원인",
             "top_k": 5,
             "max_chars": 6000,
             "filters": {"project": "need"},
@@ -63,6 +69,40 @@ def _transport(request: httpx.Request) -> httpx.Response:
     return httpx.Response(404)
 
 
+def test_repository_project_refreshes_new_snapshot_without_mcp_restart() -> None:
+    calls = 0
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        assert request.url.path == "/api/v1/repository-analysis/projects"
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "id": "11111111-1111-4111-8111-111111111111",
+                        "canonical_name": "portal",
+                        "display_name": "Portal",
+                        "snapshot_id": "22222222-2222-4222-8222-222222222222",
+                        "stale": calls == 1,
+                    }
+                ]
+            },
+        )
+
+    client = PortalClient(transport=httpx.MockTransport(transport))
+    try:
+        assert _repository_project(client, "portal", "portal architecture") is None
+        current = _repository_project(client, "portal", "portal architecture")
+    finally:
+        client.close()
+
+    assert current is not None
+    assert current["snapshot_id"] == "22222222-2222-4222-8222-222222222222"
+    assert calls == 2
+
+
 def test_initialize_and_tool_discovery() -> None:
     client = PortalClient(transport=httpx.MockTransport(_transport))
     try:
@@ -77,7 +117,7 @@ def test_initialize_and_tool_discovery() -> None:
         )
         assert initialized is not None
         assert initialized["result"]["serverInfo"]["name"] == "local-knowledge"
-        assert "exact failure" in initialized["result"]["instructions"]
+        assert "verify_answer" in initialized["result"]["instructions"]
 
         listed = handle_message(
             client,
@@ -86,6 +126,7 @@ def test_initialize_and_tool_discovery() -> None:
         assert listed is not None
         assert [item["name"] for item in listed["result"]["tools"]] == [
             "retrieve_context",
+            "verify_answer",
             "get_source",
         ]
         assert all(item["annotations"]["readOnlyHint"] for item in listed["result"]["tools"])
@@ -157,9 +198,7 @@ def test_invalid_or_unknown_tool_fails_closed() -> None:
 
 def test_initialize_accepts_a_utf8_bom_payload() -> None:
     message = json.loads(
-        '\ufeff{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'.lstrip(
-            "\ufeff"
-        )
+        '\ufeff{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'.lstrip("\ufeff")
     )
     client = PortalClient(transport=httpx.MockTransport(_transport))
     try:
@@ -171,18 +210,21 @@ def test_initialize_accepts_a_utf8_bom_payload() -> None:
     assert response["result"]["serverInfo"]["name"] == "local-knowledge"
 
 
-def test_multi_intent_query_falls_back_to_distinctive_terms_and_caps_context() -> None:
+def test_multi_intent_query_preserves_each_clause_and_caps_context() -> None:
     def transport(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v1/embedding/recovery":
             return httpx.Response(200, json={"runtime": {"open": False}})
         payload = json.loads(request.content)
         query = payload["query"]
-        if query not in {"MTP", "SGLang"}:
+        if query not in {
+            "12B MTP serving validation",
+            "why SGLang failed for 31B",
+        }:
             return httpx.Response(
                 200,
                 json={"confidence": "none", "no_answer": True, "context": []},
             )
-        marker = "a" if query == "MTP" else "b"
+        marker = "a" if query.startswith("12B") else "b"
         return httpx.Response(
             200,
             json={
@@ -191,6 +233,7 @@ def test_multi_intent_query_falls_back_to_distinctive_terms_and_caps_context() -
                 "context": [
                     {
                         "content": marker * 900,
+                        "evidence_level": "source",
                         "provenance": {"chunk_id": marker * 8},
                     }
                 ],
@@ -217,8 +260,181 @@ def test_multi_intent_query_falls_back_to_distinctive_terms_and_caps_context() -
     assert payload["metrics"]["api_calls"] == 2
     assert payload["metrics"]["context_chars"] == 1200
     assert payload["metrics"]["subqueries"] == [
-        "MTP",
-        "SGLang",
+        "12B MTP serving validation",
+        "why SGLang failed for 31B",
     ]
     assert len(payload["contexts"]) == 2
     assert payload["contexts"][1]["truncated"] is True
+
+
+def test_long_query_is_split_inside_the_api_contract() -> None:
+    query = "word " * 190
+
+    parts = _subqueries(query)
+
+    assert len(parts) == 2
+    assert all(1 <= len(item) <= 500 for item in parts)
+    assert "".join(parts).replace(" ", "") in query.replace(" ", "")
+
+
+def test_architecture_scope_auto_routes_to_current_repository_evidence() -> None:
+    source_hash = "a" * 64
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/repository-analysis/projects":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": "11111111-1111-4111-8111-111111111111",
+                            "canonical_name": "esb",
+                            "display_name": "ESB",
+                            "snapshot_id": "22222222-2222-4222-8222-222222222222",
+                            "stale": False,
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/api/v1/repository-analysis/search":
+            assert request.url.params["q"] == "ESB가 요청을 처리하는 구조와 라이프사이클"
+            assert request.url.params["mode"] == "hybrid"
+            return httpx.Response(
+                200,
+                json={
+                    "mode": "hybrid-seeded-vector",
+                    "items": [
+                        {
+                            "id": "33333333-3333-4333-8333-333333333333",
+                            "knowledge_type": "ARCHITECTURE",
+                            "title": "ESB 요청 처리 구조",
+                            "summary": "ESB 요청 처리 구조는 수신, 라우팅, 응답 단계로 구성된다.",
+                            "detail": "현재 소스 스냅샷에서 검증된 처리 라이프사이클이다.",
+                            "processing_steps": ["수신", "라우팅", "응답"],
+                            "source_references": [
+                                {
+                                    "file": "src/main/java/EsbRoute.java",
+                                    "symbol": "EsbRoute",
+                                    "start_line": 10,
+                                    "end_line": 40,
+                                    "source_hash": source_hash,
+                                }
+                            ],
+                            "validation_status": "SOURCE_VERIFIED",
+                            "vector_similarity": 0.74,
+                            "keyword_matches": 3,
+                            "project_id": "11111111-1111-4111-8111-111111111111",
+                            "project": "ESB",
+                            "snapshot_id": "22222222-2222-4222-8222-222222222222",
+                            "source_hash": "b" * 64,
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/api/v1/embedding/recovery":
+            return httpx.Response(
+                200,
+                json={"runtime": {"open": True, "reason": "deferred_gpu_recovery"}},
+            )
+        return httpx.Response(404)
+
+    client = PortalClient(transport=httpx.MockTransport(transport))
+    try:
+        retrieved = call_tool(
+            client,
+            "retrieve_context",
+            {"query": "ESB가 요청을 처리하는 구조와 라이프사이클"},
+        )["structuredContent"]
+        first = call_tool(
+            client,
+            "verify_answer",
+            {
+                "retrieval_id": retrieved["retrieval_id"],
+                "candidates": [
+                    {
+                        "text": "ESB 요청 처리 구조는 위성 발사 단계다.",
+                        "claims": [
+                            {
+                                "text": "위성 발사 단계다.",
+                                "citations": ["repository:missing"],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )["structuredContent"]
+        evidence_id = retrieved["contexts"][0]["provenance"]["evidence_id"]
+        repaired = call_tool(
+            client,
+            "verify_answer",
+            {
+                "retrieval_id": retrieved["retrieval_id"],
+                "candidates": [
+                    {
+                        "text": "ESB 요청 처리 구조는 수신, 라우팅, 응답 단계로 구성된다.",
+                        "claims": [
+                            {
+                                "text": "ESB 요청 처리 구조는 수신, 라우팅, 응답 단계로 구성된다.",
+                                "citations": [evidence_id],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )["structuredContent"]
+    finally:
+        client.close()
+
+    assert retrieved["requested_purpose"] == "general"
+    assert retrieved["purpose"] == "architecture"
+    assert retrieved["effective_project"] == "esb"
+    assert retrieved["confidence"] == "high"
+    assert retrieved["no_answer"] is False
+    assert retrieved["metrics"]["ranges"] == ["repository"]
+    assert retrieved["metrics"]["range_results"][0]["mode"] == ("hybrid-seeded-vector")
+    assert first["status"] == "repair_required"
+    assert first["repair_allowed"] is True
+    assert "citation_unknown:0" in first["verification"]["failures"]
+    assert repaired["status"] == "verified"
+    assert repaired["attempt"] == 2
+
+
+def test_hard_gate_runs_before_top_k_selection() -> None:
+    def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/rag/context":
+            return httpx.Response(
+                200,
+                json={
+                    "confidence": "high",
+                    "context": [
+                        {
+                            "content": "An operator reported a guess.",
+                            "evidence_level": "reported",
+                            "retrieval_score": 0.9,
+                            "provenance": {"chunk_id": "reported"},
+                        },
+                        {
+                            "content": "The database lease expired.",
+                            "evidence_level": "source",
+                            "retrieval_score": 0.02,
+                            "provenance": {"chunk_id": "source"},
+                        },
+                    ],
+                },
+            )
+        if request.url.path == "/api/v1/embedding/recovery":
+            return httpx.Response(200, json={"runtime": {"open": False}})
+        return httpx.Response(404)
+
+    client = PortalClient(transport=httpx.MockTransport(transport))
+    try:
+        payload = call_tool(
+            client,
+            "retrieve_context",
+            {"query": "database lease evidence", "top_k": 1},
+        )["structuredContent"]
+    finally:
+        client.close()
+
+    assert payload["no_answer"] is False
+    assert [item["provenance"]["chunk_id"] for item in payload["contexts"]] == ["source"]

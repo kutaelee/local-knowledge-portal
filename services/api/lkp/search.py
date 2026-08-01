@@ -233,6 +233,53 @@ VECTOR_SQL = text(
     """
 )
 
+SEEDED_VECTOR_SQL = text(
+    """
+    WITH seed_vector AS MATERIALIZED (
+      SELECT avg(e.embedding) embedding
+      FROM chunk_embedding e
+      WHERE e.embedding_revision = :revision
+        AND e.chunk_id = ANY(CAST(:seed_chunk_ids AS uuid[]))
+    )
+    SELECT d.id document_id, v.id version_id, c.id chunk_id, r.name source_root,
+      d.canonical_path, d.relative_path, d.filename, d.project_key,
+      ARRAY(SELECT t.name FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+            WHERE dt.document_id = d.id ORDER BY t.name) tags,
+      c.heading_path, c.symbol_name,
+      c.start_line, c.end_line, c.content, c.content_hash, v.detected_at,
+      1 - (e.embedding <=> seed_vector.embedding) vector_similarity
+    FROM seed_vector
+    JOIN chunk_embedding e ON e.embedding_revision = :revision
+    JOIN document_chunk c ON c.id = e.chunk_id
+    JOIN document_version v ON v.id = c.document_version_id
+    JOIN document d ON d.current_version_id = v.id
+    JOIN source_root r ON r.id = d.source_root_id
+    WHERE seed_vector.embedding IS NOT NULL
+      AND d.state = 'active' AND r.data_scope = 'production'
+      AND (CAST(:source_root_id AS uuid) IS NULL
+           OR d.source_root_id = CAST(:source_root_id AS uuid))
+      AND (CAST(:project AS text) IS NULL OR d.project_key = CAST(:project AS text))
+      AND (
+        cardinality(CAST(:tags AS text[])) = 0
+        OR (CAST(:tag_mode AS text) = 'any' AND EXISTS (
+          SELECT 1 FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+          WHERE dt.document_id = d.id AND t.name = ANY(CAST(:tags AS text[]))
+        ))
+        OR (CAST(:tag_mode AS text) = 'all' AND NOT EXISTS (
+          SELECT 1 FROM unnest(CAST(:tags AS text[])) requested(name)
+          WHERE NOT EXISTS (
+            SELECT 1 FROM document_tag dt JOIN tag t ON t.id = dt.tag_id
+            WHERE dt.document_id = d.id AND t.name = requested.name
+          )
+        ))
+      )
+      AND (CAST(:path_prefix AS text) IS NULL
+           OR lower(d.relative_path) LIKE lower(:path_filter))
+    ORDER BY e.embedding <=> seed_vector.embedding
+    LIMIT :limit
+    """
+)
+
 
 def classify_confidence(
     results: list[SearchResult],
@@ -276,10 +323,35 @@ def relaxed_lexical_query(query: str) -> str | None:
     terms = list(dict.fromkeys(LEXICAL_TERMS.findall(query.casefold())))[:8]
     if len(terms) < 2:
         return None
-    return " OR ".join(
-        f'"{left}" "{right}"'
-        for left, right in combinations(terms, 2)
-    )
+    return " OR ".join(f'"{left}" "{right}"' for left, right in combinations(terms, 2))
+
+
+def lexical_seed_chunk_ids(rows: list[dict], *, limit: int = 3) -> list[str]:
+    """Choose current, evidence-bearing lexical anchors for model-free expansion."""
+
+    selected: list[str] = []
+    documents: set[str] = set()
+    for row in rows:
+        tags = set(row.get("tags") or [])
+        path = str(row.get("relative_path") or "").replace("\\", "/").casefold()
+        reported = (
+            "lifecycle:current" in tags
+            and path.startswith("_generated/projects/")
+            and ("/journal/" in path or path.endswith("/development-journal.md"))
+        )
+        anchored = bool(
+            row.get("symbol_match")
+            or row.get("path_match")
+            or float(row.get("lexical_rank") or 0) > 0
+        )
+        document_id = str(row.get("document_id") or "")
+        if reported or not anchored or not document_id or document_id in documents:
+            continue
+        selected.append(str(row["chunk_id"]))
+        documents.add(document_id)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def search(
@@ -290,21 +362,32 @@ def search(
         text("SELECT set_config('statement_timeout', :timeout, true)"),
         {"timeout": f"{settings.search_statement_timeout_ms}ms"},
     )
-    projects = session.execute(
-        text(
-            """
+    projects = list(
+        session.execute(
+            text(
+                """
             SELECT DISTINCT project_key
             FROM document
             WHERE state = 'active' AND project_key IS NOT NULL
             """
-        )
-    ).scalars()
-    scope = infer_query_scope(request.query, projects)
-    effective_request = (
-        request.model_copy(update={"project": scope.project})
-        if request.project is None and scope.inferred_project
-        else request
+            )
+        ).scalars()
     )
+    scope = infer_query_scope(request.query, projects)
+    canonical_project = next(
+        (
+            project
+            for project in projects
+            if request.project and project.casefold() == request.project.casefold()
+        ),
+        None,
+    )
+    if canonical_project:
+        effective_request = request.model_copy(update={"project": canonical_project})
+    elif request.project is None and scope.inferred_project:
+        effective_request = request.model_copy(update={"project": scope.project})
+    else:
+        effective_request = request
     lexical_rows = []
     vector_rows = []
     if effective_request.mode in {"keyword", "hybrid", "path", "symbol"}:
@@ -319,12 +402,10 @@ def search(
             case_request = effective_request.model_copy(
                 update={"tags": list(scope.preferred_tags), "tag_mode": "any"}
             )
-            case_rows = list(
-                session.execute(INDEXED_LEXICAL_SQL, _params(case_request)).mappings()
-            )
+            case_rows = list(session.execute(INDEXED_LEXICAL_SQL, _params(case_request)).mappings())
             seen = {row["chunk_id"] for row in lexical_rows}
             lexical_rows.extend(row for row in case_rows if row["chunk_id"] not in seen)
-        if effective_request.mode == "keyword" and not lexical_rows:
+        if effective_request.mode in {"keyword", "hybrid"} and not lexical_rows:
             if relaxed:
                 lexical_rows = list(
                     session.execute(
@@ -336,14 +417,14 @@ def search(
                         },
                     ).mappings()
                 )
-        if effective_request.mode == "keyword" and not lexical_rows and relaxed is None:
+        if effective_request.mode in {"keyword", "hybrid"} and not lexical_rows and relaxed is None:
             fallback_rows = list(session.execute(CONTENT_FALLBACK_SQL, params).mappings())
             indexed_chunk_ids = {row["chunk_id"] for row in lexical_rows}
             lexical_rows.extend(
                 row for row in fallback_rows if row["chunk_id"] not in indexed_chunk_ids
             )
         if (
-            effective_request.mode == "keyword"
+            effective_request.mode in {"keyword", "hybrid"}
             and not lexical_rows
             and relaxed is None
             and len(effective_request.query) <= 80
@@ -354,6 +435,7 @@ def search(
             lexical_rows.extend(
                 row for row in fallback_rows if row["chunk_id"] not in indexed_chunk_ids
             )
+    vector_reason = "semantic similarity"
     if effective_request.mode in {"semantic", "hybrid"} and embedder is not None:
         vector = embedder.embed([effective_request.query])[0]
         vector_rows = list(
@@ -363,12 +445,27 @@ def search(
                     **_params(effective_request),
                     "vector": str(vector),
                     "revision": (
-                        effective_request.embedding_revision
-                        or settings.embedding_revision
+                        effective_request.embedding_revision or settings.embedding_revision
                     ),
                 },
             ).mappings()
         )
+    elif effective_request.mode == "hybrid":
+        seed_chunk_ids = lexical_seed_chunk_ids(lexical_rows)
+        if seed_chunk_ids:
+            vector_rows = list(
+                session.execute(
+                    SEEDED_VECTOR_SQL,
+                    {
+                        **_params(effective_request),
+                        "seed_chunk_ids": seed_chunk_ids,
+                        "revision": (
+                            effective_request.embedding_revision or settings.embedding_revision
+                        ),
+                    },
+                ).mappings()
+            )
+            vector_reason = "semantic similarity (lexical-seeded)"
     scores: dict[str, dict] = {}
     rrf_k = 60
     for rank, row in enumerate(lexical_rows, 1):
@@ -396,7 +493,7 @@ def search(
         )
         item["fused"] += 1 / (rrf_k + rank)
         item["vec"] = similarity
-        item["why"].append("semantic similarity")
+        item["why"].append(vector_reason)
     ordered = sorted(scores.values(), key=lambda item: item["fused"], reverse=True)
     results = []
     for item in ordered:

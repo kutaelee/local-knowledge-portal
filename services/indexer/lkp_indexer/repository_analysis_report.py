@@ -11,6 +11,10 @@ from typing import Any
 from lkp.db import SessionLocal
 from sqlalchemy import text
 
+from .repository_reference_policy import latest_snapshot_sql
+
+_LATEST_REPOSITORY_SNAPSHOT = latest_snapshot_sql("s")
+
 _REQUIRED_SUPPORT_CATEGORIES = (
     "ENTRY_POINT",
     "CALL_FLOW",
@@ -40,30 +44,28 @@ _REQUIRED_EVALUATION_SCOPES = (
 
 
 def _rows(session: Any, statement: str, params: dict | None = None) -> list[dict]:
-    return [
-        dict(row)
-        for row in session.execute(text(statement), params or {}).mappings().all()
-    ]
+    return [dict(row) for row in session.execute(text(statement), params or {}).mappings().all()]
 
 
 def collect(session_factory: Any = SessionLocal) -> dict[str, Any]:
     with session_factory() as session:
         projects = _rows(
             session,
-            """
+            f"""
             SELECT p.id AS project_id, p.display_name, p.category,
                    s.id AS snapshot_id, s.source_hash, s.snapshot_name,
                    s.file_count, s.status AS snapshot_status, s.created_at,
                    j.id AS job_id, j.correlation_id, j.model,
                    j.model_quantization, j.prompt_version, j.metrics, j.warnings
             FROM repository_project p
-            JOIN repository_snapshot s ON s.project_id = p.id AND s.stale = false
+            JOIN repository_snapshot s ON s.project_id = p.id
             LEFT JOIN LATERAL (
               SELECT * FROM repository_analysis_job x
               WHERE x.snapshot_id = s.id
               ORDER BY x.started_at DESC LIMIT 1
             ) j ON true
             WHERE p.category LIKE 'IndigoESB %'
+              AND {_LATEST_REPOSITORY_SNAPSHOT}
             ORDER BY p.display_name
             """,
         )
@@ -119,7 +121,9 @@ def collect(session_factory: Any = SessionLocal) -> dict[str, Any]:
                         """
                     ),
                     {"s": snapshot_id},
-                ).mappings().one()
+                )
+                .mappings()
+                .one()
             )
             project["task_statuses"] = _rows(
                 session,
@@ -510,12 +514,12 @@ def collect(session_factory: Any = SessionLocal) -> dict[str, Any]:
                       ) AS unresolved_source_files
                     """
                 )
-            ).mappings().one()
+            )
+            .mappings()
+            .one()
         )
         present_projects = {project["category"] for project in projects}
-        missing_projects = sorted(
-            set(_REQUIRED_PROJECT_CATEGORIES) - present_projects
-        )
+        missing_projects = sorted(set(_REQUIRED_PROJECT_CATEGORIES) - present_projects)
         missing_categories: dict[str, list[str]] = {}
         missing_scopes: dict[str, dict[str, list[str]]] = {}
         missing_scope_totals = {
@@ -530,27 +534,24 @@ def collect(session_factory: Any = SessionLocal) -> dict[str, Any]:
             project_missing_scopes: dict[str, list[str]] = {}
             for category in _REQUIRED_SUPPORT_CATEGORIES:
                 missing = sorted(
-                    set(_REQUIRED_EVALUATION_SCOPES)
-                    - category_scopes.get(category, set())
+                    set(_REQUIRED_EVALUATION_SCOPES) - category_scopes.get(category, set())
                 )
                 if missing:
                     project_missing_scopes[category] = missing
                     for scope in missing:
                         missing_scope_totals[scope] += 1
             missing_scopes[project["category"]] = project_missing_scopes
-            missing_categories[project["category"]] = sorted(
-                project_missing_scopes
-            )
+            missing_categories[project["category"]] = sorted(project_missing_scopes)
         invariants["missing_required_projects"] = len(missing_projects)
         invariants["missing_support_categories"] = sum(
             len(items) for items in missing_categories.values()
         ) + len(missing_projects) * len(_REQUIRED_SUPPORT_CATEGORIES)
-        invariants["missing_post_persistence_retrieval_categories"] = (
-            missing_scope_totals["post_persistence_hybrid_retrieval"]
-        )
-        invariants["missing_post_persistence_answer_categories"] = (
-            missing_scope_totals["post_persistence_support_answer"]
-        )
+        invariants["missing_post_persistence_retrieval_categories"] = missing_scope_totals[
+            "post_persistence_hybrid_retrieval"
+        ]
+        invariants["missing_post_persistence_answer_categories"] = missing_scope_totals[
+            "post_persistence_support_answer"
+        ]
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "projects": projects,
@@ -580,11 +581,7 @@ def _evidence_text(references: Any) -> str:
         rendered.append(
             f"{reference.get('file')}:{reference.get('start_line')}-"
             f"{reference.get('end_line')}"
-            + (
-                f" ({reference.get('symbol')})"
-                if reference.get("symbol")
-                else ""
-            )
+            + (f" ({reference.get('symbol')})" if reference.get("symbol") else "")
         )
     return ", ".join(rendered) if rendered else "인용 없음"
 
@@ -620,9 +617,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 ),
                 _line(
                     "미해결 제외 파일",
-                    project.get("metrics", {}).get(
-                        "unresolved_skipped_file_count", 0
-                    ),
+                    project.get("metrics", {}).get("unresolved_skipped_file_count", 0),
                 ),
                 _line("Claim", counts["claims"]),
                 _line("지식 항목", counts["knowledge_items"]),
@@ -652,13 +647,11 @@ def render_markdown(report: dict[str, Any]) -> str:
             for claim in project["verified_claims"]:
                 lines.extend(
                     [
-                        f"- [{claim['claim_type']}] {claim['component']}: "
-                        f"{claim['claim_text']}",
+                        f"- [{claim['claim_type']}] {claim['component']}: {claim['claim_text']}",
                         f"  - 근거: {_evidence_text(claim['evidence'])}",
                         f"  - 설정: {_json_inline(claim['related_configs'])}",
                         f"  - 가정: {_json_inline(claim['assumptions'])}",
-                        f"  - 반대 근거: "
-                        f"{_json_inline(claim['counter_evidence'])}",
+                        f"  - 반대 근거: {_json_inline(claim['counter_evidence'])}",
                         f"  - 미확인: {_json_inline(claim['unknowns'])}",
                     ]
                 )
@@ -672,8 +665,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             *[
                 _line(
                     project["display_name"],
-                    f"{project['counts']['verified_claims']}/"
-                    f"{project['counts']['claims']} Claim",
+                    f"{project['counts']['verified_claims']}/{project['counts']['claims']} Claim",
                 )
                 for project in projects
             ],
@@ -690,9 +682,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         ]
     )
     for project in projects:
-        intervened = [
-            item for item in project["task_details"] if item["codex_intervened"]
-        ]
+        intervened = [item for item in project["task_details"] if item["codex_intervened"]]
         lines.append(_line(project["display_name"], len(intervened)))
         for item in intervened:
             lines.append(
@@ -718,10 +708,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             *[
                 _line(
                     project["display_name"],
-                    sum(
-                        item["codex_claims_authored"]
-                        for item in project["task_details"]
-                    ),
+                    sum(item["codex_claims_authored"] for item in project["task_details"]),
                 )
                 for project in projects
             ],
@@ -795,9 +782,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         ]
     )
     for project in projects:
-        missing = report["completeness"]["missing_support_categories"].get(
-            project["category"], []
-        )
+        missing = report["completeness"]["missing_support_categories"].get(project["category"], [])
         lines.extend(
             [
                 f"### {project['display_name']}",
@@ -871,10 +856,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## 완료 조건 불변식",
             "",
-            *[
-                _line(key, value)
-                for key, value in report["invariants"].items()
-            ],
+            *[_line(key, value) for key, value in report["invariants"].items()],
             "",
         ]
     )

@@ -59,7 +59,38 @@ _STOP_TERMS = {
     "에서",
     "으로",
     "하는",
+    "무엇",
+    "어떻게",
 }
+_KOREAN_PARTICLES = (
+    "으로부터",
+    "에게서",
+    "하는",
+    "에서",
+    "으로",
+    "까지",
+    "부터",
+    "처럼",
+    "보다",
+    "에게",
+    "한테",
+    "하고",
+    "이며",
+    "이고",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "의",
+    "에",
+    "와",
+    "과",
+    "도",
+    "만",
+)
+_NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?:%|ms|s|mb|gb|gi?b)?", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,11 +116,39 @@ def _normalized(value: str) -> str:
 
 
 def terms(value: str) -> set[str]:
-    return {
-        item
-        for item in _TERM.findall(value.casefold())
-        if item not in _STOP_TERMS
-    }
+    normalized: set[str] = set()
+    for raw in _TERM.findall(value.casefold()):
+        item = raw
+        for suffix in _KOREAN_PARTICLES:
+            if item.endswith(suffix) and len(item) - len(suffix) >= 2:
+                item = item[: -len(suffix)]
+                break
+        if item not in _STOP_TERMS:
+            normalized.add(item)
+    return normalized
+
+
+def evidence_level(result: SearchResult) -> str:
+    """Classify whether a current chunk may support a factual answer.
+
+    Current project journals intentionally contain reported activity. They are
+    useful navigation, but they are not execution evidence until promoted to a
+    verified case. Current source and verified case projections remain usable.
+    """
+
+    tags = set(result.tags)
+    path = result.provenance.relative_path.replace("\\", "/").casefold()
+    if "lifecycle:verified" in tags or "knowledge-value:promote" in tags:
+        return "verified"
+    if (
+        "lifecycle:current" in tags
+        and path.startswith("_generated/projects/")
+        and ("/journal/" in path or path.endswith("/development-journal.md"))
+    ):
+        return "reported"
+    if path.startswith("_generated/"):
+        return "derived"
+    return "source"
 
 
 def infer_query_scope(query: str, projects: Iterable[str]) -> RetrievalScope:
@@ -107,9 +166,7 @@ def infer_query_scope(query: str, projects: Iterable[str]) -> RetrievalScope:
         project
         for project in matches
         if not any(
-            project != other
-            and _normalized(project) in _normalized(other)
-            for other in matches
+            project != other and _normalized(project) in _normalized(other) for other in matches
         )
     ]
     project = maximal_matches[0] if len(maximal_matches) == 1 else None
@@ -133,7 +190,10 @@ def infer_query_scope(query: str, projects: Iterable[str]) -> RetrievalScope:
 
 
 def candidate_limit(top_k: int) -> int:
-    return min(200, max(30, top_k * 8))
+    # Top-K is an output budget, not a candidate-generation budget. A small
+    # caller limit previously starved verified cases that ranked outside the
+    # first 30 ANN rows before evidence-aware reranking.
+    return min(200, max(80, top_k * 10))
 
 
 def hard_gate_reason(
@@ -142,7 +202,7 @@ def hard_gate_reason(
     scope: RetrievalScope,
 ) -> str | None:
     expected_project = request.project or scope.project
-    if expected_project and result.project != expected_project:
+    if expected_project and (result.project or "").casefold() != expected_project.casefold():
         return "project_scope_violation"
     relative_path = result.provenance.relative_path.replace("\\", "/")
     if request.path_prefix and not relative_path.casefold().startswith(
@@ -193,11 +253,13 @@ def reward_result(
     preferred = set(scope.preferred_tags)
     if preferred.intersection(result.tags):
         scope_reward += 0.18
-    evidence_reward = 0.08
-    if "lifecycle:verified" in result.tags:
-        evidence_reward += 0.08
-    if any(tag.startswith("knowledge-value:") for tag in result.tags):
-        evidence_reward += 0.04
+    level = evidence_level(result)
+    evidence_reward = {
+        "verified": 0.20,
+        "source": 0.12,
+        "derived": 0.06,
+        "reported": 0.0,
+    }[level]
     lexical_signal = min(1.0, max(0.0, (result.lexical_rank or 0.0) * 4))
     retrieval_signal = min(1.0, max(0.0, result.fused_rank * 61))
     total = (
@@ -220,10 +282,7 @@ def reward_result(
 def _minimum_reward(result: SearchResult, scope: RetrievalScope) -> float:
     if result.vector_similarity is not None and result.vector_similarity >= 0.62:
         return 0.24
-    if any(
-        reason in result.match_reason
-        for reason in ("exact symbol match", "path match")
-    ):
+    if any(reason in result.match_reason for reason in ("exact symbol match", "path match")):
         return 0.20
     if set(scope.preferred_tags).intersection(result.tags):
         return 0.31
@@ -242,16 +301,12 @@ def reward_rerank(
             continue
         query_term_count = len(terms(request.query))
         has_strong_semantic = (
-            result.vector_similarity is not None
-            and result.vector_similarity >= 0.62
+            result.vector_similarity is not None and result.vector_similarity >= 0.62
         )
         has_exact_locator = any(
-            reason in result.match_reason
-            for reason in ("exact symbol match", "path match")
+            reason in result.match_reason for reason in ("exact symbol match", "path match")
         )
-        has_preferred_case = bool(
-            set(scope.preferred_tags).intersection(result.tags)
-        )
+        has_preferred_case = bool(set(scope.preferred_tags).intersection(result.tags))
         has_supported_case = has_preferred_case and reward.lexical_coverage >= 0.45
         if (
             query_term_count >= 4
@@ -281,6 +336,7 @@ def reward_rerank(
             *result.match_reason,
             f"reward-guided:{POLICY_REVISION}",
             f"query-coverage:{reward.lexical_coverage:.2f}",
+            f"evidence-level:{evidence_level(result)}",
         ]
         selected.append(result)
         per_document[document_id] += 1
@@ -346,6 +402,11 @@ def build_expanded_context(
                 {
                     "content": content,
                     "retrieval_score": result.fused_rank * math.pow(0.92, distance),
+                    "title": result.title,
+                    "project": result.project,
+                    "tags": list(result.tags),
+                    "match_reason": list(result.match_reason),
+                    "evidence_level": evidence_level(result),
                     "provenance": Provenance(
                         document_id=row["document_id"],
                         document_version_id=row["version_id"],
@@ -369,20 +430,31 @@ def verify_answer_candidate(
     candidate: dict[str, Any],
     contexts: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
-    evidence = {
-        str(item["provenance"]["chunk_id"]): item["content"]
-        for item in contexts
-        if isinstance(item.get("provenance"), dict)
-    }
+    evidence: dict[str, tuple[str, str]] = {}
+    for item in contexts:
+        provenance = item.get("provenance")
+        if not isinstance(provenance, dict):
+            continue
+        evidence_id = provenance.get("evidence_id") or provenance.get("chunk_id")
+        if evidence_id:
+            evidence[str(evidence_id)] = (
+                str(item.get("content") or ""),
+                str(item.get("evidence_level") or "derived"),
+            )
+    answer = candidate.get("text")
+    if not isinstance(answer, str) or not answer.strip():
+        return {"valid": False, "score": 0.0, "failures": ["answer_missing"]}
     claims = candidate.get("claims")
     if not isinstance(claims, list) or not claims:
         return {"valid": False, "score": 0.0, "failures": ["claim_missing"]}
     failures: list[str] = []
-    supported = 0
+    support_scores: list[float] = []
+    claim_texts: list[str] = []
     for index, claim in enumerate(claims):
         if not isinstance(claim, dict) or not isinstance(claim.get("text"), str):
             failures.append(f"claim_schema:{index}")
             continue
+        claim_texts.append(claim["text"])
         citations = claim.get("citations")
         if not isinstance(citations, list) or not citations:
             failures.append(f"citation_missing:{index}")
@@ -391,18 +463,47 @@ def verify_answer_candidate(
         if unknown:
             failures.append(f"citation_unknown:{index}")
             continue
+        citation_levels = [evidence[str(citation)][1] for citation in citations]
+        if any(level not in {"verified", "source"} for level in citation_levels):
+            failures.append(f"citation_not_grounding_evidence:{index}")
+            continue
         claim_terms = terms(claim["text"])
-        cited_terms = terms(" ".join(evidence[str(citation)] for citation in citations))
+        cited_text = " ".join(evidence[str(citation)][0] for citation in citations)
+        cited_terms = terms(cited_text)
+        claim_numbers = set(_NUMBER.findall(claim["text"]))
+        cited_numbers = set(_NUMBER.findall(cited_text))
+        if not claim_numbers.issubset(cited_numbers):
+            failures.append(f"claim_number_unsupported:{index}")
+            continue
         overlap = len(claim_terms.intersection(cited_terms)) / max(1, len(claim_terms))
         if overlap < 0.35:
             failures.append(f"claim_unsupported:{index}")
             continue
-        supported += 1
-    score = supported / len(claims)
+        evidence_quality = min(
+            {
+                "verified": 1.0,
+                "source": 0.9,
+            }[level]
+            for level in citation_levels
+        )
+        support_scores.append(0.75 * overlap + 0.25 * evidence_quality)
+
+    answer_terms = terms(answer)
+    claim_terms = terms(" ".join(claim_texts))
+    answer_coverage = len(answer_terms.intersection(claim_terms)) / max(1, len(answer_terms))
+    if answer_terms and answer_coverage < 0.55:
+        failures.append("answer_claim_coverage")
+    answer_numbers = set(_NUMBER.findall(answer))
+    claim_numbers = set(_NUMBER.findall(" ".join(claim_texts)))
+    if not answer_numbers.issubset(claim_numbers):
+        failures.append("answer_number_unclaimed")
+
+    score = sum(support_scores) / len(claims) * (0.8 + 0.2 * answer_coverage) if claims else 0.0
     return {
         "valid": not failures,
-        "score": score,
+        "score": round(score, 6),
         "failures": failures,
+        "answer_claim_coverage": round(answer_coverage, 6),
         "policy": POLICY_REVISION,
     }
 
@@ -414,8 +515,7 @@ def select_verified_answer(
     repair: Callable[[dict[str, Any], list[str]], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     evaluated = [
-        (verify_answer_candidate(candidate, contexts), candidate)
-        for candidate in candidates
+        (verify_answer_candidate(candidate, contexts), candidate) for candidate in candidates
     ]
     valid = [item for item in evaluated if item[0]["valid"]]
     if valid:
@@ -426,11 +526,13 @@ def select_verified_answer(
             "repaired": False,
             "no_answer": False,
         }
-    if repair is not None and evaluated:
+    best_verification: dict[str, Any] | None = None
+    if evaluated:
         best_verification, best_candidate = max(
             evaluated,
             key=lambda item: item[0]["score"],
         )
+    if repair is not None and best_verification is not None:
         repaired = repair(best_candidate, list(best_verification["failures"]))
         if repaired is not None:
             verification = verify_answer_candidate(repaired, contexts)
@@ -441,14 +543,20 @@ def select_verified_answer(
                     "repaired": True,
                     "no_answer": False,
                 }
-    return {
-        "answer": None,
-        "verification": {
+            best_verification = verification
+    if best_verification is not None:
+        failures = list(dict.fromkeys([*best_verification["failures"], "no_verified_answer"]))
+        final_verification = {**best_verification, "valid": False, "failures": failures}
+    else:
+        final_verification = {
             "valid": False,
             "score": 0.0,
             "failures": ["no_verified_answer"],
             "policy": POLICY_REVISION,
-        },
+        }
+    return {
+        "answer": None,
+        "verification": final_verification,
         "repaired": repair is not None,
         "no_answer": True,
     }

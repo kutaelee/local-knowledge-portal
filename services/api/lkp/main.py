@@ -25,6 +25,10 @@ from lkp_indexer.embedding_runtime import timeout_circuit_state
 from lkp_indexer.knowledge import create_candidate, evaluate_gate, publish_candidate
 from lkp_indexer.knowledge_curator import CURATION_HARNESS_VERSION
 from lkp_indexer.queue import retry_as_new
+from lkp_indexer.repository_reference_policy import (
+    current_references_sql,
+    latest_snapshot_sql,
+)
 from lkp_indexer.selection import CODE_EXTENSIONS
 from lkp_indexer.service_runtime import assert_mount_guards
 from sqlalchemy import and_, case, func, not_, or_, select, text
@@ -82,6 +86,8 @@ from .settings import get_settings
 
 settings = get_settings()
 _CURATION_WORKLOAD = "local-knowledge-portal-curation"
+_CURRENT_REPOSITORY_REFERENCES = current_references_sql("k")
+_LATEST_REPOSITORY_SNAPSHOT = latest_snapshot_sql("s")
 configure_logging("api")
 logger = structlog.get_logger()
 _SERVICE_CONFIRMATION_TTL_SECONDS = 90
@@ -142,6 +148,7 @@ def _catalog_predicate(catalog: str):
 async def lifespan(_app: FastAPI):
     prewarm_task: asyncio.Task | None = None
     if settings.query_embedding_prewarm:
+
         async def prewarm() -> None:
             started = time.perf_counter()
             try:
@@ -275,9 +282,13 @@ def ready(db: Session = Depends(get_db)) -> dict:
 def _http_service_status(url: str) -> tuple[str, str | None]:
     try:
         response = httpx.get(url, timeout=1.5, follow_redirects=False)
-        return ("healthy", None) if response.is_success else (
-            "error",
-            f"HTTP {response.status_code}",
+        return (
+            ("healthy", None)
+            if response.is_success
+            else (
+                "error",
+                f"HTTP {response.status_code}",
+            )
         )
     except httpx.TimeoutException:
         return "stale", "timeout"
@@ -324,18 +335,14 @@ def system_services(db: Session = Depends(get_db)) -> dict:
     embedding_state, embedding_error = _http_service_status(
         f"{settings.ollama_base_url}/api/version"
     )
-    gpu_state, gpu_error = _http_service_status(
-        f"{settings.gpu_scheduler_base_url}/api/health"
-    )
+    gpu_state, gpu_error = _http_service_status(f"{settings.gpu_scheduler_base_url}/api/health")
     service_manager_state, service_manager_error = _http_service_status(
         f"{settings.service_manager_base_url}/api/health"
     )
     comfyui_state, comfyui_error = _http_service_status(
         "http://host.docker.internal:8188/system_stats"
     )
-    ai_toolkit_state, ai_toolkit_error = _http_service_status(
-        "http://host.docker.internal:8675"
-    )
+    ai_toolkit_state, ai_toolkit_error = _http_service_status("http://host.docker.internal:8675")
     if settings.generation_provider == "disabled":
         generation_state, generation_error = "disabled", None
     else:
@@ -442,8 +449,7 @@ def system_services(db: Session = Depends(get_db)) -> dict:
             "project": "local-knowledge-portal",
             "state": "healthy"
             if all(
-                item["state"] in {"healthy", "disabled", "idle", "busy"}
-                for item in portal_services
+                item["state"] in {"healthy", "disabled", "idle", "busy"} for item in portal_services
             )
             else "error",
             "services": portal_services,
@@ -487,13 +493,17 @@ def system_services(db: Session = Depends(get_db)) -> dict:
         *docker_groups,
     ]
     services = [service for group in groups for service in group["services"]]
-    overall = "healthy" if (
-        inventory["state"] == "healthy"
-        and all(
-            item["state"] in {"healthy", "disabled", "running", "idle", "busy"}
-            for item in services
+    overall = (
+        "healthy"
+        if (
+            inventory["state"] == "healthy"
+            and all(
+                item["state"] in {"healthy", "disabled", "running", "idle", "busy"}
+                for item in services
+            )
         )
-    ) else "attention"
+        else "attention"
+    )
     return {
         "overall": overall,
         "checked_at": now,
@@ -573,9 +583,7 @@ def _issue_service_confirmation(service_id: str, action: str) -> dict[str, objec
     token = secrets.token_urlsafe(32)
     with _SERVICE_CONFIRMATION_LOCK:
         expired = [
-            key
-            for key, (_, _, expires_at) in _SERVICE_CONFIRMATIONS.items()
-            if expires_at <= now
+            key for key, (_, _, expires_at) in _SERVICE_CONFIRMATIONS.items() if expires_at <= now
         ]
         for key in expired:
             _SERVICE_CONFIRMATIONS.pop(key, None)
@@ -853,15 +861,9 @@ def _generation_ollama_workload() -> dict:
             {
                 "name": item["name"][:160],
                 "model_id": str(item.get("digest") or "")[:80],
-                "size": (
-                    f"{size / (1024**3):.1f} GiB"
-                    if isinstance(size, int)
-                    else "unknown"
-                ),
+                "size": (f"{size / (1024**3):.1f} GiB" if isinstance(size, int) else "unknown"),
                 "processor": (
-                    "100% GPU"
-                    if isinstance(size_vram, int) and size_vram > 0
-                    else "CPU"
+                    "100% GPU" if isinstance(size_vram, int) and size_vram > 0 else "CPU"
                 ),
                 "context": str(context) if isinstance(context, int) else "",
                 "until": str(item.get("expires_at") or "")[:120],
@@ -1013,8 +1015,7 @@ def _embedding_reindex_job(scheduler_status: dict) -> dict | None:
         matching = [
             row
             for row in rows
-            if isinstance(row, dict)
-            and row.get("workload_key") == _EMBEDDING_REINDEX_WORKLOAD
+            if isinstance(row, dict) and row.get("workload_key") == _EMBEDDING_REINDEX_WORKLOAD
         ]
         if not matching:
             continue
@@ -1104,9 +1105,28 @@ def _embedding_recovery_progress(db: Session) -> dict[str, int | str]:
         )
         or 0
     )
+    repository_total, repository_embedded = db.execute(
+        text(
+            f"""
+            SELECT count(*), count(e.id)
+            FROM repository_knowledge_item k
+            JOIN repository_snapshot s ON s.id = k.snapshot_id
+            LEFT JOIN repository_knowledge_embedding e
+              ON e.knowledge_item_id = k.id
+             AND e.embedding_revision = :revision
+            WHERE k.searchable = true
+              AND k.validation_status != 'REJECTED'
+              AND {_LATEST_REPOSITORY_SNAPSHOT}
+              AND {_CURRENT_REPOSITORY_REFERENCES}
+            """
+        ),
+        {"revision": settings.embedding_revision},
+    ).one()
     return {
         "pending_documents": pending_documents,
         "pending_chunks": pending_chunks,
+        "repository_pending_items": int(repository_total or 0) - int(repository_embedded or 0),
+        "repository_embedded_items": int(repository_embedded or 0),
         "embedding_revision": settings.embedding_revision,
     }
 
@@ -1154,6 +1174,14 @@ def _redact_search_response(response: SearchResponse) -> SearchResponse:
     return response
 
 
+def _redact_rag_contexts(contexts: list[dict]) -> list[dict]:
+    """Redact expanded raw chunks, not only the shorter search snippets."""
+
+    for context in contexts:
+        context["content"] = redact_text(str(context.get("content") or ""))
+    return contexts
+
+
 @app.post("/api/v1/search/hybrid", response_model=SearchResponse)
 def hybrid_search(request: SearchRequest, db: Session = Depends(get_db)) -> SearchResponse:
     if request.mode in {"semantic", "hybrid"}:
@@ -1164,18 +1192,42 @@ def hybrid_search(request: SearchRequest, db: Session = Depends(get_db)) -> Sear
             runtime_mode=settings.embedding_runtime_mode,
         )
         if circuit["open"]:
-            response = search(db, request.model_copy(update={"mode": "keyword"}), settings)
-            response.mode = f"{request.mode}-degraded-keyword-only"
-            response.confidence = "low" if response.results else "none"
+            fallback_mode = "hybrid" if request.mode == "hybrid" else "keyword"
+            response = search(
+                db,
+                request.model_copy(update={"mode": fallback_mode}),
+                settings,
+            )
+            seeded = any(
+                "semantic similarity (lexical-seeded)" in result.match_reason
+                for result in response.results
+            )
+            response.mode = (
+                "hybrid-seeded-vector" if seeded else f"{request.mode}-degraded-keyword-only"
+            )
+            if request.mode == "semantic":
+                response.confidence = "low" if response.results else "none"
             db.commit()
             return _redact_search_response(response)
     embedder = _embedder() if request.mode in {"semantic", "hybrid"} else None
     try:
         response = search(db, request, settings, embedder)
     except httpx.HTTPError:
-        response = search(db, request.model_copy(update={"mode": "keyword"}), settings)
-        response.mode = f"{request.mode}-degraded-keyword-only"
-        response.confidence = "low" if response.results else "none"
+        fallback_mode = "hybrid" if request.mode == "hybrid" else "keyword"
+        response = search(
+            db,
+            request.model_copy(update={"mode": fallback_mode}),
+            settings,
+        )
+        seeded = any(
+            "semantic similarity (lexical-seeded)" in result.match_reason
+            for result in response.results
+        )
+        response.mode = (
+            "hybrid-seeded-vector" if seeded else f"{request.mode}-degraded-keyword-only"
+        )
+        if request.mode == "semantic":
+            response.confidence = "low" if response.results else "none"
     db.commit()
     return _redact_search_response(response)
 
@@ -1229,6 +1281,7 @@ def rag_context(request: RagRequest, db: Session = Depends(get_db)) -> dict:
         response.results,
         max_chars=request.max_chars,
     )
+    _redact_rag_contexts(contexts)
     return {
         "query": request.query,
         "confidence": response.confidence,
@@ -1462,10 +1515,11 @@ def outgoing_links(
         .limit(page_size)
     ).all()
     target_ids = [row.target_document_id for row in rows if row.target_document_id]
-    targets = {
-        row.id: row
-        for row in db.scalars(select(Document).where(Document.id.in_(target_ids)))
-    } if target_ids else {}
+    targets = (
+        {row.id: row for row in db.scalars(select(Document).where(Document.id.in_(target_ids)))}
+        if target_ids
+        else {}
+    )
     return {
         "items": [
             {
@@ -1648,10 +1702,7 @@ def projects(
         .limit(page_size)
     ).all()
     return {
-        "items": [
-            {"key": name, "document_count": int(count)}
-            for name, count in rows
-        ],
+        "items": [{"key": name, "document_count": int(count)} for name, count in rows],
         "page": page,
         "page_size": page_size,
         "total": int(total),
@@ -1826,11 +1877,7 @@ def _journal_work_type(row: ProjectJournalEntry) -> str:
 
 
 def _journal_category_expression():
-    searchable = func.lower(
-        ProjectJournalEntry.title
-        + " "
-        + ProjectJournalEntry.change_summary
-    )
+    searchable = func.lower(ProjectJournalEntry.title + " " + ProjectJournalEntry.change_summary)
     return func.coalesce(
         ProjectJournalEntry.metadata_json["work_type"].astext,
         case(
@@ -1839,9 +1886,7 @@ def _journal_category_expression():
                 "error_resolution",
             ),
             (
-                searchable.op("~")(
-                    "cpu|latency|performance|load|성능|부하|지연"
-                ),
+                searchable.op("~")("cpu|latency|performance|load|성능|부하|지연"),
                 "performance",
             ),
             (
@@ -1987,9 +2032,7 @@ def developer_feed(
     count_statement = select(func.count()).select_from(DeveloperFeedPost)
     if project:
         statement = statement.where(DeveloperFeedPost.project_key == project)
-        count_statement = count_statement.where(
-            DeveloperFeedPost.project_key == project
-        )
+        count_statement = count_statement.where(DeveloperFeedPost.project_key == project)
     rows = db.scalars(
         statement.order_by(
             DeveloperFeedPost.created_at.desc(),
@@ -2062,9 +2105,9 @@ def project_journal_projects(
             ProjectJournalEntry.project_key.label("project"),
             func.count(ProjectJournalEntry.id).label("entry_count"),
             func.max(ProjectJournalEntry.occurred_at).label("latest_at"),
-            func.bool_and(
-                ProjectJournalEntry.verification_status == "VERIFIED"
-            ).label("all_verified"),
+            func.bool_and(ProjectJournalEntry.verification_status == "VERIFIED").label(
+                "all_verified"
+            ),
         )
         .where(ProjectJournalEntry.verification_status != "OUT_OF_PROJECT_SCOPE")
         .group_by(ProjectJournalEntry.project_key)
@@ -2089,9 +2132,7 @@ def project_journal_projects(
         .group_by(Document.project_key)
     )
     if project:
-        journal_statement = journal_statement.where(
-            ProjectJournalEntry.project_key == project
-        )
+        journal_statement = journal_statement.where(ProjectJournalEntry.project_key == project)
         document_statement = document_statement.where(Document.project_key == project)
     projects_by_name: dict[str, dict] = {}
     for row in db.execute(journal_statement):
@@ -2135,11 +2176,7 @@ def project_journal_projects(
     }
     article_rows = (
         list(
-            db.scalars(
-                select(ProjectArticle).where(
-                    ProjectArticle.project_key.in_(project_names)
-                )
-            )
+            db.scalars(select(ProjectArticle).where(ProjectArticle.project_key.in_(project_names)))
         )
         if project_names
         else []
@@ -2153,9 +2190,7 @@ def project_journal_projects(
     revisions = {
         revision.id: revision
         for revision in db.scalars(
-            select(ProjectArticleRevision).where(
-                ProjectArticleRevision.id.in_(revision_ids)
-            )
+            select(ProjectArticleRevision).where(ProjectArticleRevision.id.in_(revision_ids))
         )
     }
     return {
@@ -2198,9 +2233,7 @@ def project_journal_projects(
                     else None
                 ),
                 "revision_number": (
-                    revisions[
-                        articles[row["project"]].current_revision_id
-                    ].revision_number
+                    revisions[articles[row["project"]].current_revision_id].revision_number
                     if row["project"] in articles
                     and articles[row["project"]].current_revision_id in revisions
                     else None
@@ -2224,11 +2257,14 @@ def project_journal_project_detail(
     project: str,
     db: Session = Depends(get_db),
 ) -> dict:
-    total = db.scalar(
-        select(func.count())
-        .select_from(ProjectJournalEntry)
-        .where(ProjectJournalEntry.project_key == project)
-    ) or 0
+    total = (
+        db.scalar(
+            select(func.count())
+            .select_from(ProjectJournalEntry)
+            .where(ProjectJournalEntry.project_key == project)
+        )
+        or 0
+    )
     document_count, document_latest_at = db.execute(
         select(func.count(Document.id), func.max(Document.modified_at_fs)).where(
             Document.project_key == project,
@@ -2237,15 +2273,9 @@ def project_journal_project_detail(
             not_(Document.relative_path.startswith("_generated/")),
         )
     ).one()
-    article = db.scalar(
-        select(ProjectArticle).where(ProjectArticle.project_key == project)
-    )
+    article = db.scalar(select(ProjectArticle).where(ProjectArticle.project_key == project))
     refresh_item = next(
-        (
-            item
-            for item in project_article_plan(db, settings)
-            if item.project == project
-        ),
+        (item for item in project_article_plan(db, settings) if item.project == project),
         None,
     )
     article_status = _project_article_display_status(
@@ -2268,16 +2298,12 @@ def project_journal_project_detail(
             "latest_at": revision.created_at,
             "verification_status": "CITED",
             "article_status": article_status,
-            "article_due_reason": (
-                refresh_item.due_reason if refresh_item is not None else None
-            ),
+            "article_due_reason": (refresh_item.due_reason if refresh_item is not None else None),
             "last_compared_at": article.last_compared_at,
             "content_type": "canonical_article",
             "revision_number": revision.revision_number,
             "previous_revision_id": (
-                str(revision.previous_revision_id)
-                if revision.previous_revision_id
-                else None
+                str(revision.previous_revision_id) if revision.previous_revision_id else None
             ),
             "prompt_version": revision.prompt_version,
             "model": revision.model,
@@ -2305,12 +2331,8 @@ def project_journal_project_detail(
             "latest_at": document_latest_at,
             "verification_status": "UNVERIFIED",
             "article_status": article_status,
-            "article_due_reason": (
-                refresh_item.due_reason if refresh_item is not None else None
-            ),
-            "last_compared_at": (
-                article.last_compared_at if article is not None else None
-            ),
+            "article_due_reason": (refresh_item.due_reason if refresh_item is not None else None),
+            "last_compared_at": (article.last_compared_at if article is not None else None),
             "content_type": "legacy_extract",
             "revision_number": None,
             "truncated": False,
@@ -2345,12 +2367,8 @@ def project_journal_project_detail(
         if all(row.verification_status == "VERIFIED" for row in rows)
         else "UNVERIFIED",
         "article_status": article_status,
-        "article_due_reason": (
-            refresh_item.due_reason if refresh_item is not None else None
-        ),
-        "last_compared_at": (
-            article.last_compared_at if article is not None else None
-        ),
+        "article_due_reason": (refresh_item.due_reason if refresh_item is not None else None),
+        "last_compared_at": (article.last_compared_at if article is not None else None),
         "content_type": "legacy_extract",
         "revision_number": None,
         "truncated": total > len(rows),
@@ -2366,9 +2384,7 @@ def project_article_versions(
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> dict:
-    article = db.scalar(
-        select(ProjectArticle).where(ProjectArticle.project_key == project)
-    )
+    article = db.scalar(select(ProjectArticle).where(ProjectArticle.project_key == project))
     if article is None:
         return {"items": [], "page": page, "page_size": page_size, "total": 0}
     statement = (
@@ -2379,11 +2395,7 @@ def project_article_versions(
             ProjectArticleRevision.created_at.desc(),
         )
     )
-    rows = list(
-        db.scalars(
-            statement.offset((page - 1) * page_size).limit(page_size)
-        )
-    )
+    rows = list(db.scalars(statement.offset((page - 1) * page_size).limit(page_size)))
     total = int(
         db.scalar(
             select(func.count())
@@ -2472,9 +2484,7 @@ def knowledge_curation_status(db: Session = Depends(get_db)) -> dict:
     editor_connection = _generation_editor_connection(runtime_job)
     if runtime_job is not None:
         state["runtime_job"] = runtime_job
-        state["state"] = (
-            "running" if runtime_job.get("bucket") == "active" else "waiting_for_gpu"
-        )
+        state["state"] = "running" if runtime_job.get("bucket") == "active" else "waiting_for_gpu"
     # Keep the host-side scheduler from reserving a GPU only to discover that
     # every candidate is either already held, published, or awaiting semantic
     # deduplication.  This mirrors the curator's eligible statuses and leaves
@@ -2496,9 +2506,9 @@ def knowledge_curation_status(db: Session = Depends(get_db)) -> dict:
                         == "true",
                         or_(
                             func.coalesce(
-                                KnowledgeCandidate.metadata_json[
-                                    "journal_reassessment"
-                                ]["version"].astext,
+                                KnowledgeCandidate.metadata_json["journal_reassessment"][
+                                    "version"
+                                ].astext,
                                 "",
                             )
                             != "",
@@ -2509,9 +2519,7 @@ def knowledge_curation_status(db: Session = Depends(get_db)) -> dict:
                             == "deterministic-activity-v2",
                         ),
                         func.coalesce(
-                            KnowledgeCandidate.metadata_json["curation"][
-                                "harness_version"
-                            ].astext,
+                            KnowledgeCandidate.metadata_json["curation"]["harness_version"].astext,
                             "",
                         )
                         != CURATION_HARNESS_VERSION,
@@ -2604,7 +2612,7 @@ def knowledge_dedup_status(db: Session = Depends(get_db)) -> dict:
             .where(
                 KnowledgeCandidate.evidence_gate_status == "VERIFIED",
                 KnowledgeCandidate.metadata_json["semantic_dedup"]["state"].astext
-                == "pending_gpu_vector_check"
+                == "pending_gpu_vector_check",
             )
         )
         or 0
@@ -3061,9 +3069,7 @@ def jobs(
                 "updated_at": row.updated_at,
                 "lease_expires_at": row.lease_expires_at,
                 "queue_lead_time_ms": _elapsed_ms(row.created_at, row.started_at),
-                "processing_duration_ms": _elapsed_ms(
-                    row.started_at, row.finished_at
-                ),
+                "processing_duration_ms": _elapsed_ms(row.started_at, row.finished_at),
                 "age_ms": _elapsed_ms(row.created_at, datetime.now(timezone.utc)),
             }
             for row in rows

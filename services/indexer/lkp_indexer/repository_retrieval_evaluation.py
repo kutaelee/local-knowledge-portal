@@ -26,6 +26,10 @@ from sqlalchemy import text
 
 from .cli import get_embedder
 from .repository_analysis.provider import LocalModelProvider
+from .repository_reference_policy import current_references_sql, latest_snapshot_sql
+
+_CURRENT_REPOSITORY_REFERENCES = current_references_sql("k")
+_LATEST_REPOSITORY_SNAPSHOT = latest_snapshot_sql("s")
 
 _REQUIRED_ARRAYS = (
     "confirmed_facts",
@@ -81,7 +85,7 @@ def _knowledge_rows(
         dict(row)
         for row in session.execute(
             text(
-                """
+                f"""
                 SELECT k.id, k.knowledge_type, k.title, k.summary, k.detail,
                        k.processing_steps, k.components, k.configurations,
                        k.dependencies, k.source_references, k.validation_status,
@@ -106,7 +110,8 @@ def _knowledge_rows(
                  AND e.embedding_revision = :embedding_revision
                 WHERE k.searchable = true
                   AND k.validation_status != 'REJECTED'
-                  AND s.stale = false
+                  AND {_LATEST_REPOSITORY_SNAPSHOT}
+                  AND {_CURRENT_REPOSITORY_REFERENCES}
                   AND s.project_id = :project_id
                   AND s.id = :snapshot_id
                 ORDER BY
@@ -216,12 +221,12 @@ def _prepare_package(
             dict(row)
             for row in session.execute(
                 text(
-                    """
+                    f"""
                     SELECT p.id AS project_id, p.display_name, s.id AS snapshot_id,
                            s.source_hash
                     FROM repository_project p
                     JOIN repository_snapshot s ON s.project_id = p.id
-                    WHERE s.stale = false
+                    WHERE {_LATEST_REPOSITORY_SNAPSHOT}
                       AND p.category LIKE 'IndigoESB %'
                     ORDER BY p.display_name
                     """
@@ -433,12 +438,12 @@ def answer_package(package_path: Path) -> dict[str, Any]:
             snapshot_id = uuid.UUID(str(project["snapshot_id"]))
             current = session.execute(
                 text(
-                    """
+                    f"""
                     SELECT s.id
                     FROM repository_snapshot s
                     WHERE s.project_id = :project_id
                       AND s.id = :snapshot_id
-                      AND s.stale = false
+                      AND {_LATEST_REPOSITORY_SNAPSHOT}
                     """
                 ),
                 {"project_id": project_id, "snapshot_id": snapshot_id},

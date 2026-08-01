@@ -16,6 +16,9 @@ from .embedding_reindex import (
     wait_for_ingest_quiescence,
 )
 from .knowledge_dedup import run_once as run_dedup
+from .repository_embedding_reindex import (
+    run_with_embedder as run_repository_reindex,
+)
 from .service_runtime import assert_mount_guards, service_pid
 
 
@@ -48,6 +51,19 @@ def run() -> tuple[dict, int]:
                 }
 
         try:
+            result["repository_reindex"] = run_repository_reindex(
+                settings,
+                embedder,
+                None,
+            )
+        except Exception as exc:
+            failures += 1
+            result["repository_reindex"] = {
+                "state": "failed",
+                "error_type": type(exc).__name__,
+            }
+
+        try:
             with SessionLocal() as session:
                 result["deduplication"] = run_dedup(session, settings, embedder)
                 session.commit()
@@ -64,6 +80,8 @@ def run() -> tuple[dict, int]:
             failures += 1
     finally:
         embedder.close()
+    metrics = getattr(embedder, "performance_metrics", None)
+    result["model_performance"] = metrics() if metrics is not None else None
     result["state"] = "succeeded" if failures == 0 else "completed_with_errors"
     result["failed_stages"] = failures
     return result, failures

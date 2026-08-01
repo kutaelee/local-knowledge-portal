@@ -14,6 +14,10 @@ class DimensionMismatch(RuntimeError):
     pass
 
 
+class ModelUnloadError(RuntimeError):
+    pass
+
+
 class Embedder(Protocol):
     provider: str
     model: str
@@ -50,8 +54,34 @@ class OllamaEmbedder:
             "total_duration_ns": 0,
             "load_duration_ns": 0,
         }
+        self._residency_checked = False
+        self._preexisting_resident = False
+        self._request_started = False
+        self._unload_verified: bool | None = None
+
+    @staticmethod
+    def _model_key(value: str) -> str:
+        normalized = value.strip().casefold()
+        return normalized if ":" in normalized else f"{normalized}:latest"
+
+    def _is_resident(self) -> bool:
+        response = httpx.get(
+            f"{self.base_url}/api/ps",
+            timeout=min(self.timeout_seconds, 10),
+        )
+        response.raise_for_status()
+        requested = self._model_key(self.model)
+        return any(
+            self._model_key(str(item.get("name") or item.get("model") or "")) == requested
+            for item in response.json().get("models") or []
+            if isinstance(item, dict)
+        )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        if not self._residency_checked:
+            self._preexisting_resident = self._is_resident()
+            self._residency_checked = True
+        self._request_started = True
         response = httpx.post(
             f"{self.base_url}/api/embed",
             json={
@@ -85,8 +115,7 @@ class OllamaEmbedder:
     def performance_metrics(self) -> dict[str, int | float | None]:
         active_duration = max(
             0,
-            self._performance["total_duration_ns"]
-            - self._performance["load_duration_ns"],
+            self._performance["total_duration_ns"] - self._performance["load_duration_ns"],
         )
         return {
             **self._performance,
@@ -97,27 +126,38 @@ class OllamaEmbedder:
             ),
             "prompt_tokens_per_second": (
                 round(
-                    self._performance["prompt_tokens"]
-                    * 1_000_000_000
-                    / active_duration,
+                    self._performance["prompt_tokens"] * 1_000_000_000 / active_duration,
                     2,
                 )
                 if active_duration and self._performance["prompt_tokens"]
                 else None
             ),
+            "preexisting_resident": self._preexisting_resident,
+            "unload_verified": self._unload_verified,
         }
 
     def close(self) -> None:
-        """Best-effort explicit unload; never mask the completed workload."""
+        """Unload only a model loaded by this instance and verify the result."""
+
+        if not self._request_started or self._preexisting_resident:
+            return
         try:
+            if not self._is_resident():
+                self._unload_verified = True
+                return
             response = httpx.post(
                 f"{self.base_url}/api/generate",
                 json={"model": self.model, "keep_alive": 0},
                 timeout=min(self.timeout_seconds, 10),
             )
             response.raise_for_status()
-        except httpx.HTTPError:
-            return
+            if self._is_resident():
+                self._unload_verified = False
+                raise ModelUnloadError(f"model remained resident after unload: {self.model}")
+            self._unload_verified = True
+        except httpx.HTTPError as exc:
+            self._unload_verified = False
+            raise ModelUnloadError(f"failed to unload model: {self.model}") from exc
 
 
 class RateLimitedEmbedder:

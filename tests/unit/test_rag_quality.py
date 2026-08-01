@@ -1,9 +1,13 @@
 from uuid import uuid4
 
 from lkp.rag_quality import (
+    candidate_limit,
+    evidence_level,
     infer_query_scope,
     reward_rerank,
     select_verified_answer,
+    terms,
+    verify_answer_candidate,
 )
 from lkp.schemas import Provenance, SearchRequest, SearchResult
 
@@ -54,6 +58,13 @@ def test_scope_infers_exact_project_and_failure_case_tags() -> None:
     assert scope.preferred_tags == ("case:error_resolution", "case:operations")
 
 
+def test_candidate_generation_stays_wide_for_small_top_k() -> None:
+    assert candidate_limit(1) == 80
+    assert candidate_limit(5) == 80
+    assert candidate_limit(10) == 100
+    assert candidate_limit(100) == 200
+
+
 def test_scope_does_not_force_one_project_for_cross_project_query() -> None:
     scope = infer_query_scope(
         "compare alpha-service and beta-service timeout handling",
@@ -61,6 +72,10 @@ def test_scope_does_not_force_one_project_for_cross_project_query() -> None:
     )
     assert scope.project is None
     assert scope.inferred_project is False
+
+
+def test_korean_particles_do_not_hide_project_and_domain_terms() -> None:
+    assert {"esb", "요청", "처리"}.issubset(terms("ESB가 요청을 처리하는 구조"))
 
 
 def test_reward_rerank_fails_closed_on_project_scope_violation() -> None:
@@ -75,6 +90,21 @@ def test_reward_rerank_fails_closed_on_project_scope_violation() -> None:
         snippet="portal worker timeout recovery",
     )
     assert reward_rerank([wrong], request, scope) == []
+
+
+def test_project_scope_comparison_is_case_insensitive_but_not_cross_project() -> None:
+    request = SearchRequest(
+        query="wedding_picture worker timeout recovery",
+        project="Wedding_Picture",
+        mode="keyword",
+    )
+    scope = infer_query_scope(request.query, ["wedding_picture"])
+    matching = _result(
+        project="wedding_picture",
+        snippet="wedding_picture worker timeout recovery",
+    )
+
+    assert reward_rerank([matching], request, scope) == [matching]
 
 
 def test_reward_rerank_rejects_partial_lexical_no_answer_noise() -> None:
@@ -119,8 +149,7 @@ def test_same_symptom_different_cause_prefers_query_specific_cause() -> None:
     )
     network = _result(
         snippet=(
-            "Worker timeout failure. Root cause was a network proxy reset. "
-            "Restart the proxy."
+            "Worker timeout failure. Root cause was a network proxy reset. Restart the proxy."
         ),
         tags=["case:error_resolution", "lifecycle:verified"],
     )
@@ -128,11 +157,101 @@ def test_same_symptom_different_cause_prefers_query_specific_cause() -> None:
     assert ranked[0].provenance.chunk_id == lease.provenance.chunk_id
 
 
+def test_reported_project_journal_is_navigation_not_answer_evidence() -> None:
+    reported = _result(
+        snippet="작업자가 성공했다고 보고했다.",
+        tags=["lifecycle:current"],
+        relative_path="_generated/Projects/demo/Journal/turn.md",
+    )
+    assert evidence_level(reported) == "reported"
+
+
+def test_claim_verifier_rejects_number_missing_from_citation() -> None:
+    evidence_id = str(uuid4())
+    contexts = [
+        {
+            "content": "The batch completed successfully.",
+            "evidence_level": "verified",
+            "provenance": {"evidence_id": evidence_id},
+        }
+    ]
+    candidate = {
+        "text": "The batch completed 400 items successfully.",
+        "claims": [
+            {
+                "text": "The batch completed 400 items successfully.",
+                "citations": [evidence_id],
+            }
+        ],
+    }
+    verification = verify_answer_candidate(candidate, contexts)
+    assert verification["valid"] is False
+    assert verification["failures"] == ["claim_number_unsupported:0"]
+
+
+def test_claim_verifier_rejects_unclaimed_answer_content() -> None:
+    evidence_id = str(uuid4())
+    contexts = [
+        {
+            "content": "The worker failed because its database lease expired.",
+            "evidence_level": "verified",
+            "provenance": {"evidence_id": evidence_id},
+        }
+    ]
+    candidate = {
+        "text": "The database lease expired and 400 retries succeeded.",
+        "claims": [
+            {
+                "text": "The database lease expired.",
+                "citations": [evidence_id],
+            }
+        ],
+    }
+
+    verification = verify_answer_candidate(candidate, contexts)
+
+    assert verification["valid"] is False
+    assert "answer_number_unclaimed" in verification["failures"]
+
+
+def test_verified_answer_prefers_stronger_evidence_score() -> None:
+    source_id = str(uuid4())
+    verified_id = str(uuid4())
+    contexts = [
+        {
+            "content": "The worker failed because its database lease expired.",
+            "evidence_level": "source",
+            "provenance": {"evidence_id": source_id},
+        },
+        {
+            "content": "The worker failed because its database lease expired.",
+            "evidence_level": "verified",
+            "provenance": {"evidence_id": verified_id},
+        },
+    ]
+    source_candidate = {
+        "text": "The database lease expired.",
+        "claims": [{"text": "The database lease expired.", "citations": [source_id]}],
+    }
+    verified_candidate = {
+        "text": "The database lease expired.",
+        "claims": [{"text": "The database lease expired.", "citations": [verified_id]}],
+    }
+
+    selected = select_verified_answer(
+        [source_candidate, verified_candidate],
+        contexts,
+    )
+
+    assert selected["answer"] == verified_candidate
+
+
 def test_verified_answer_selects_best_candidate_and_repairs_once() -> None:
     chunk_id = str(uuid4())
     contexts = [
         {
             "content": "The worker failed because its database lease expired.",
+            "evidence_level": "verified",
             "provenance": {"chunk_id": chunk_id},
         }
     ]
@@ -168,3 +287,30 @@ def test_verified_answer_returns_no_answer_after_failed_repair() -> None:
     )
     assert selected["no_answer"] is True
     assert selected["answer"] is None
+    assert "claim_missing" in selected["verification"]["failures"]
+    assert "no_verified_answer" in selected["verification"]["failures"]
+
+
+def test_claim_verifier_rejects_reported_navigation_as_grounding() -> None:
+    evidence_id = str(uuid4())
+    contexts = [
+        {
+            "content": "The operator reported that the worker completed.",
+            "evidence_level": "reported",
+            "provenance": {"evidence_id": evidence_id},
+        }
+    ]
+    candidate = {
+        "text": "The worker completed.",
+        "claims": [
+            {
+                "text": "The worker completed.",
+                "citations": [evidence_id],
+            }
+        ],
+    }
+
+    verification = verify_answer_candidate(candidate, contexts)
+
+    assert verification["valid"] is False
+    assert verification["failures"] == ["citation_not_grounding_evidence:0"]

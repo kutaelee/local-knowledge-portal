@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 from pathlib import Path
@@ -299,6 +300,79 @@ class SupportService:
             assert tool.status_code == 200
             assert tool.json()["grounding_required"] is True
             assert tool.json()["context"]
+            original_references = [
+                dict(row)
+                for row in session.execute(
+                    text(
+                        """
+                        SELECT id, source_references
+                        FROM repository_knowledge_item
+                        WHERE snapshot_id = :snapshot_id
+                        """
+                    ),
+                    {"snapshot_id": manifest.snapshot_id},
+                ).mappings()
+            ]
+            session.execute(
+                text(
+                    """
+                    UPDATE repository_knowledge_item
+                    SET source_references = jsonb_set(
+                      source_references,
+                      '{0,source_hash}',
+                      to_jsonb(repeat('0', 64)),
+                      false
+                    )
+                    WHERE snapshot_id = :snapshot_id
+                    """
+                ),
+                {"snapshot_id": manifest.snapshot_id},
+            )
+            session.commit()
+            try:
+                invalid_detail = client.get(
+                    f"/api/v1/repository-analysis/projects/{manifest.project_id}"
+                )
+                invalid_knowledge = client.get(
+                    f"/api/v1/repository-analysis/projects/{manifest.project_id}/knowledge"
+                )
+                invalid_tool = client.get(
+                    "/api/v1/repository-analysis/tools/get_project_architecture",
+                    params={"project_id": str(manifest.project_id)},
+                )
+                invalid_search = client.get(
+                    "/api/v1/repository-analysis/search",
+                    params={
+                        "q": "architecture lifecycle overview",
+                        "project_id": str(manifest.project_id),
+                        "snapshot_id": str(manifest.snapshot_id),
+                        "mode": "keyword",
+                    },
+                )
+                assert invalid_detail.status_code == 200
+                assert invalid_detail.json()["report"] is None
+                assert invalid_knowledge.status_code == 200
+                assert invalid_knowledge.json()["total"] == 0
+                assert invalid_tool.status_code == 200
+                assert invalid_tool.json()["context"] == []
+                assert invalid_search.status_code == 200
+                assert invalid_search.json()["items"] == []
+            finally:
+                for row in original_references:
+                    session.execute(
+                        text(
+                            """
+                            UPDATE repository_knowledge_item
+                            SET source_references = CAST(:source_references AS jsonb)
+                            WHERE id = :id
+                            """
+                        ),
+                        {
+                            "id": row["id"],
+                            "source_references": json.dumps(row["source_references"]),
+                        },
+                    )
+                session.commit()
             evaluations = client.get(
                 f"/api/v1/repository-analysis/projects/{manifest.project_id}/evaluations"
             )
@@ -496,3 +570,55 @@ def test_repository_analysis_task_checkpoint_round_trip(
         assert "source_text" not in checkpoint_columns
         assert "prompt" not in checkpoint_columns
         assert "raw_response" not in checkpoint_columns
+
+
+def test_repository_snapshot_reactivation_is_single_and_latest(
+    database_url: str,
+    tmp_path: Path,
+) -> None:
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    engine = create_engine(database_url)
+    source = tmp_path / "revision-reuse-service"
+    source.mkdir()
+    target = source / "service.py"
+    original = "def current_revision():\n    return 'v1'\n"
+    target.write_text(original, encoding="utf-8")
+    pipeline = RepositoryAnalysisPipeline(allowed_roots=[source])
+    first = pipeline.run(source)
+
+    with Session(engine) as session:
+        store = RepositoryAnalysisStore(session)
+        assert store.persist(first, category="revision lifecycle test") is True
+        first_snapshot_id = first.snapshot_id
+
+        target.write_text("def current_revision():\n    return 'v2'\n", encoding="utf-8")
+        second = pipeline.run(source)
+        assert second.source_hash != first.source_hash
+        assert store.persist(second, category="revision lifecycle test") is True
+
+        target.write_text(original, encoding="utf-8")
+        reverted = pipeline.run(source)
+        assert reverted.source_hash == first.source_hash
+        # The original analysis is reused, but its snapshot must again become
+        # the one deterministic current/latest revision.
+        assert store.persist(reverted, category="revision lifecycle test") is False
+        rows = (
+            session.execute(
+                text(
+                    """
+                SELECT id, stale, created_at
+                FROM repository_snapshot
+                WHERE project_id = :project_id
+                ORDER BY created_at DESC, id DESC
+                """
+                ),
+                {"project_id": first.project_id},
+            )
+            .mappings()
+            .all()
+        )
+        assert rows[0]["id"] == first_snapshot_id
+        assert rows[0]["stale"] is False
+        assert sum(row["stale"] is False for row in rows) == 1

@@ -9,7 +9,26 @@ from .rag_quality import POLICY_REVISION, terms
 
 _IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_.]{2,}\b")
 _TYPE_MARKERS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-    (("entry point", "startup", "시작"), ("ARCHITECTURE", "COMPONENT")),
+    (
+        (
+            "entry point",
+            "startup",
+            "architecture",
+            "structure",
+            "lifecycle",
+            "시작",
+            "구조",
+            "아키텍처",
+            "라이프사이클",
+            "전체",
+            "역할",
+        ),
+        ("REPOSITORY_OVERVIEW", "ARCHITECTURE", "COMPONENT_FLOW"),
+    ),
+    (
+        ("processing flow", "request flow", "처리 흐름", "요청 처리", "흐름"),
+        ("COMPONENT_FLOW", "LOGIC_FLOW", "DATA_FLOW"),
+    ),
     (("configuration", "config", "설정"), ("CONFIGURATION", "COMPONENT")),
     (("retry", "timeout", "재시도", "타임아웃"), ("RETRY_TIMEOUT", "ERROR_HANDLING")),
     (("transaction", "rollback", "트랜잭션"), ("DATA_FLOW", "ERROR_HANDLING")),
@@ -46,6 +65,8 @@ def infer_repository_types(query: str) -> set[str]:
 
 
 def _valid_references(row: dict[str, Any]) -> bool:
+    if row.get("_source_references_current") is False:
+        return False
     references = row.get("source_references")
     if not isinstance(references, list) or not references:
         return False
@@ -71,6 +92,7 @@ def repository_reward(row: dict[str, Any], query: str) -> tuple[float, dict[str,
         str(value or "")
         for value in (
             row.get("title"),
+            row.get("project"),
             row.get("summary"),
             row.get("detail"),
             row.get("processing_steps"),
@@ -116,12 +138,17 @@ def repository_reward(row: dict[str, Any], query: str) -> tuple[float, dict[str,
     vector = max(0.0, float(row.get("vector_similarity") or 0.0))
     keyword = min(1.0, float(row.get("keyword_matches") or 0.0) / 4)
     type_match = float(row.get("knowledge_type") in infer_repository_types(query))
-    validation = 1.0 if row.get("validation_status") in {
-        "SOURCE_VERIFIED",
-        "TEST_VERIFIED",
-        "RUNTIME_VERIFIED",
-        "HUMAN_APPROVED",
-    } else 0.5
+    validation = (
+        1.0
+        if row.get("validation_status")
+        in {
+            "SOURCE_VERIFIED",
+            "TEST_VERIFIED",
+            "RUNTIME_VERIFIED",
+            "HUMAN_APPROVED",
+        }
+        else 0.5
+    )
     score = (
         0.30 * coverage
         + 0.16 * vector
@@ -149,7 +176,12 @@ def repository_reward_rerank(
     for row in rows:
         score, breakdown = repository_reward(row, query)
         strong_anchor = breakdown.get("identifier", 0) == 1
-        if score < 0.24 and not strong_anchor:
+        type_anchor = (
+            breakdown.get("type", 0) == 1
+            and breakdown.get("validation", 0) == 1
+            and breakdown.get("coverage", 0) >= 0.10
+        )
+        if score < 0.24 and not strong_anchor and not type_anchor:
             continue
         scored.append((score, row, breakdown))
     scored.sort(

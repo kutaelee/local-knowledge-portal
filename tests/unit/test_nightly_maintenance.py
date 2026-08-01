@@ -47,6 +47,11 @@ def test_semantic_maintenance_reuses_and_closes_one_embedder(monkeypatch):
     )
     monkeypatch.setattr(
         semantic,
+        "run_repository_reindex",
+        lambda _settings, value, _limit: observed.append(value) or {"embedded": 3},
+    )
+    monkeypatch.setattr(
+        semantic,
         "run_dedup",
         lambda _session, _settings, value: observed.append(value) or {"passed": 1},
     )
@@ -60,7 +65,7 @@ def test_semantic_maintenance_reuses_and_closes_one_embedder(monkeypatch):
 
     assert failures == 0
     assert result["state"] == "succeeded"
-    assert observed == [embedder, embedder, embedder]
+    assert observed == [embedder, embedder, embedder, embedder]
     assert embedder.closed == 1
 
 
@@ -78,14 +83,14 @@ def test_generation_maintenance_reuses_and_closes_one_provider(monkeypatch):
     monkeypatch.setattr(
         generation,
         "run_curation",
-        lambda _session, _settings, **kwargs: observed.append(kwargs["provider"])
-        or {"state": "completed_batch"},
+        lambda _session, _settings, **kwargs: (
+            observed.append(kwargs["provider"]) or {"state": "completed_batch"}
+        ),
     )
     monkeypatch.setattr(
         generation,
         "refresh_all_project_articles",
-        lambda _session, **kwargs: observed.append(kwargs["provider"])
-        or [{"status": "unchanged"}],
+        lambda _session, **kwargs: observed.append(kwargs["provider"]) or [{"status": "unchanged"}],
     )
 
     result, failures = generation.run()

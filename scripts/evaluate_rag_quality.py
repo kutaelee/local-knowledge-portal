@@ -25,6 +25,26 @@ class EvaluationCase:
     case_marker: str | None = None
     project_id: str | None = None
     snapshot_id: str | None = None
+    query_truncated: bool = False
+
+
+def _bounded_evaluation_query(value: str, maximum: int = 500) -> tuple[str, bool]:
+    """Keep live evaluation queries inside the public API contract.
+
+    Large captured case fields can contain transcript-like detail. Retaining a
+    bounded head and tail preserves the symptom and resolution cues without
+    turning one fixture into an invalid request or an artificial full-document
+    exact match.
+    """
+
+    normalized = " ".join(value.split())
+    if len(normalized) <= maximum:
+        return normalized, False
+    head_size = int(maximum * 0.7)
+    head = normalized[:head_size].rsplit(" ", 1)[0] or normalized[:head_size]
+    remaining = maximum - len(head) - 1
+    tail = normalized[-remaining:].split(" ", 1)[-1] or normalized[-remaining:]
+    return f"{head} {tail}"[:maximum], True
 
 
 class PortalClient:
@@ -53,9 +73,14 @@ class PortalClient:
             return json.load(response)
 
 
-def _repository_cases(client: PortalClient) -> list[EvaluationCase]:
+def _repository_cases(
+    client: PortalClient,
+    projects: list[dict[str, Any]],
+) -> list[EvaluationCase]:
     cases: list[EvaluationCase] = []
-    for project in client.get("/api/v1/repository-analysis/projects")["items"]:
+    for project in projects:
+        if project.get("stale") is True:
+            continue
         snapshot_id = project.get("snapshot_id")
         if not snapshot_id:
             continue
@@ -86,6 +111,7 @@ def _repository_cases(client: PortalClient) -> list[EvaluationCase]:
             )
             if not expected_paths:
                 continue
+            bounded_query, truncated = _bounded_evaluation_query(row["question"])
             expected_lines = tuple(
                 (
                     item["file"],
@@ -99,11 +125,12 @@ def _repository_cases(client: PortalClient) -> list[EvaluationCase]:
             cases.append(
                 EvaluationCase(
                     kind=f"repository:{row.get('question_type') or 'unknown'}",
-                    query=row["question"],
+                    query=bounded_query,
                     expected_paths=expected_paths,
                     expected_lines=expected_lines,
                     project_id=str(project["id"]),
                     snapshot_id=str(snapshot_id),
+                    query_truncated=truncated,
                 )
             )
     return cases
@@ -121,12 +148,14 @@ def _knowledge_cases(client: PortalClient) -> list[EvaluationCase]:
         for field in ("problem", "symptom", "root_cause", "solution"):
             query = row.get(field)
             if isinstance(query, str) and query.strip():
+                bounded_query, truncated = _bounded_evaluation_query(query)
                 cases.append(
                     EvaluationCase(
                         kind=f"knowledge:{field}",
-                        query=query,
+                        query=bounded_query,
                         expected_paths=expected,
                         case_marker=marker,
+                        query_truncated=truncated,
                     )
                 )
     return cases
@@ -135,8 +164,7 @@ def _knowledge_cases(client: PortalClient) -> list[EvaluationCase]:
 def _matches_path(relative_path: str, expected_paths: tuple[str, ...]) -> bool:
     normalized = relative_path.replace("\\", "/").casefold()
     return any(
-        normalized.endswith(expected.replace("\\", "/").casefold())
-        for expected in expected_paths
+        normalized.endswith(expected.replace("\\", "/").casefold()) for expected in expected_paths
     )
 
 
@@ -224,9 +252,7 @@ def _metrics(
         "recall_at_10": sum(0 < rank <= 10 for rank in ranks) / total if total else 0,
         "mrr": sum(1 / rank for rank in ranks if rank > 0) / total if total else 0,
         "expected_evidence_alignment": (
-            sum(evidence_alignment) / len(evidence_alignment)
-            if evidence_alignment
-            else 0
+            sum(evidence_alignment) / len(evidence_alignment) if evidence_alignment else 0
         ),
         "citation_validity": sum(validity) / len(validity) if validity else 0,
     }
@@ -236,32 +262,36 @@ def _verifier_metrics() -> dict[str, float | int | bool]:
     contexts = [
         {
             "content": "The worker failed because its database lease expired.",
+            "evidence_level": "verified",
             "provenance": {"chunk_id": "verified-chunk"},
         }
     ]
     supported = {
+        "text": "The database lease expired.",
         "claims": [
             {
                 "text": "The database lease expired.",
                 "citations": ["verified-chunk"],
             }
-        ]
+        ],
     }
     unsupported = {
+        "text": "The satellite launch succeeded on Tuesday.",
         "claims": [
             {
                 "text": "The satellite launch succeeded on Tuesday.",
                 "citations": ["verified-chunk"],
             }
-        ]
+        ],
     }
     unknown_citation = {
+        "text": "The database lease expired.",
         "claims": [
             {
                 "text": "The database lease expired.",
                 "citations": ["unknown-chunk"],
             }
-        ]
+        ],
     }
     repair_calls = 0
 
@@ -288,13 +318,9 @@ def _verifier_metrics() -> dict[str, float | int | bool]:
     )
     return {
         "supported_claim_acceptance": int(not supported_result["no_answer"]),
-        "unsupported_claim_rejection_accuracy": int(
-            unsupported_result["no_answer"]
-        ),
+        "unsupported_claim_rejection_accuracy": int(unsupported_result["no_answer"]),
         "unknown_citation_rejection_accuracy": int(unknown_result["no_answer"]),
-        "single_repair_success": int(
-            repair_result["repaired"] and not repair_result["no_answer"]
-        ),
+        "single_repair_success": int(repair_result["repaired"] and not repair_result["no_answer"]),
         "repair_calls": repair_calls,
         "no_answer_after_failed_repair": int(failed_repair["no_answer"]),
     }
@@ -312,7 +338,11 @@ def evaluate(
         for item in client.get("/api/v1/search/facets")["projects"]
         if isinstance(item.get("name"), str)
     ]
-    answerable = [*_repository_cases(client), *_knowledge_cases(client)]
+    repository_projects = client.get("/api/v1/repository-analysis/projects")["items"]
+    answerable = [
+        *_repository_cases(client, repository_projects),
+        *_knowledge_cases(client),
+    ]
     raw_ranks: list[int] = []
     shadow_ranks: list[int] = []
     raw_citations: list[bool] = []
@@ -361,9 +391,7 @@ def evaluate(
                 0,
             )
             raw_citation = (
-                _repository_citation_matches(raw_top[raw_rank - 1], case)
-                if raw_rank
-                else None
+                _repository_citation_matches(raw_top[raw_rank - 1], case) if raw_rank else None
             )
             shadow_citation = (
                 _repository_citation_matches(shadow_rows[shadow_rank - 1], case)
@@ -403,9 +431,7 @@ def evaluate(
                 parsed = SearchResult.model_validate(item)
                 merged[str(parsed.provenance.chunk_id)] = parsed
         effective = (
-            request.model_copy(update={"project": scope.project})
-            if scope.project
-            else request
+            request.model_copy(update={"project": scope.project}) if scope.project else request
         )
         shadow = reward_rerank(list(merged.values()), effective, scope)
         raw_top = raw[:10]
@@ -429,9 +455,7 @@ def evaluate(
             shadow_citation = _citation_matches(shadow[shadow_rank - 1], case)
         else:
             shadow_citation = None
-        raw_citation = (
-            _citation_matches(raw_top[raw_rank - 1], case) if raw_rank else None
-        )
+        raw_citation = _citation_matches(raw_top[raw_rank - 1], case) if raw_rank else None
         return (
             raw_rank,
             shadow_rank,
@@ -521,13 +545,13 @@ def evaluate(
 
     return {
         "corpus": {
-            "repository_cases": sum(
-                case.kind.startswith("repository:") for case in answerable
-            ),
-            "knowledge_cases": sum(
-                case.kind.startswith("knowledge:") for case in answerable
-            ),
+            "repository_cases": sum(case.kind.startswith("repository:") for case in answerable),
+            "knowledge_cases": sum(case.kind.startswith("knowledge:") for case in answerable),
             "no_answer_cases": len(no_answer_queries),
+            "truncated_queries": sum(case.query_truncated for case in answerable),
+            "stale_repository_projects_excluded": sum(
+                item.get("stale") is True for item in repository_projects
+            ),
         },
         "before": {
             **_metrics(raw_ranks, raw_citations, raw_validity),
@@ -536,9 +560,7 @@ def evaluate(
         },
         "shadow": {
             **_metrics(shadow_ranks, shadow_citations, shadow_validity),
-            "failure_top3": (
-                failure_top3_shadow / failure_total if failure_total else 0
-            ),
+            "failure_top3": (failure_top3_shadow / failure_total if failure_total else 0),
             "no_answer_accuracy": shadow_no_answer / len(no_answer_queries),
         },
         "by_kind": {

@@ -19,15 +19,18 @@ from .cli import get_embedder
 from .worker import _embed_missing
 
 
-def run(limit: int | None = None) -> dict[str, int | str]:
+def run(limit: int | None = None) -> dict[str, object]:
     settings = get_settings()
     if not settings.embedding_timeout_circuit_bypass:
         raise RuntimeError("GPU reindex requires LKP_EMBEDDING_TIMEOUT_CIRCUIT_BYPASS=true")
     embedder = get_embedder(settings, deterministic=False)
     try:
-        return run_with_embedder(settings, embedder, limit)
+        result = run_with_embedder(settings, embedder, limit)
     finally:
         embedder.close()
+    metrics = getattr(embedder, "performance_metrics", None)
+    result["model_performance"] = metrics() if metrics is not None else None
+    return result
 
 
 def wait_for_ingest_quiescence(
@@ -48,9 +51,7 @@ def wait_for_ingest_quiescence(
                 session.scalar(
                     select(func.count(IngestJob.id)).where(
                         or_(
-                            IngestJob.status.in_(
-                                [JobStatus.leased, JobStatus.processing]
-                            ),
+                            IngestJob.status.in_([JobStatus.leased, JobStatus.processing]),
                             (
                                 (IngestJob.status == JobStatus.pending)
                                 & (IngestJob.available_at <= now)
@@ -85,8 +86,7 @@ def run_with_embedder(settings, embedder, limit: int | None) -> dict:
             .join(DocumentVersion, Document.current_version_id == DocumentVersion.id)
             .where(
                 Document.state == DocumentState.active,
-                DocumentVersion.metadata_json["embedding_status"].astext
-                == "deferred_runtime",
+                DocumentVersion.metadata_json["embedding_status"].astext == "deferred_runtime",
             )
             .order_by(DocumentVersion.detected_at, Document.id)
         )

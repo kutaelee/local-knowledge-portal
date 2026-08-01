@@ -1,6 +1,8 @@
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
+from lkp.repository_analysis_routes import _mark_current_repository_references
 from lkp.repository_rag_quality import infer_repository_types, repository_reward_rerank
 from lkp_indexer import repository_retrieval_evaluation
 from lkp_indexer.repository_retrieval_evaluation import (
@@ -107,6 +109,73 @@ def test_repository_rerank_fails_closed_on_invalid_source_reference() -> None:
         )
         == []
     )
+
+
+def test_repository_rerank_fails_closed_on_revision_mismatch() -> None:
+    stale = _row(
+        title="BaseLifeCycle",
+        file="src/main/java/BaseLifeCycle.java",
+        symbol="BaseLifeCycle",
+    )
+    stale["_source_references_current"] = False
+
+    assert repository_reward_rerank([stale], "BaseLifeCycle", limit=5) == []
+
+
+def test_korean_architecture_question_expands_repository_types() -> None:
+    inferred = infer_repository_types("ESB가 요청을 처리하는 구조와 라이프사이클")
+
+    assert {"REPOSITORY_OVERVIEW", "ARCHITECTURE", "COMPONENT_FLOW"}.issubset(inferred)
+
+
+def test_repository_reference_gate_checks_current_hash_and_line_bounds() -> None:
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "relative_path": "src/Route.java",
+                    "content_hash": "a" * 64,
+                    "line_count": 40,
+                }
+            ]
+
+    class Database:
+        def execute(self, _statement, params):
+            assert params["paths"] == ["src/Route.java"]
+            return Result()
+
+    rows = [
+        {
+            "source_references": [
+                {
+                    "file": "src/Route.java",
+                    "source_hash": "a" * 64,
+                    "start_line": 10,
+                    "end_line": 40,
+                }
+            ]
+        },
+        {
+            "source_references": [
+                {
+                    "file": "src/Route.java",
+                    "source_hash": "b" * 64,
+                    "start_line": 10,
+                    "end_line": 41,
+                }
+            ]
+        },
+        {"source_references": ["malformed"]},
+    ]
+
+    _mark_current_repository_references(Database(), rows, snapshot_id=uuid4())
+
+    assert rows[0]["_source_references_current"] is True
+    assert rows[1]["_source_references_current"] is False
+    assert rows[2]["_source_references_current"] is False
 
 
 def test_troubleshooting_scenario_includes_architecture_context() -> None:

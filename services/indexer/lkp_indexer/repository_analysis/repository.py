@@ -68,22 +68,50 @@ class RepositoryAnalysisStore:
             )
             project = manifest.project_id
 
-        existing = self.session.execute(
-            text(
+        existing = (
+            self.session.execute(
+                text(
+                    """
+                SELECT s.id, s.stale,
+                       s.id = (
+                         SELECT latest.id
+                         FROM repository_snapshot latest
+                         WHERE latest.project_id = s.project_id
+                         ORDER BY latest.created_at DESC, latest.id DESC
+                         LIMIT 1
+                       ) AS is_latest
+                FROM repository_snapshot s
+                WHERE s.project_id = :project_id AND s.source_hash = :source_hash
                 """
-                SELECT id FROM repository_snapshot
-                WHERE project_id = :project_id AND source_hash = :source_hash
-                """
-            ),
-            {"project_id": project, "source_hash": manifest.source_hash},
-        ).scalar_one_or_none()
+                ),
+                {"project_id": project, "source_hash": manifest.source_hash},
+            )
+            .mappings()
+            .one_or_none()
+        )
         if existing is not None:
-            manifest.snapshot_id = existing
-            if self.has_analysis(manifest):
+            manifest.snapshot_id = existing["id"]
+            already_analyzed = self.has_analysis(manifest)
+            reactivate = bool(existing["stale"] or not existing["is_latest"])
+            if already_analyzed and not reactivate:
                 return False
-            self._replace_snapshot_facts(manifest)
-            self._persist_job(manifest, project, now)
-            self._persist_evaluation(manifest, project, now)
+            if not already_analyzed:
+                self._replace_snapshot_facts(manifest)
+                self._persist_job(manifest, project, now)
+                self._persist_evaluation(manifest, project, now)
+            if reactivate:
+                self.session.execute(
+                    text(
+                        """
+                        UPDATE repository_snapshot
+                        SET stale = true
+                        WHERE project_id = :project_id
+                          AND id != :snapshot_id
+                          AND stale = false
+                        """
+                    ),
+                    {"project_id": project, "snapshot_id": existing["id"]},
+                )
             self.session.execute(
                 text(
                     """
@@ -97,12 +125,16 @@ class RepositoryAnalysisStore:
                         languages = CAST(:languages AS text[]),
                         build_systems = CAST(:build_systems AS text[]),
                         status = :status,
-                        stale = false
+                        stale = false,
+                        created_at = CASE
+                          WHEN :reactivate THEN :created_at
+                          ELSE created_at
+                        END
                     WHERE id = :snapshot_id
                     """
                 ),
                 {
-                    "snapshot_id": existing,
+                    "snapshot_id": existing["id"],
                     "snapshot_name": manifest.snapshot_name,
                     "git_commit": manifest.git_commit,
                     "git_branch": manifest.git_branch,
@@ -112,7 +144,8 @@ class RepositoryAnalysisStore:
                     "languages": sorted({item.language for item in manifest.files}),
                     "build_systems": self._build_systems(manifest),
                     "status": manifest.stage.value,
-                    "updated_at": now,
+                    "reactivate": reactivate,
+                    "created_at": now,
                 },
             )
             self.session.execute(
@@ -126,7 +159,7 @@ class RepositoryAnalysisStore:
                 {"updated_at": now, "project_id": project},
             )
             self.session.commit()
-            return True
+            return not already_analyzed
 
         languages = sorted({item.language for item in manifest.files})
         build_systems = self._build_systems(manifest)

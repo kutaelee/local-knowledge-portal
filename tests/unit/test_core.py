@@ -58,6 +58,7 @@ def test_retry_backoff_is_bounded():
 
 def test_ollama_embedding_request_is_nonresident_and_close_unloads(monkeypatch):
     calls = []
+    resident = iter([False, True, False])
 
     class Response:
         def raise_for_status(self):
@@ -75,7 +76,22 @@ def test_ollama_embedding_request_is_nonresident_and_close_unloads(monkeypatch):
         calls.append((url, json, timeout))
         return Response()
 
+    class PsResponse:
+        def __init__(self, loaded):
+            self.loaded = loaded
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"models": ([{"name": "qwen3-embedding:0.6b"}] if self.loaded else [])}
+
+    def get(_url, *, timeout):
+        assert timeout == 10
+        return PsResponse(next(resident))
+
     monkeypatch.setattr("lkp_indexer.embedding.httpx.post", post)
+    monkeypatch.setattr("lkp_indexer.embedding.httpx.get", get)
     embedder = OllamaEmbedder(
         "http://127.0.0.1:11434",
         "qwen3-embedding:0.6b",
@@ -98,6 +114,8 @@ def test_ollama_embedding_request_is_nonresident_and_close_unloads(monkeypatch):
         "load_duration_ns": 10_000_000,
         "inputs_per_second": 10.0,
         "prompt_tokens_per_second": 200.0,
+        "preexisting_resident": False,
+        "unload_verified": True,
     }
 
 
