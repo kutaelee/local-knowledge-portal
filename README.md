@@ -154,6 +154,29 @@ Codex requires a human trust review for non-managed hooks. Start a new session, 
 approve the displayed commands. Until then the installation status is
 `MANUAL_APPROVAL_REQUIRED`; no script attempts to bypass this boundary.
 
+### Codex knowledge retrieval MCP
+
+The activity hooks above are write-only capture and never inject search results. Codex can instead
+use the read-only stdio bridge in `lkp_indexer.codex_mcp`, which exposes only
+`retrieve_context` and `get_source` and calls the existing loopback API. It starts on demand with a
+Codex session, opens no new port, performs no write, and is not a persistent service.
+
+Register it globally from Windows after backing up `%USERPROFILE%\.codex\config.toml`:
+
+```powershell
+codex mcp add local_knowledge -- `
+  wsl.exe -d Ubuntu -- `
+  /home/kutae/src/local-knowledge-portal/.venv/bin/python `
+  -m lkp_indexer.codex_mcp
+```
+
+Keep `required = false`, allow only the two read-only tools, and use a bounded tool timeout. The
+workstation guidance is source-first: Codex does not retrieve before inspecting current source. It
+uses the portal when the user explicitly asks for local knowledge or when one bounded source search
+misses and prior failure/decision evidence may help. Hybrid high-confidence results may supply at
+most five contexts and 6,000 characters. Keyword-fallback or other low-confidence results return
+only short navigation hints and remain `no_answer=true`; they are never claim evidence.
+
 Local-model conversations use a different intake path from Codex. A client that has completed an
 Ollama turn calls `POST /api/v1/local-llm/hooks/chat`, or invokes
 `scripts/capture-local-llm-chat.ps1`. The API only redacts and atomically writes the bounded

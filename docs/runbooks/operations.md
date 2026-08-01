@@ -49,6 +49,36 @@ force output. In a new Codex session, an agent may add a compact
 `재사용 메모: 상황 — … | 원인 — … | 조치 — … | 검증 — …` only when the statement is
 evidence-bound and likely to recur. The collector treats it as candidate structure, never as proof.
 
+### Read-only Codex retrieval
+
+`python -m lkp_indexer.codex_mcp` is a bounded stdio MCP bridge to the loopback portal API. It does
+not change hook behavior, start another API, access PostgreSQL directly, or write indexed data.
+Global Codex configuration keeps the server optional, sets five-second startup and twelve-second
+tool timeouts, and allowlists only `retrieve_context` and `get_source`.
+
+The routing policy is deliberately source-first. Do not call the portal before one bounded current
+source search unless the user explicitly requests portal evidence. A hybrid `confidence=high`
+response can return at most five contexts totaling 6,000 characters. If the embedding circuit is
+open or the response is low confidence, the bridge strips context bodies, returns at most five
+240-character navigation hints, and keeps `no_answer=true`. Portal or MCP failure must not block
+ordinary source inspection.
+
+Validate the bridge without a persistent process:
+
+```powershell
+@'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+'@ | wsl.exe -d Ubuntu -- `
+  /home/kutae/src/local-knowledge-portal/.venv/bin/python `
+  -m lkp_indexer.codex_mcp
+
+codex mcp list
+```
+
+Rollback is configuration-only: remove the `mcp_servers.local_knowledge` table and the matching
+global routing paragraph, or restore their timestamped backup. No portal data migration is needed.
+
 ### Local Ollama/model conversation capture
 
 Ollama does not expose a global completed-chat hook. Configure each local chat client to call the
