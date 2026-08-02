@@ -8,11 +8,11 @@ function Assert-Contains {
 }
 
 Describe "Nightly GPU maintenance schedule" {
-    It "registers one daily 00:30 task and disables legacy model schedules" {
+    It "registers one daily 07:30 task and disables legacy model schedules" {
         $source = Get-Content (
             Join-Path $repoRoot "scripts/install-nightly-maintenance-schedule.ps1"
         ) -Raw
-        Assert-Contains $source '[int]$Hour = 0'
+        Assert-Contains $source '[int]$Hour = 7'
         Assert-Contains $source '[int]$Minute = 30'
         Assert-Contains $source 'New-ScheduledTaskTrigger -Daily'
         Assert-Contains $source '"CurateKnowledge"'

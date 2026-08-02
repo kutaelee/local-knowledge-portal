@@ -135,7 +135,7 @@ def test_gpu_proxy_exposes_only_bounded_get_paths(monkeypatch):
     def fake_get(url: str, **kwargs):
         calls.append((url, kwargs))
         if url.endswith("/api/status"):
-            return FakeResponse({"runtime": {}, "jobs": {}})
+            return FakeResponse({"runtime": {"admission_ready": True}, "jobs": {}})
         return FakeResponse({"ok": True})
 
     monkeypatch.setattr(main.httpx, "get", fake_get)
@@ -151,9 +151,13 @@ def test_gpu_proxy_exposes_only_bounded_get_paths(monkeypatch):
     )
     job_id = uuid.UUID("f298ae9e-6777-43ee-8462-eb6b95cf18b6")
 
-    assert main.gpu_queue_health() == {"ok": True}
+    assert main.gpu_queue_health() == {
+        "ok": True,
+        "scheduler": {"admission_ready": True},
+    }
     assert main.gpu_queue_status() == {
         "runtime": {
+            "admission_ready": True,
             "comfyui_bridge": {"state": "unavailable"},
             "external_workloads": [
                 {
@@ -167,11 +171,73 @@ def test_gpu_proxy_exposes_only_bounded_get_paths(monkeypatch):
     }
     assert main.gpu_queue_job(job_id) == {"ok": True}
     assert [call[0] for call in calls] == [
-        f"{main.settings.gpu_scheduler_base_url}/api/health",
+        f"{main.settings.gpu_scheduler_base_url}/api/status",
         f"{main.settings.gpu_scheduler_base_url}/api/status",
         f"{main.settings.gpu_scheduler_base_url}/api/jobs/{job_id}",
     ]
     assert all(call[1]["follow_redirects"] is False for call in calls)
+
+
+def test_gpu_health_reports_reachable_during_admission_cooldown(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "_gpu_scheduler_get",
+        lambda path: {
+            "runtime": {
+                "admission_ready": False,
+                "last_decision": "post-high-load-no-touch:7.9s",
+            },
+            "jobs": {},
+        },
+    )
+
+    assert main.gpu_queue_health() == {
+        "ok": False,
+        "scheduler": {
+            "admission_ready": False,
+            "last_decision": "post-high-load-no-touch:7.9s",
+        },
+    }
+
+
+def test_service_catalog_checks_gpu_scheduler_liveness(monkeypatch):
+    urls: list[str] = []
+
+    class ScalarResult:
+        def scalar_one(self):
+            return "0021_repository_read_indexes"
+
+    class FakeDb:
+        def execute(self, _statement):
+            return ScalarResult()
+
+    def fake_http_status(url: str):
+        urls.append(url)
+        return "healthy", None
+
+    monkeypatch.setattr(main, "_http_service_status", fake_http_status)
+    monkeypatch.setattr(
+        main,
+        "_heartbeat_service",
+        lambda *_args, key, label, **_kwargs: {
+            "key": key,
+            "label": label,
+            "state": "healthy",
+            "detail": "test",
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "load_docker_groups",
+        lambda *_args, **_kwargs: ({"state": "healthy"}, []),
+    )
+    monkeypatch.setattr(main.settings, "gpu_embedding_reaper_health_enabled", False)
+    monkeypatch.setattr(main.settings, "generation_provider", "disabled")
+
+    main.system_services(FakeDb())
+
+    assert f"{main.settings.gpu_scheduler_base_url}/livez" in urls
+    assert f"{main.settings.gpu_scheduler_base_url}/api/health" not in urls
 
 
 def test_comfyui_bridge_health_is_sanitized_for_gpu_queue_status(monkeypatch):

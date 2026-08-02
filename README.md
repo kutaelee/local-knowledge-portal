@@ -238,7 +238,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
   .\scripts\install-nightly-maintenance-schedule.ps1
 ```
 
-At 00:30 `Asia/Seoul`, one GPUQ reservation waits behind earlier work and then runs semantic
+At 07:30 `Asia/Seoul`, one GPUQ reservation waits behind earlier work and then runs semantic
 maintenance, curation/project articles, and the previous day's information feed sequentially.
 The installer disables the superseded repeating model schedules. Every stage uses a bounded
 one-shot container and unloads its exact model before the reservation exits.

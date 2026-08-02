@@ -198,7 +198,7 @@ must stop Windows Ollama first and preserve both model stores; never delete the 
 ### Evidence-bound developer feed
 
 `developer-feed` is a one-shot GPU-queued editor, not an always-on service. The production
-schedule invokes it once inside the 00:30 nightly pipeline. It writes newly embedded information,
+schedule invokes it once inside the 07:30 daily pipeline. It writes newly embedded information,
 summarizes the previous local calendar day, and unloads `gemma4:12b` in `finally`.
 
 The editor receives redacted verified journal facts plus excerpts from the current embedded document
@@ -227,7 +227,7 @@ the exact Gemma model digest and prompt version. A screenshot is only recommende
 explicitly identifies a stable non-secret visual artifact; capture remains a separate reviewed
 action.
 
-At 00:30 `Asia/Seoul`, the nightly entrypoint creates the idempotent `daily:YYYY-MM-DD`
+At 07:30 `Asia/Seoul`, the daily entrypoint creates the idempotent `daily:YYYY-MM-DD`
 synthesis for the previous local calendar day. A day with no verified update gets a deterministic
 transparent closeout without loading the model.
 
@@ -246,7 +246,7 @@ rollback.
 ### Nightly GPU maintenance
 
 The workstation registers only `\LocalKnowledgePortal\NightlyKnowledgeMaintenance` for automatic
-model work. It starts daily at 00:30, submits one 14,336 MiB GPUQ reservation, and waits for that
+model work. It starts daily at 07:30, submits one 14,336 MiB GPUQ reservation, and waits for that
 reservation even when earlier interactive work delays admission. Task Scheduler uses `IgnoreNew`
 and a 48-hour bound, so a delayed run is not duplicated at the next trigger.
 
@@ -309,7 +309,7 @@ Reference:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  .\scripts\install-nightly-maintenance-schedule.ps1 -Hour 0 -Minute 30
+  .\scripts\install-nightly-maintenance-schedule.ps1 -Hour 7 -Minute 30
 Get-ScheduledTask -TaskPath '\LocalKnowledgePortal\' |
   Where-Object TaskName -Match 'Nightly|Curate|Deduplicate|Feed|Semantic|Embedding'
 ```
@@ -358,7 +358,7 @@ Register the daily, non-overlapping maintenance task:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  .\scripts\install-nightly-maintenance-schedule.ps1 -Hour 0 -Minute 30
+  .\scripts\install-nightly-maintenance-schedule.ps1 -Hour 7 -Minute 30
 ```
 
 The installer copies the stable nightly entrypoint and queue helper to

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateRange(0, 23)]
-    [int]$Hour = 0,
+    [int]$Hour = 7,
     [ValidateRange(0, 59)]
     [int]$Minute = 30,
     [string]$OperationsRoot = "C:\Docker\local-knowledge-portal",

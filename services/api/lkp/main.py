@@ -335,7 +335,10 @@ def system_services(db: Session = Depends(get_db)) -> dict:
     embedding_state, embedding_error = _http_service_status(
         f"{settings.ollama_base_url}/api/version"
     )
-    gpu_state, gpu_error = _http_service_status(f"{settings.gpu_scheduler_base_url}/api/health")
+    # The host scheduler deliberately returns 503 from /api/health while
+    # admission is paused for an ordinary post-load transition. Service
+    # inventory needs process liveness, not admission readiness.
+    gpu_state, gpu_error = _http_service_status(f"{settings.gpu_scheduler_base_url}/livez")
     service_manager_state, service_manager_error = _http_service_status(
         f"{settings.service_manager_base_url}/api/health"
     )
@@ -904,7 +907,17 @@ def _stop_generation_ollama() -> dict:
 
 @app.get("/api/v1/gpu-queue/health")
 def gpu_queue_health() -> dict:
-    return _gpu_scheduler_get("/api/health")
+    # Keep the public payload shape while avoiding a false transport outage
+    # during a healthy admission cooldown. Detailed readiness remains visible
+    # in both `ok` and the scheduler snapshot.
+    payload = _gpu_scheduler_get("/api/status")
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, dict):
+        raise HTTPException(
+            502,
+            detail={"service": "gpu-scheduler", "status": "invalid_response"},
+        )
+    return {"ok": bool(runtime.get("admission_ready")), "scheduler": runtime}
 
 
 @app.get("/api/v1/gpu-queue/status")
