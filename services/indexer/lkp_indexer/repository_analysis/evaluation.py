@@ -45,7 +45,10 @@ _QUESTION_TERMS = {
     "DB_MESSAGE_FLOW": ("db", "sql", "메시지", "queue", "topic"),
     "CONCURRENCY_STATE": ("동시", "thread", "상태", "state", "lock"),
     "DEPENDENCY_USAGE": ("의존", "dependency", "jar", "라이브러리"),
-    "JAR_MISSING_IMPACT": ("jar", "dependency", "의존", "누락"),
+    # A generic dependency is not evidence that a repository has a JAR
+    # lifecycle. Keep this scenario answerable only for explicit Java
+    # artifact or Maven evidence.
+    "JAR_MISSING_IMPACT": ("jar", ".jar", "maven", "meta-inf", ".decompiled"),
     "LOG_LOCATION": ("로그", "log", "exception", "예외"),
     "FAILURE_CANDIDATES": ("장애", "실패", "오류", "예외"),
     "ADDITIONAL_EVIDENCE": ("확인", "unknown", "운영", "추가"),
@@ -128,9 +131,13 @@ def build_evaluation_cases(manifest: AnalysisManifest) -> list[EvaluationCase]:
         selected, matched_anchor = _retrieval_anchor(manifest, question_type)
         retrieval_answerable = matched_anchor is not None
         anchor = matched_anchor or fallback[0]
+        # The question target and expected evidence must identify the same
+        # selected knowledge item. A component list can aggregate unrelated
+        # references and previously produced incoherent cases such as asking
+        # about a web component while grading against another file.
         component = (
-            selected.components[0]
-            if selected is not None and selected.components
+            selected.title
+            if selected is not None
             else anchor.symbol or manifest.display_name
         )
         question = f"[{component}] {prompt}"

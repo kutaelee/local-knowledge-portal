@@ -182,6 +182,17 @@ def test_pipeline_produces_verified_metadata_without_source_text(
         "retrieval_answerable" in item.grading_criteria for item in manifest.evaluation_cases
     )
     assert any(item.grading_criteria["retrieval_answerable"] for item in manifest.evaluation_cases)
+    cases_by_type = {item.question_type: item for item in manifest.evaluation_cases}
+    assert cases_by_type["JAR_MISSING_IMPACT"].grading_criteria["retrieval_answerable"] is False
+    for case in manifest.evaluation_cases:
+        if case.grading_criteria["retrieval_answerable"] is not True:
+            continue
+        target = case.question.removeprefix("[").split("] ", 1)[0]
+        assert any(
+            item.title == target
+            and any(reference.file in case.required_files for reference in item.source_references)
+            for item in manifest.knowledge_items
+        )
 
 
 def test_typescript_imports_are_connected_to_declared_dependencies(
