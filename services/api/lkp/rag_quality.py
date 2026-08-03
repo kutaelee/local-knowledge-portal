@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from .schemas import Provenance, SearchRequest, SearchResult
 
-POLICY_REVISION = "verifier-guided-rag-v1"
+POLICY_REVISION = "verifier-guided-rag-v2-conflict-aware"
 _TERM = re.compile(r"[\w.+#-]{2,}", re.UNICODE)
 _FAILURE_MARKERS = {
     "error",
@@ -91,6 +91,13 @@ _KOREAN_PARTICLES = (
     "만",
 )
 _NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?:%|ms|s|mb|gb|gi?b)?", re.IGNORECASE)
+_EXACT_IDENTIFIER = re.compile(
+    r"`[^`\n]{1,80}`|"
+    r"(?:[\w.-]+/)+[\w.-]+(?:\:\:[A-Za-z_][A-Za-z0-9_]*)?|"
+    r"\b[A-Za-z_][A-Za-z0-9_]*(?:::|\.)[A-Za-z0-9_.:-]+\b|"
+    r"\b[A-Z][A-Z0-9_-]{2,}\b|"
+    r"(?<![\w.])-?\d+(?:\.\d+)*(?:(?i:%|ms|s|mb|gb|gib))?\b"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +133,21 @@ def terms(value: str) -> set[str]:
         if item not in _STOP_TERMS:
             normalized.add(item)
     return normalized
+
+
+def exact_identifiers(value: str) -> set[str]:
+    """Extract case- and punctuation-sensitive technical identifiers."""
+
+    identifiers: set[str] = set()
+    for match in _EXACT_IDENTIFIER.finditer(value):
+        raw = match.group(0)
+        if raw.startswith("`") and raw.endswith("`"):
+            identifier = raw[1:-1].strip()
+        else:
+            identifier = raw.strip().strip("()[]{}<>,;:!?").rstrip(".")
+        if identifier:
+            identifiers.add(identifier)
+    return identifiers
 
 
 def evidence_level(result: SearchResult) -> str:
@@ -475,6 +497,11 @@ def verify_answer_candidate(
         if not claim_numbers.issubset(cited_numbers):
             failures.append(f"claim_number_unsupported:{index}")
             continue
+        claim_identifiers = exact_identifiers(claim["text"])
+        cited_identifiers = exact_identifiers(cited_text)
+        if not claim_identifiers.issubset(cited_identifiers):
+            failures.append(f"claim_identifier_unsupported:{index}")
+            continue
         overlap = len(claim_terms.intersection(cited_terms)) / max(1, len(claim_terms))
         if overlap < 0.35:
             failures.append(f"claim_unsupported:{index}")
@@ -497,6 +524,10 @@ def verify_answer_candidate(
     claim_numbers = set(_NUMBER.findall(" ".join(claim_texts)))
     if not answer_numbers.issubset(claim_numbers):
         failures.append("answer_number_unclaimed")
+    answer_identifiers = exact_identifiers(answer)
+    claim_identifiers = exact_identifiers(" ".join(claim_texts))
+    if not answer_identifiers.issubset(claim_identifiers):
+        failures.append("answer_identifier_unclaimed")
 
     score = sum(support_scores) / len(claims) * (0.8 + 0.2 * answer_coverage) if claims else 0.0
     return {
@@ -508,18 +539,91 @@ def verify_answer_candidate(
     }
 
 
+def _answers_equivalent(left: str, right: str) -> bool:
+    left_normalized = _normalized(left)
+    right_normalized = _normalized(right)
+    if left_normalized == right_normalized:
+        return True
+    left_signature = exact_identifiers(left).union(_NUMBER.findall(left))
+    right_signature = exact_identifiers(right).union(_NUMBER.findall(right))
+    if left_signature or right_signature:
+        return left_signature == right_signature
+    shorter, longer = sorted((left_normalized, right_normalized), key=len)
+    if shorter and shorter in longer and len(shorter) / max(1, len(longer)) >= 0.6:
+        return True
+    left_terms = terms(left_normalized)
+    right_terms = terms(right_normalized)
+    union = left_terms.union(right_terms)
+    return bool(union) and len(left_terms.intersection(right_terms)) / len(union) >= 0.72
+
+
+def _candidate_citations(candidate: dict[str, Any]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            str(citation)
+            for claim in candidate.get("claims") or []
+            if isinstance(claim, dict)
+            for citation in claim.get("citations") or []
+            if isinstance(citation, str) and citation
+        )
+    )
+
+
+def _conflicting_valid_candidates(
+    valid: Sequence[tuple[dict[str, Any], dict[str, Any], int]],
+) -> list[dict[str, Any]]:
+    if len(valid) < 2:
+        return []
+    ranked = sorted(valid, key=lambda item: item[0]["score"], reverse=True)
+    winner_verification, winner, winner_index = ranked[0]
+    conflicts: list[dict[str, Any]] = []
+    for verification, candidate, candidate_index in ranked[1:]:
+        if _answers_equivalent(str(winner.get("text") or ""), str(candidate.get("text") or "")):
+            continue
+        conflicts.append(
+            {
+                "candidate_indices": [winner_index, candidate_index],
+                "citation_sets": [
+                    _candidate_citations(winner),
+                    _candidate_citations(candidate),
+                ],
+                "score_gap": round(
+                    winner_verification["score"] - verification["score"],
+                    6,
+                ),
+            }
+        )
+    return conflicts
+
+
 def select_verified_answer(
     candidates: Sequence[dict[str, Any]],
     contexts: Sequence[dict[str, Any]],
     *,
     repair: Callable[[dict[str, Any], list[str]], dict[str, Any] | None] | None = None,
+    fail_on_conflict: bool = False,
 ) -> dict[str, Any]:
     evaluated = [
-        (verify_answer_candidate(candidate, contexts), candidate) for candidate in candidates
+        (verify_answer_candidate(candidate, contexts), candidate, index)
+        for index, candidate in enumerate(candidates)
     ]
     valid = [item for item in evaluated if item[0]["valid"]]
     if valid:
-        verification, candidate = max(valid, key=lambda item: item[0]["score"])
+        conflicts = _conflicting_valid_candidates(valid) if fail_on_conflict else []
+        if conflicts:
+            return {
+                "answer": None,
+                "verification": {
+                    "valid": False,
+                    "score": max(item[0]["score"] for item in valid),
+                    "failures": ["candidate_conflict", "no_verified_answer"],
+                    "conflicts": conflicts,
+                    "policy": POLICY_REVISION,
+                },
+                "repaired": False,
+                "no_answer": True,
+            }
+        verification, candidate, _index = max(valid, key=lambda item: item[0]["score"])
         return {
             "answer": candidate,
             "verification": verification,
@@ -528,7 +632,7 @@ def select_verified_answer(
         }
     best_verification: dict[str, Any] | None = None
     if evaluated:
-        best_verification, best_candidate = max(
+        best_verification, best_candidate, _index = max(
             evaluated,
             key=lambda item: item[0]["score"],
         )

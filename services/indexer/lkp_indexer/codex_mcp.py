@@ -12,8 +12,30 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
+from lkp.agent_evidence import (
+    compact_evidence_card,
+    estimate_tokens,
+    evidence_identity,
+    evidence_text,
+    exact_anchors,
+)
 from lkp.rag_quality import select_verified_answer, terms
 from lkp.redaction import redact_text
+from lkp.security_boundary import (
+    generic_policy_denial,
+    is_prohibited_project,
+    normalize_project_key,
+    project_is_allowed_record,
+    text_references_prohibited_project,
+)
+from lkp.settings import get_settings
+
+from .mcp_progressive import (
+    ProgressiveRetrievalConfig,
+    exact_repository_map_is_useful,
+    retrieval_is_authorized,
+    token_aware_select,
+)
 
 SERVER_NAME = "local-knowledge"
 SERVER_VERSION = "0.2.0"
@@ -22,12 +44,16 @@ SERVER_INSTRUCTIONS = (
     "Inspect current source first for exact implementation questions. Call retrieve_context once "
     "for unfamiliar repository architecture, prior decisions, regressions, verified experiments, "
     "or failures where historical evidence can change the answer. Pass the project key and "
-    "purpose. "
+    "purpose. When progressive retrieval is enabled, also pass trigger; use source_miss only "
+    "after a bounded source search and set source_search_status=miss. Reuse a stable session_id "
+    "to avoid returning the same evidence body twice. "
     "The tool automatically selects current source documents, verified cases, and current "
     "repository-analysis knowledge. High-confidence contexts may support claims; navigation is not "
     "evidence. For a factual answer based on retrieved context, call verify_answer with up to "
     "three "
-    "candidates. If it rejects all candidates, repair once and call it one final time; then return "
+    "candidates. Submit distinct grounded candidates when the evidence supports competing values; "
+    "the verifier fails closed on unresolved conflicts. If it rejects all candidates, repair once "
+    "and call it one final time; then return "
     "no-answer. Use get_source only when an exact document chunk must be inspected."
 )
 
@@ -40,7 +66,8 @@ TOOLS = [
             "portal. Call for unfamiliar architecture/lifecycle, a prior decision, a regression "
             "or failure, verified experiment/A-B history, or when the user requests portal "
             "evidence. Inspect current source first for exact implementation questions, and do "
-            "not call when it already answers the question. The backend "
+            "not call when it already answers the question. Set trigger to the reason retrieval "
+            "is allowed; source_miss additionally requires source_search_status=miss. The backend "
             "performs scope routing, wide candidate generation, reward reranking, stale/revision "
             "gates, adjacent expansion, and no-answer handling."
         ),
@@ -66,6 +93,21 @@ TOOLS = [
                     "maximum": 8000,
                     "default": 6000,
                 },
+                "trigger": {
+                    "type": "string",
+                    "enum": [
+                        "explicit_request",
+                        "prior_decision",
+                        "incident",
+                        "experiment",
+                        "source_miss",
+                    ],
+                },
+                "source_search_status": {
+                    "type": "string",
+                    "enum": ["hit", "miss", "not_attempted"],
+                },
+                "session_id": {"type": "string", "minLength": 1, "maxLength": 100},
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -82,7 +124,9 @@ TOOLS = [
         "title": "Verify claim and citation support",
         "description": (
             "Select the best claim/citation-grounded answer for a prior retrieval. On rejection, "
-            "repair once and retry once; a second rejection is a strict no-answer."
+            "repair once and retry once; a second rejection is a strict no-answer. When distinct "
+            "answers have comparable grounding, return a conflict instead of arbitrarily choosing "
+            "one."
         ),
         "inputSchema": {
             "type": "object",
@@ -203,6 +247,7 @@ class PortalClient:
         base_url: str = DEFAULT_BASE_URL,
         *,
         transport: httpx.BaseTransport | None = None,
+        progressive_config: ProgressiveRetrievalConfig | None = None,
     ) -> None:
         self.client = httpx.Client(
             base_url=base_url.rstrip("/"),
@@ -213,6 +258,10 @@ class PortalClient:
         self.repository_projects: dict[str, dict[str, Any]] | None = None
         self.retrievals: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
         self.verification_attempts: dict[str, int] = {}
+        self.progressive_config = progressive_config or ProgressiveRetrievalConfig.from_settings(
+            get_settings()
+        )
+        self.session_evidence: dict[str, set[str]] = {}
 
     def get(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self.client.get(path, params=params)
@@ -343,9 +392,9 @@ def _bounded_contexts(
     for item in contexts:
         if len(selected) >= top_k:
             break
-        content = item.get("content")
+        content = evidence_text(item)
         provenance = item.get("provenance") or {}
-        if not isinstance(content, str) or not content:
+        if not content:
             continue
         identity = str(
             provenance.get("evidence_id")
@@ -362,11 +411,15 @@ def _bounded_contexts(
         if len(content) > remaining:
             if remaining < 200:
                 break
-            bounded["content"] = content[: max(1, remaining - 1)].rstrip() + "…"
+            content = content[: max(1, remaining - 1)].rstrip() + "…"
+            if "discriminating_evidence" in bounded and "content" not in bounded:
+                bounded["discriminating_evidence"] = content
+            else:
+                bounded["content"] = content
             bounded["truncated"] = True
         selected.append(bounded)
         seen.add(identity)
-        total += len(bounded["content"])
+        total += len(evidence_text(bounded))
     return selected, total
 
 
@@ -382,6 +435,7 @@ def _repository_project(
     for item in payload.get("items") or []:
         if (
             not isinstance(item, dict)
+            or not project_is_allowed_record(item)
             or item.get("stale") is not False
             or not item.get("snapshot_id")
         ):
@@ -443,7 +497,7 @@ def _repository_contexts(
     )
     contexts: list[dict[str, Any]] = []
     for row in payload.get("items") or []:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or not project_is_allowed_record(row):
             continue
         references = _valid_repository_references(row.get("source_references"))
         if not references:
@@ -474,7 +528,7 @@ def _repository_contexts(
                 "retrieval_score": row.get("vector_similarity")
                 or min(1.0, float(row.get("keyword_matches") or 0) / 4),
                 "title": row.get("title"),
-                "project": row.get("project"),
+                "project": row.get("project") or project.get("canonical_name"),
                 "tags": [
                     f"repository:{row.get('knowledge_type')}",
                     f"validation:{validation}",
@@ -532,6 +586,441 @@ def _context_selection_score(item: dict[str, Any], query: str, purpose: str) -> 
     return round(0.48 * coverage + 0.27 * evidence + 0.15 * retrieval + 0.10 * purpose_bonus, 6)
 
 
+def _exact_value_signatures(
+    items: list[dict[str, Any]],
+    query: str,
+) -> set[frozenset[str]]:
+    query_anchors = exact_anchors(query)
+    if not query_anchors:
+        return set()
+    signatures: set[frozenset[str]] = set()
+    for item in items:
+        content_anchors = exact_anchors(evidence_text(item))
+        if not query_anchors.issubset(content_anchors):
+            continue
+        signature = frozenset(content_anchors.difference(query_anchors))
+        if signature:
+            signatures.add(signature)
+    return signatures
+
+
+def _is_current_grounding_context(
+    item: dict[str, Any],
+    *,
+    confidence: str,
+    expected_project: str | None,
+) -> bool:
+    if (
+        item.get("evidence_level") not in {"verified", "source"}
+        or confidence != "high"
+        or item.get("current", True) is not True
+        or item.get("revision_match", True) is not True
+    ):
+        return False
+    project = item.get("project")
+    if expected_project and (
+        not isinstance(project, str)
+        or normalize_project_key(project) != normalize_project_key(expected_project)
+    ):
+        return False
+    provenance = item.get("provenance") or {}
+    if provenance.get("source_kind") == "repository_analysis":
+        return bool(
+            provenance.get("snapshot_id")
+            and len(str(provenance.get("snapshot_source_hash") or "")) == 64
+            and _valid_repository_references(provenance.get("source_references"))
+        )
+    start = provenance.get("start_line")
+    end = provenance.get("end_line")
+    path = provenance.get("relative_path") or provenance.get("canonical_path")
+    return bool(
+        provenance.get("chunk_id")
+        and isinstance(path, str)
+        and path
+        and len(str(provenance.get("content_hash") or "")) == 64
+        and isinstance(start, int)
+        and isinstance(end, int)
+        and start >= 1
+        and end >= start
+    )
+
+
+def _document_contexts(
+    client: PortalClient,
+    *,
+    query: str,
+    project: str | None,
+    top_k: int,
+    max_chars: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    filters = {"project": project} if project else {}
+    response = client.post(
+        "/api/v1/agent/evidence",
+        {
+            "query": query,
+            "top_k": top_k,
+            "max_chars": max_chars,
+            "filters": filters,
+        },
+    )
+    contexts: list[dict[str, Any]] = []
+    for raw in response.get("evidence") or []:
+        if not isinstance(raw, dict) or not project_is_allowed_record(raw):
+            continue
+        item = dict(raw)
+        verification = dict(item.get("verification") or {})
+        relevance = dict(item.get("relevance") or {})
+        source = dict(item.get("source") or {})
+        provenance = dict(item.get("provenance") or {})
+        if source:
+            provenance = {
+                "document_id": source.get("document_id"),
+                "document_version_id": source.get("document_version_id"),
+                "chunk_id": source.get("chunk_id"),
+                "source_root": source.get("source_root"),
+                "canonical_path": source.get("canonical_path"),
+                "relative_path": source.get("path"),
+                "start_line": source.get("start_line"),
+                "end_line": source.get("end_line"),
+                "content_hash": source.get("source_hash"),
+                "indexed_timestamp": source.get("indexed_at"),
+                "evidence_id": item.get("evidence_id"),
+            }
+        if provenance.get("chunk_id"):
+            provenance.setdefault("evidence_id", str(provenance["chunk_id"]))
+        item["provenance"] = provenance
+        item["title"] = item.get("label") or item.get("claim")
+        item["content"] = redact_text(evidence_text(item))
+        item["retrieval_score"] = relevance.get("score")
+        item["evidence_level"] = str(
+            verification.get("evidence_level") or item.get("evidence_level") or "derived"
+        )
+        item["current"] = verification.get("current", True)
+        item["revision_match"] = verification.get("revision_match", True)
+        item["_confidence"] = str(
+            verification.get("confidence") or response.get("confidence") or "low"
+        )
+        contexts.append(item)
+    return contexts, {
+        "confidence": response.get("confidence"),
+        "result_count": len(contexts),
+    }
+
+
+def _progressive_retrieve_context(
+    client: PortalClient,
+    arguments: dict[str, Any],
+    *,
+    query: str,
+    project: str | None,
+    requested_purpose: str,
+    purpose: str,
+    top_k: int,
+    max_chars: int,
+    started: float,
+) -> dict[str, Any]:
+    config = client.progressive_config
+    if not retrieval_is_authorized(arguments, purpose, source_first=config.source_first):
+        return {
+            "query": query,
+            "project": project,
+            "effective_project": project,
+            "requested_purpose": requested_purpose,
+            "purpose": purpose,
+            "retrieval_id": None,
+            "confidence": "none",
+            "no_answer": True,
+            "navigation_available": False,
+            "retrieval_runtime": {"mode": "not_called", "reason": "source_first_gate"},
+            "contexts": [],
+            "navigation": [],
+            "metrics": {
+                "api_calls": 0,
+                "subqueries": [],
+                "ranges": [],
+                "range_results": [],
+                "context_count": 0,
+                "context_chars": 0,
+                "context_tokens": 0,
+                "navigation_count": 0,
+                "navigation_chars": 0,
+                "early_stop": True,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            },
+        }
+    if config.conflict_gate and top_k < 2:
+        return {
+            "query": query,
+            "project": project,
+            "effective_project": project,
+            "requested_purpose": requested_purpose,
+            "purpose": purpose,
+            "retrieval_id": None,
+            "confidence": "none",
+            "no_answer": True,
+            "navigation_available": False,
+            "retrieval_runtime": {
+                "mode": "not_called",
+                "reason": "conflict_gate_requires_top_k_two",
+            },
+            "contexts": [],
+            "navigation": [],
+            "metrics": {
+                "api_calls": 0,
+                "subqueries": [],
+                "ranges": [],
+                "range_results": [],
+                "context_count": 0,
+                "context_chars": 0,
+                "context_tokens": 0,
+                "navigation_count": 0,
+                "navigation_chars": 0,
+                "early_stop": True,
+                "visible_exact_conflict": False,
+                "conflict_candidates_omitted": True,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            },
+        }
+
+    attempted = list(dict.fromkeys(_subqueries(query)))
+    repository_project: dict[str, Any] | None = None
+    discovery_calls = 0
+    if purpose in {"failure", "architecture", "repository"} or exact_repository_map_is_useful(
+        query
+    ):
+        discovery_calls = 1
+        try:
+            repository_project = _repository_project(client, project, query)
+        except (httpx.HTTPError, ValueError):
+            repository_project = None
+    effective_project = project
+    if repository_project and isinstance(repository_project.get("canonical_name"), str):
+        effective_project = repository_project["canonical_name"]
+
+    range_plan: list[str]
+    if purpose in {"architecture", "repository"} and repository_project:
+        range_plan = ["repository", "documents"]
+    elif purpose == "failure" and repository_project:
+        range_plan = ["documents", "repository"]
+    else:
+        range_plan = ["documents"]
+        if repository_project and exact_repository_map_is_useful(query):
+            range_plan.append("repository")
+
+    raw_contexts: list[dict[str, Any]] = []
+    navigation_source: list[dict[str, Any]] = []
+    range_results: list[dict[str, Any]] = []
+    ranges: list[str] = []
+    selected: list[dict[str, Any]] = []
+    selection_metrics: dict[str, int | float] = {
+        "candidate_count": 0,
+        "selected_tokens": 0,
+        "deduplicated_count": 0,
+        "redundant_suppressed_count": 0,
+        "exact_anchor_retained": 0,
+        "mmr_lambda": 1.0,
+        "best_selection_score": 0.0,
+    }
+    session_id = None
+    if arguments.get("session_id") is not None:
+        session_id = _string(arguments.get("session_id"), "session_id", maximum=100)
+    seen = (
+        client.session_evidence.setdefault(session_id, set())
+        if config.session_dedup and session_id
+        else set()
+    )
+    seen_before = set(seen)
+    early_stop = False
+    visible_exact_conflict = False
+    conflict_candidates_omitted = False
+    per_call_chars = min(max_chars, max(1_000, max_chars // max(1, len(attempted))))
+    for range_name in range_plan:
+        for candidate in attempted:
+            try:
+                if range_name == "repository" and repository_project:
+                    contexts, metadata = _repository_contexts(
+                        client,
+                        query=candidate,
+                        project=repository_project,
+                        top_k=min(10, max(top_k * 2, top_k)),
+                    )
+                else:
+                    contexts, metadata = _document_contexts(
+                        client,
+                        query=candidate,
+                        project=effective_project,
+                        top_k=min(10, max(top_k * 2, top_k)),
+                        max_chars=per_call_chars,
+                    )
+            except (httpx.HTTPError, ValueError) as exc:
+                contexts = []
+                metadata = {"error": type(exc).__name__}
+            ranges.append(range_name)
+            range_results.append(metadata)
+            for item in contexts:
+                confidence = str(item.pop("_confidence", "low"))
+                item["selection_score"] = _context_selection_score(item, query, purpose)
+                if _is_current_grounding_context(
+                    item,
+                    confidence=confidence,
+                    expected_project=effective_project,
+                ):
+                    raw_contexts.append(item)
+                else:
+                    navigation_source.append(item)
+            selected, selection_metrics = token_aware_select(
+                raw_contexts,
+                query=query,
+                top_k=top_k,
+                token_budget=min(config.evidence_token_budget, max(256, max_chars // 2)),
+                seen_evidence=seen,
+                mmr_lambda=config.mmr_lambda if config.mmr_enabled else 1.0,
+                preserve_exact_anchors=config.mmr_enabled,
+            )
+            if seen:
+                reusable = [item for item in raw_contexts if evidence_identity(item) in seen]
+                if reusable:
+                    reused, reused_metrics = token_aware_select(
+                        reusable,
+                        query=query,
+                        top_k=top_k,
+                        token_budget=min(
+                            config.evidence_token_budget,
+                            max(256, max_chars // 2),
+                        ),
+                        mmr_lambda=config.mmr_lambda if config.mmr_enabled else 1.0,
+                        preserve_exact_anchors=config.mmr_enabled,
+                    )
+                    if not selected or float(reused_metrics["best_selection_score"]) > float(
+                        selection_metrics["best_selection_score"]
+                    ):
+                        selected = reused
+                        selection_metrics["best_selection_score"] = reused_metrics[
+                            "best_selection_score"
+                        ]
+                        selection_metrics["selected_tokens"] = reused_metrics["selected_tokens"]
+            raw_signatures = _exact_value_signatures(raw_contexts, query)
+            selected_signatures = _exact_value_signatures(selected, query)
+            conflict_candidates_omitted = bool(
+                config.conflict_gate
+                and len(raw_signatures) > 1
+                and not raw_signatures.issubset(selected_signatures)
+            )
+            if conflict_candidates_omitted:
+                selected = []
+                early_stop = True
+                break
+            visible_exact_conflict = config.conflict_gate and len(selected_signatures) > 1
+            if selected and float(selection_metrics["best_selection_score"]) >= (
+                config.early_stop_score
+            ):
+                if not visible_exact_conflict:
+                    high_confidence = [
+                        item
+                        for item in selected
+                        if float(item.get("selection_score") or 0) >= config.early_stop_score
+                    ]
+                    if high_confidence:
+                        selected = high_confidence
+                        selection_metrics["selected_tokens"] = sum(
+                            estimate_tokens(evidence_text(item)) for item in selected
+                        )
+                early_stop = True
+                break
+        if early_stop:
+            break
+
+    if config.session_dedup and session_id:
+        seen.update(evidence_identity(item) for item in selected)
+    bounded_full, context_chars = _bounded_contexts(
+        selected,
+        top_k=top_k,
+        max_chars=max_chars,
+    )
+    returned_contexts = []
+    for item in bounded_full:
+        if evidence_identity(item) in seen_before:
+            card = compact_evidence_card(
+                item,
+                query=query,
+                query_focused=config.query_focused_compression,
+            )
+            card["discriminating_evidence"] = ""
+            card["deduplicated"] = True
+            card["delta_only"] = True
+            card["estimated_tokens"] = 12
+            card["next_action"] = {
+                "tool": "reuse_session_evidence",
+                "reason": "evidence_body_already_returned_in_this_session",
+            }
+            returned_contexts.append(card)
+        elif config.compact_cards:
+            returned_contexts.append(
+                compact_evidence_card(
+                    item,
+                    query=query,
+                    query_focused=config.query_focused_compression,
+                )
+            )
+        else:
+            returned_contexts.append(item)
+    navigation: list[dict[str, Any]] = []
+    if not returned_contexts and config.low_confidence_navigation:
+        navigation_contexts, _ = _bounded_contexts(
+            sorted(
+                navigation_source,
+                key=lambda item: float(item.get("selection_score") or 0),
+                reverse=True,
+            ),
+            top_k=top_k,
+            max_chars=min(max_chars, 2_000),
+        )
+        navigation = [
+            {
+                "snippet": evidence_text(item)[:240],
+                "retrieval_score": item.get("retrieval_score"),
+                "evidence_level": item.get("evidence_level"),
+                "provenance": item.get("provenance") or {},
+            }
+            for item in navigation_contexts
+        ]
+    retrieval_id = client.store_retrieval(bounded_full) if bounded_full else None
+    runtime = _runtime_mode(client) if ranges else {"mode": "not_called", "reason": None}
+    return {
+        "query": query,
+        "project": project,
+        "effective_project": effective_project,
+        "requested_purpose": requested_purpose,
+        "purpose": purpose,
+        "retrieval_id": retrieval_id,
+        "confidence": "high" if returned_contexts else "low" if navigation else "none",
+        "no_answer": not returned_contexts,
+        "navigation_available": bool(navigation),
+        "retrieval_runtime": runtime,
+        "contexts": returned_contexts,
+        "navigation": navigation,
+        "metrics": {
+            "api_calls": discovery_calls + len(ranges),
+            "subqueries": attempted,
+            "ranges": ranges,
+            "range_results": range_results,
+            "context_count": len(returned_contexts),
+            "context_chars": sum(len(evidence_text(item)) for item in returned_contexts),
+            "context_tokens": sum(
+                int(item.get("estimated_tokens") or 0) for item in returned_contexts
+            ),
+            "full_context_chars": context_chars,
+            "navigation_count": len(navigation),
+            "navigation_chars": sum(len(item["snippet"]) for item in navigation),
+            "early_stop": early_stop,
+            "visible_exact_conflict": visible_exact_conflict,
+            "conflict_candidates_omitted": conflict_candidates_omitted,
+            **selection_metrics,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+        },
+    }
+
+
 def retrieve_context(client: PortalClient, arguments: dict[str, Any]) -> dict[str, Any]:
     query = _string(arguments.get("query"), "query", maximum=1000)
     project_value = arguments.get("project")
@@ -555,6 +1044,41 @@ def retrieve_context(client: PortalClient, arguments: dict[str, Any]) -> dict[st
         maximum=8000,
     )
     started = time.perf_counter()
+    if is_prohibited_project(project) or text_references_prohibited_project(query):
+        denied = generic_policy_denial()
+        return {
+            **denied,
+            "query": None,
+            "project": None,
+            "effective_project": None,
+            "requested_purpose": requested_purpose,
+            "purpose": purpose,
+            "retrieval_id": None,
+            "retrieval_runtime": {"mode": "not_called", "reason": "project_scope_denied"},
+            "metrics": {
+                "api_calls": 0,
+                "subqueries": [],
+                "ranges": [],
+                "range_results": [],
+                "context_count": 0,
+                "context_chars": 0,
+                "navigation_count": 0,
+                "navigation_chars": 0,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            },
+        }
+    if client.progressive_config.enabled:
+        return _progressive_retrieve_context(
+            client,
+            arguments,
+            query=query,
+            project=project,
+            requested_purpose=requested_purpose,
+            purpose=purpose,
+            top_k=top_k,
+            max_chars=max_chars,
+            started=started,
+        )
     planned = _subqueries(query)
     per_query_chars = max(1000, max_chars // len(planned))
     attempted = list(
@@ -728,11 +1252,21 @@ def get_source(client: PortalClient, arguments: dict[str, Any]) -> dict[str, Any
     chunk_id = _string(arguments.get("chunk_id"), "chunk_id", maximum=36)
     UUID(document_id)
     UUID(chunk_id)
+    authorized = any(
+        str((context.get("provenance") or {}).get("document_id") or "") == document_id
+        and str((context.get("provenance") or {}).get("chunk_id") or "") == chunk_id
+        for contexts in client.retrievals.values()
+        for context in contexts
+    )
+    if not authorized:
+        raise ValueError("source IDs are not part of an allowed retrieval in this session")
     for page in range(1, 6):
         document = client.get(
             f"/api/v1/documents/{document_id}",
             params={"chunk_page": page, "chunk_page_size": 200},
         )
+        if not project_is_allowed_record(document):
+            raise ValueError("document is outside the permitted local knowledge scope")
         chunks = document.get("chunks") or []
         selected = next(
             (item for item in chunks if isinstance(item, dict) and item.get("id") == chunk_id),
@@ -788,9 +1322,16 @@ def verify_answer(client: PortalClient, arguments: dict[str, Any]) -> dict[str, 
             if not all(isinstance(citation, str) and citation for citation in citations):
                 raise ValueError("citations must be evidence ID strings")
     client.verification_attempts[retrieval_id] = attempt
-    selected = select_verified_answer(candidates, contexts)
+    selected = select_verified_answer(
+        candidates,
+        contexts,
+        fail_on_conflict=(
+            client.progressive_config.enabled and client.progressive_config.conflict_gate
+        ),
+    )
     valid = not selected["no_answer"]
-    repair_allowed = not valid and attempt == 1
+    conflict_detected = "candidate_conflict" in selected["verification"].get("failures", [])
+    repair_allowed = not valid and attempt == 1 and not conflict_detected
     return {
         "retrieval_id": retrieval_id,
         "attempt": attempt,

@@ -314,3 +314,97 @@ def test_claim_verifier_rejects_reported_navigation_as_grounding() -> None:
 
     assert verification["valid"] is False
     assert verification["failures"] == ["citation_not_grounding_evidence:0"]
+
+
+def test_claim_verifier_rejects_unsupported_exact_identifier() -> None:
+    evidence_id = str(uuid4())
+    contexts = [
+        {
+            "content": "The worker calls LeaseGuard.verify in src/lease.py.",
+            "evidence_level": "verified",
+            "provenance": {"evidence_id": evidence_id},
+        }
+    ]
+    candidate = {
+        "text": "The worker calls LeaseGuard.commit in src/lease.py.",
+        "claims": [
+            {
+                "text": "The worker calls LeaseGuard.commit in src/lease.py.",
+                "citations": [evidence_id],
+            }
+        ],
+    }
+
+    verification = verify_answer_candidate(candidate, contexts)
+
+    assert verification["valid"] is False
+    assert verification["failures"] == ["claim_identifier_unsupported:0"]
+
+
+def test_answer_verifier_rejects_exact_identifier_missing_from_claims() -> None:
+    evidence_id = str(uuid4())
+    contexts = [
+        {
+            "content": "Call the verified guard LeaseGuard.verify before dispatch.",
+            "evidence_level": "verified",
+            "provenance": {"evidence_id": evidence_id},
+        }
+    ]
+    candidate = {
+        "text": "Call the verified guard LeaseGuard.verify before dispatch.",
+        "claims": [
+            {
+                "text": "Call the verified guard before dispatch.",
+                "citations": [evidence_id],
+            }
+        ],
+    }
+
+    verification = verify_answer_candidate(candidate, contexts)
+
+    assert verification["valid"] is False
+    assert "answer_identifier_unclaimed" in verification["failures"]
+
+
+def test_multiple_valid_conflicting_exact_answers_fail_closed() -> None:
+    first_id = str(uuid4())
+    second_id = str(uuid4())
+    contexts = [
+        {
+            "content": "The current retry policy sets RETRY_LIMIT to 7.",
+            "evidence_level": "verified",
+            "provenance": {"evidence_id": first_id},
+        },
+        {
+            "content": "The current retry policy sets RETRY_LIMIT to 9.",
+            "evidence_level": "verified",
+            "provenance": {"evidence_id": second_id},
+        },
+    ]
+    candidates = [
+        {
+            "text": "The current retry policy sets RETRY_LIMIT to 7.",
+            "claims": [
+                {
+                    "text": "The current retry policy sets RETRY_LIMIT to 7.",
+                    "citations": [first_id],
+                }
+            ],
+        },
+        {
+            "text": "The current retry policy sets RETRY_LIMIT to 9.",
+            "claims": [
+                {
+                    "text": "The current retry policy sets RETRY_LIMIT to 9.",
+                    "citations": [second_id],
+                }
+            ],
+        },
+    ]
+
+    selected = select_verified_answer(candidates, contexts, fail_on_conflict=True)
+
+    assert selected["no_answer"] is True
+    assert selected["answer"] is None
+    assert "candidate_conflict" in selected["verification"]["failures"]
+    assert len(selected["verification"]["conflicts"]) == 1

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     repository_graph_max_candidates: int = Field(default=40, ge=5, le=200)
     repository_graph_context_budget_tokens: int = Field(default=4_096, ge=256, le=32_768)
     repository_graph_model_context_tokens: int = Field(default=32_768, ge=2_048, le=262_144)
+    mcp_progressive_enabled: bool = False
+    mcp_agent_evidence_api_enabled: bool = False
+    mcp_source_first_enabled: bool = False
+    mcp_compact_evidence_cards_enabled: bool = False
+    mcp_session_dedup_enabled: bool = False
+    mcp_low_confidence_navigation_enabled: bool = False
+    mcp_query_focused_compression_enabled: bool = False
+    mcp_mmr_enabled: bool = False
+    mcp_conflict_gate_enabled: bool = False
+    mcp_mmr_lambda: float = Field(default=0.72, ge=0.5, le=1)
+    mcp_evidence_token_budget: int = Field(default=1_200, ge=256, le=8_000)
+    mcp_early_stop_score: float = Field(default=0.72, ge=0, le=1)
     generation_provider: str = "disabled"
     generation_base_url: str = "http://127.0.0.1:11434"
     generation_model: str = ""
@@ -199,6 +211,33 @@ class Settings(BaseSettings):
         if normalized not in {"0", "0s", "30s", "1m", "2m"}:
             raise ValueError("embedding keep-alive must be zero or at most 2m")
         return normalized
+
+    @field_validator("repository_graph_shadow_enabled")
+    @classmethod
+    def repository_graph_must_remain_disabled(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("repository graph retrieval is policy-disabled")
+        return False
+
+    @model_validator(mode="after")
+    def progressive_mcp_requires_machine_api(self):
+        if self.mcp_progressive_enabled and not self.mcp_agent_evidence_api_enabled:
+            raise ValueError(
+                "progressive MCP requires the compact agent evidence API to be enabled"
+            )
+        advanced_flags = (
+            self.mcp_query_focused_compression_enabled,
+            self.mcp_mmr_enabled,
+            self.mcp_conflict_gate_enabled,
+        )
+        if any(advanced_flags) and not self.mcp_progressive_enabled:
+            raise ValueError("advanced MCP quality flags require progressive MCP")
+        if (
+            self.mcp_query_focused_compression_enabled
+            and not self.mcp_compact_evidence_cards_enabled
+        ):
+            raise ValueError("query-focused compression requires compact evidence cards")
+        return self
 
     @field_validator("ollama_base_url", "generation_base_url")
     @classmethod
