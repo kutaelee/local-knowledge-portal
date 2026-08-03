@@ -10,6 +10,7 @@ from typing import Any
 from lkp.agent_evidence import (
     estimate_tokens,
     evidence_identity,
+    evidence_state_identity,
     evidence_text,
     exact_anchors,
 )
@@ -94,7 +95,8 @@ def token_aware_select(
         identity = evidence_identity(item)
         if not identity or not content:
             continue
-        if identity in seen:
+        state_identity = evidence_state_identity(item)
+        if state_identity in seen:
             duplicates += 1
             continue
         content_terms = terms(" ".join([str(item.get("title") or ""), content]))
@@ -121,7 +123,7 @@ def token_aware_select(
         candidates.append(
             {
                 "item": item,
-                "identity": identity,
+                "identity": state_identity,
                 "cost": cost,
                 "terms": content_terms,
                 "quality": quality,

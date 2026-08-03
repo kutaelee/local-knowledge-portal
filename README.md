@@ -177,6 +177,14 @@ misses and prior failure/decision evidence may help. Hybrid high-confidence resu
 most five contexts and 6,000 characters. Keyword-fallback or other low-confidence results return
 only short navigation hints and remain `no_answer=true`; they are never claim evidence.
 
+The opt-in progressive path separates agent transcript from verified retrieval state. A stable
+`session_id` retains only hashed evidence fingerprints; it never stores private model reasoning.
+Repeated current evidence can return a compact delta card, but a project, revision, source-hash,
+or evidence-body change invalidates reuse and forces the new evidence through the normal gates.
+The response metrics expose retained-state hits and estimated evidence-token savings. This path
+remains disabled until complete paired exact-usage evaluation passes the documented acceptance
+gates.
+
 Local-model conversations use a different intake path from Codex. A client that has completed an
 Ollama turn calls `POST /api/v1/local-llm/hooks/chat`, or invokes
 `scripts/capture-local-llm-chat.ps1`. The API only redacts and atomically writes the bounded

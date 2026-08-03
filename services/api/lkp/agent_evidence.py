@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from typing import Any
@@ -40,6 +42,43 @@ def evidence_identity(item: dict[str, Any]) -> str:
         or evidence_text(item)
         or ""
     )
+
+
+def evidence_state_identity(item: dict[str, Any]) -> str:
+    """Return a revision-aware fingerprint for session-level evidence reuse.
+
+    Citation IDs intentionally remain stable and human-auditable. Session state
+    has a different requirement: a changed project, revision, source hash, or
+    evidence body must never be suppressed as if it had already been returned.
+    The fingerprint stores no evidence text and no model reasoning.
+    """
+
+    provenance = item.get("provenance") or item.get("source") or {}
+    body_hash = hashlib.sha256(evidence_text(item).encode("utf-8")).hexdigest()
+    state = {
+        "project": str(
+            item.get("project")
+            or provenance.get("project")
+            or provenance.get("project_key")
+            or ""
+        ),
+        "evidence_id": evidence_identity(item),
+        "revision": str(
+            provenance.get("document_version_id")
+            or provenance.get("snapshot_id")
+            or provenance.get("revision")
+            or ""
+        ),
+        "source_hash": str(
+            provenance.get("content_hash")
+            or provenance.get("snapshot_source_hash")
+            or provenance.get("source_hash")
+            or ""
+        ),
+        "body_hash": body_hash,
+    }
+    rendered = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "evidence-state:" + hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
 def exact_anchors(value: str) -> set[str]:

@@ -15,7 +15,7 @@ import httpx
 from lkp.agent_evidence import (
     compact_evidence_card,
     estimate_tokens,
-    evidence_identity,
+    evidence_state_identity,
     evidence_text,
     exact_anchors,
 )
@@ -878,7 +878,11 @@ def _progressive_retrieve_context(
                 preserve_exact_anchors=config.mmr_enabled,
             )
             if seen:
-                reusable = [item for item in raw_contexts if evidence_identity(item) in seen]
+                reusable = [
+                    item
+                    for item in raw_contexts
+                    if evidence_state_identity(item) in seen
+                ]
                 if reusable:
                     reused, reused_metrics = token_aware_select(
                         reusable,
@@ -931,15 +935,17 @@ def _progressive_retrieve_context(
             break
 
     if config.session_dedup and session_id:
-        seen.update(evidence_identity(item) for item in selected)
+        seen.update(evidence_state_identity(item) for item in selected)
     bounded_full, context_chars = _bounded_contexts(
         selected,
         top_k=top_k,
         max_chars=max_chars,
     )
     returned_contexts = []
+    retained_state_hits = 0
+    retained_state_token_savings = 0
     for item in bounded_full:
-        if evidence_identity(item) in seen_before:
+        if evidence_state_identity(item) in seen_before:
             card = compact_evidence_card(
                 item,
                 query=query,
@@ -954,6 +960,11 @@ def _progressive_retrieve_context(
                 "reason": "evidence_body_already_returned_in_this_session",
             }
             returned_contexts.append(card)
+            retained_state_hits += 1
+            retained_state_token_savings += max(
+                0,
+                estimate_tokens(evidence_text(item)) - int(card["estimated_tokens"]),
+            )
         elif config.compact_cards:
             returned_contexts.append(
                 compact_evidence_card(
@@ -1009,6 +1020,8 @@ def _progressive_retrieve_context(
             "context_tokens": sum(
                 int(item.get("estimated_tokens") or 0) for item in returned_contexts
             ),
+            "retained_state_hits": retained_state_hits,
+            "estimated_retained_state_tokens_saved": retained_state_token_savings,
             "full_context_chars": context_chars,
             "navigation_count": len(navigation),
             "navigation_chars": sum(len(item["snippet"]) for item in navigation),

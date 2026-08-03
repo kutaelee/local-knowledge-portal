@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from lkp.agent_evidence import compact_evidence_card
+from lkp.agent_evidence import compact_evidence_card, evidence_state_identity
 from lkp.security_boundary import is_prohibited_project
 from lkp_indexer.agent_eval_telemetry import (
     ExactUsageRecord,
@@ -29,7 +29,7 @@ from lkp_indexer.agent_eval_telemetry import (
 )
 from lkp_indexer.mcp_progressive import estimate_tokens, token_aware_select
 
-HARNESS_VERSION = "agent-task-ab-v2-exact-usage"
+HARNESS_VERSION = "agent-task-ab-v3-retained-state"
 VARIANTS = ("source-only", "current-conditional-mcp", "improved-progressive-mcp")
 HISTORICAL_TYPES = {
     "prior_decision",
@@ -60,6 +60,8 @@ class TaskResult:
     utilized_evidence: int
     retrieval_regret: bool
     security_blocked: bool
+    retained_state_hits: int
+    estimated_retained_state_tokens_saved: int
 
 
 def _expanded_content(item: dict[str, Any]) -> str:
@@ -131,6 +133,7 @@ def _run_task(
     retrieval_was_needed = not source_support and task["task_type"] in HISTORICAL_TYPES
     evidence_tokens = source_tokens
     reused_ids: set[str] = set()
+    retained_state_token_savings = 0
 
     if not security_blocked and source_support is None and variant != "source-only":
         should_retrieve = task["task_type"] in HISTORICAL_TYPES
@@ -171,9 +174,14 @@ def _run_task(
                 returned.extend(selected if candidates else [])
                 for item in selected if candidates else []:
                     evidence_id = str(item["id"])
-                    if evidence_id in seen:
+                    state_identity = evidence_state_identity(item)
+                    if state_identity in seen:
                         reused_ids.add(evidence_id)
                         evidence_tokens += 12
+                        retained_state_token_savings += max(
+                            0,
+                            estimate_tokens(_expanded_content(item)) - 12,
+                        )
                     else:
                         card = compact_evidence_card(
                             item,
@@ -184,7 +192,7 @@ def _run_task(
                         evidence_tokens += estimate_tokens(
                             card["discriminating_evidence"]
                         )
-                        seen.add(evidence_id)
+                        seen.add(state_identity)
 
     support = source_support or next(
         (item for item in returned if _supports(item, expected_claim)),
@@ -265,6 +273,8 @@ def _run_task(
         utilized_evidence=len(utilized_ids.intersection(returned_ids)),
         retrieval_regret=regret,
         security_blocked=security_blocked,
+        retained_state_hits=len(reused_ids),
+        estimated_retained_state_tokens_saved=retained_state_token_savings,
     )
 
 
@@ -312,6 +322,10 @@ def _summarize(results: list[TaskResult]) -> dict[str, Any]:
         "context_utilization": _rate(utilized, returned),
         "retrieval_regret_rate": _rate(
             sum(item.retrieval_regret for item in results), len(results)
+        ),
+        "retained_state_hits": sum(item.retained_state_hits for item in results),
+        "estimated_retained_state_tokens_saved": sum(
+            item.estimated_retained_state_tokens_saved for item in results
         ),
         "citation_validity": _rate(
             sum(item.citation_valid is True for item in citations), len(citations)
