@@ -36,6 +36,7 @@ from .mcp_progressive import (
     retrieval_is_authorized,
     token_aware_select,
 )
+from .mcp_telemetry import ContentFreeMcpTelemetry
 
 SERVER_NAME = "local-knowledge"
 SERVER_VERSION = "0.2.0"
@@ -249,6 +250,7 @@ class PortalClient:
         transport: httpx.BaseTransport | None = None,
         progressive_config: ProgressiveRetrievalConfig | None = None,
     ) -> None:
+        settings = get_settings()
         self.client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=httpx.Timeout(10.0),
@@ -259,9 +261,13 @@ class PortalClient:
         self.retrievals: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
         self.verification_attempts: dict[str, int] = {}
         self.progressive_config = progressive_config or ProgressiveRetrievalConfig.from_settings(
-            get_settings()
+            settings
         )
         self.session_evidence: dict[str, set[str]] = {}
+        self.telemetry = ContentFreeMcpTelemetry.from_settings(
+            settings,
+            self.progressive_config,
+        )
 
     def get(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self.client.get(path, params=params)
@@ -1357,17 +1363,24 @@ def verify_answer(client: PortalClient, arguments: dict[str, Any]) -> dict[str, 
 
 
 def call_tool(client: PortalClient, name: object, arguments: object) -> dict[str, Any]:
+    tool_name = name if isinstance(name, str) else "unknown"
     if not isinstance(arguments, dict):
+        client.telemetry.record(tool_name, {}, error_type="invalid_arguments")
         return _tool_result({"error": "arguments must be an object"}, is_error=True)
     try:
         if name == "retrieve_context":
-            return _tool_result(retrieve_context(client, arguments))
-        if name == "verify_answer":
-            return _tool_result(verify_answer(client, arguments))
-        if name == "get_source":
-            return _tool_result(get_source(client, arguments))
-        return _tool_result({"error": f"unknown tool: {name}"}, is_error=True)
+            payload = retrieve_context(client, arguments)
+        elif name == "verify_answer":
+            payload = verify_answer(client, arguments)
+        elif name == "get_source":
+            payload = get_source(client, arguments)
+        else:
+            client.telemetry.record(tool_name, {}, error_type="unknown_tool")
+            return _tool_result({"error": f"unknown tool: {name}"}, is_error=True)
+        client.telemetry.record(tool_name, payload)
+        return _tool_result(payload)
     except (ValueError, httpx.HTTPError) as exc:
+        client.telemetry.record(tool_name, {}, error_type=type(exc).__name__)
         return _tool_result(
             {"error": type(exc).__name__, "message": str(exc)[:500]},
             is_error=True,

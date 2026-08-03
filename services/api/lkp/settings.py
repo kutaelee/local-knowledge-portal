@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     mcp_mmr_lambda: float = Field(default=0.72, ge=0.5, le=1)
     mcp_evidence_token_budget: int = Field(default=1_200, ge=256, le=8_000)
     mcp_early_stop_score: float = Field(default=0.72, ge=0, le=1)
+    mcp_telemetry_enabled: bool = False
+    mcp_telemetry_dir: str = ""
     generation_provider: str = "disabled"
     generation_base_url: str = "http://127.0.0.1:11434"
     generation_model: str = ""
@@ -237,6 +239,11 @@ class Settings(BaseSettings):
             and not self.mcp_compact_evidence_cards_enabled
         ):
             raise ValueError("query-focused compression requires compact evidence cards")
+        if self.mcp_telemetry_enabled:
+            if not self.mcp_telemetry_dir:
+                raise ValueError("MCP telemetry requires an output directory")
+            if not Path(self.mcp_telemetry_dir).is_absolute():
+                raise ValueError("MCP telemetry directory must be absolute")
         return self
 
     @field_validator("ollama_base_url", "generation_base_url")

@@ -185,6 +185,17 @@ The response metrics expose retained-state hits and estimated evidence-token sav
 remains disabled until complete paired exact-usage evaluation passes the documented acceptance
 gates.
 
+When a local canary is explicitly enabled, `LKP_MCP_TELEMETRY_ENABLED=true` writes daily
+append-only, content-free JSONL under `LKP_MCP_TELEMETRY_DIR`. Records contain only feature flags,
+retrieval counters, timing, compact-state savings, and verifier outcomes; prompts, project keys,
+answers, citations, and evidence are excluded. Summarize the accumulated data without opening
+source content:
+
+```bash
+uv run python scripts/summarize_mcp_telemetry.py \
+  --directory /mnt/e/Data/LocalKnowledgePortal/metrics/mcp
+```
+
 Local-model conversations use a different intake path from Codex. A client that has completed an
 Ollama turn calls `POST /api/v1/local-llm/hooks/chat`, or invokes
 `scripts/capture-local-llm-chat.ps1`. The API only redacts and atomically writes the bounded
