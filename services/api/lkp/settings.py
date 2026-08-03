@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     query_embedding_prewarm: bool = False
     search_statement_timeout_ms: int = Field(default=5_000, ge=100, le=120_000)
     repository_embedding_mode: Literal["docs_only", "code_and_docs", "lexical_only"] = "docs_only"
+    # Graph candidates are audit-only until the held-out promotion gates pass.
+    # The external API response and current lexical/vector ranking stay unchanged.
+    repository_graph_shadow_enabled: bool = False
+    repository_graph_max_fanout: int = Field(default=8, ge=1, le=32)
+    repository_graph_max_candidates: int = Field(default=40, ge=5, le=200)
+    repository_graph_context_budget_tokens: int = Field(default=4_096, ge=256, le=32_768)
+    repository_graph_model_context_tokens: int = Field(default=32_768, ge=2_048, le=262_144)
     generation_provider: str = "disabled"
     generation_base_url: str = "http://127.0.0.1:11434"
     generation_model: str = ""

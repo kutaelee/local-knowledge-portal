@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .domain import AnalysisManifest
+from .graph_store import RepositoryGraphStore
 
 
 def _json(value: Any) -> str:
@@ -271,6 +272,8 @@ class RepositoryAnalysisStore:
         """Atomically refresh rebuildable analysis rows for an unchanged source."""
 
         for table in (
+            "repository_graph_edge",
+            "repository_graph_node",
             "repository_knowledge_item",
             "repository_dependency_usage",
             "repository_lifecycle_edge",
@@ -357,6 +360,13 @@ class RepositoryAnalysisStore:
                 ),
                 {"id": uuid.uuid4(), "snapshot_id": manifest.snapshot_id, **asdict(item)},
             )
+        graph = RepositoryGraphStore(self.session).replace(
+            manifest.snapshot_id,
+            files=manifest.files,
+            symbols=manifest.symbols,
+            relations=manifest.relations,
+        )
+        manifest.metrics["repository_graph_shadow"] = graph.metrics
         for item in manifest.configurations:
             values = asdict(item)
             values["referenced_by"] = list(item.referenced_by)

@@ -6,6 +6,7 @@ import uuid
 from functools import lru_cache
 from typing import Literal
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from lkp_indexer.embedding import CachedEmbedder, OllamaEmbedder
 from lkp_indexer.embedding_runtime import timeout_circuit_state
@@ -19,11 +20,13 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .db import get_db
+from .repository_graph_retrieval import run_graph_shadow
 from .repository_rag_quality import infer_repository_types, repository_reward_rerank
 from .settings import get_settings
 
 router = APIRouter(prefix="/api/v1/repository-analysis", tags=["repository-analysis"])
 settings = get_settings()
+logger = structlog.get_logger(__name__)
 _CURRENT_REPOSITORY_REFERENCES = current_references_sql("k")
 _LATEST_REPOSITORY_SNAPSHOT = latest_snapshot_sql("s")
 
@@ -1065,6 +1068,34 @@ def search_repository_knowledge(
     known_ids = {str(row["id"]) for row in rows}
     rows.extend(row for row in symbol_rows if str(row["id"]) not in known_ids)
     rows = repository_reward_rerank(rows, q, limit=limit)
+    if settings.repository_graph_shadow_enabled:
+        try:
+            shadow = run_graph_shadow(
+                db,
+                snapshot_id=snapshot_id,
+                query=q,
+                baseline_rows=rows,
+                max_fanout=settings.repository_graph_max_fanout,
+                max_candidates=settings.repository_graph_max_candidates,
+                token_budget=min(
+                    settings.repository_graph_context_budget_tokens,
+                    settings.repository_graph_model_context_tokens,
+                ),
+            )
+            logger.info(
+                "repository_graph_shadow",
+                query_hash=hashlib.sha256(q.encode("utf-8")).hexdigest(),
+                snapshot_id=str(snapshot_id),
+                **shadow,
+            )
+        except Exception as exc:
+            # A shadow failure must never change the established API contract.
+            logger.warning(
+                "repository_graph_shadow_failed",
+                query_hash=hashlib.sha256(q.encode("utf-8")).hexdigest(),
+                snapshot_id=str(snapshot_id),
+                error_type=type(exc).__name__,
+            )
     for row in rows:
         row.pop("_embedding_id", None)
         row.pop("_source_references_current", None)

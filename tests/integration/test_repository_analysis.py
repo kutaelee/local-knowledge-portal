@@ -128,6 +128,35 @@ class SupportService:
         }
         assert "content" not in source_columns
         assert "source_text" not in source_columns
+        graph_counts = (
+            session.execute(
+                text(
+                    """
+                SELECT
+                  (SELECT count(*) FROM repository_graph_node
+                   WHERE snapshot_id = :snapshot_id) AS nodes,
+                  (SELECT count(*) FROM repository_graph_edge
+                   WHERE snapshot_id = :snapshot_id) AS edges,
+                  (SELECT count(DISTINCT edge_fingerprint)
+                   FROM repository_graph_edge
+                   WHERE snapshot_id = :snapshot_id) AS fingerprints,
+                  (SELECT array_agg(DISTINCT verification_status)
+                   FROM repository_graph_edge
+                   WHERE snapshot_id = :snapshot_id) AS verification
+                """
+                ),
+                {"snapshot_id": manifest.snapshot_id},
+            )
+            .mappings()
+            .one()
+        )
+        assert graph_counts["nodes"] >= len(manifest.files)
+        assert graph_counts["edges"] > 0
+        assert graph_counts["fingerprints"] == graph_counts["edges"]
+        assert graph_counts["verification"] == ["AST_PARSED"]
+        assert manifest.metrics["repository_graph_shadow"]["schema_version"] == (
+            "repository-graph-v1"
+        )
         assert (
             session.execute(
                 text(
