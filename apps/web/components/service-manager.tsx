@@ -6,6 +6,7 @@ import {
   Boxes,
   CircleCheck,
   Database,
+  ExternalLink,
   Power,
   RefreshCcw,
   Server,
@@ -33,6 +34,7 @@ type ManagedService = {
   can_start: boolean;
   can_stop: boolean;
   warning: string | null;
+  web_url: string | null;
   components: ManagedComponent[];
 };
 type ManagerPayload = {
@@ -62,6 +64,7 @@ const copy = {
     controllable: "제어 가능",
     checked: "확인 시각",
     readOnly: "조회 전용",
+    open: "웹 열기",
     start: "기동",
     stop: "안전 중지",
     confirmStart: "서비스를 기동할까요?",
@@ -105,6 +108,7 @@ const copy = {
     controllable: "Controllable",
     checked: "Checked",
     readOnly: "Read only",
+    open: "Open web",
     start: "Start",
     stop: "Safe stop",
     confirmStart: "Start this service?",
@@ -202,6 +206,13 @@ function categoryIcon(category: string) {
   if (category === "infrastructure") return Database;
   if (category === "projects") return Boxes;
   return Server;
+}
+
+function hasReachableWebState(service: ManagedService) {
+  return Boolean(
+    service.web_url &&
+      ["healthy", "running", "degraded", "unmanaged"].includes(service.state)
+  );
 }
 
 export function ServiceManager({
@@ -417,6 +428,16 @@ export function ServiceManager({
                             )}
                           </div>
                           <div className="managed-service-actions">
+                            {hasReachableWebState(service) && (
+                              <a
+                                className="secondary-button service-web-link"
+                                href={service.web_url ?? undefined}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                              >
+                                <ExternalLink size={15} /> {text.open}
+                              </a>
+                            )}
                             {service.can_start && (
                               <button
                                 type="button"

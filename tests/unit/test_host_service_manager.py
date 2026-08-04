@@ -96,6 +96,65 @@ def test_read_only_service_cannot_become_controllable(tmp_path):
         manager.load_config(path)
 
 
+@pytest.mark.parametrize(
+    "web_url",
+    [
+        "https://example.com/",
+        "http://user:secret@127.0.0.1:8080/",
+        "http://127.0.0.1:8080/?token=secret",
+        "javascript:alert(1)",
+    ],
+)
+def test_registry_rejects_non_loopback_or_credentialed_web_urls(tmp_path, web_url):
+    with pytest.raises(manager.ConfigurationError, match="web_url"):
+        manager.load_config(
+            _registry(
+                tmp_path,
+                [
+                    {
+                        "id": "example-ui",
+                        "label": "Example UI",
+                        "kind": "read_only",
+                        "control": False,
+                        "web_url": web_url,
+                        "config": {},
+                    }
+                ],
+            )
+        )
+
+
+def test_service_status_exposes_configured_and_known_loopback_web_urls(tmp_path, monkeypatch):
+    configured, known = manager.load_config(
+        _registry(
+            tmp_path,
+            [
+                {
+                    "id": "example-ui",
+                    "label": "Example UI",
+                    "kind": "read_only",
+                    "control": False,
+                    "health_url": "http://127.0.0.1:8080/health",
+                    "web_url": "http://127.0.0.1:8080/app/",
+                    "config": {},
+                },
+                {
+                    "id": "comfyui",
+                    "label": "ComfyUI",
+                    "kind": "read_only",
+                    "control": False,
+                    "health_url": "http://127.0.0.1:8188/system_stats",
+                    "config": {},
+                },
+            ],
+        )
+    )
+    monkeypatch.setattr(manager, "_http_probe", lambda _url: ("healthy", "HTTP 200"))
+
+    assert manager.service_status(configured)["web_url"] == "http://127.0.0.1:8080/app/"
+    assert manager.service_status(known)["web_url"] == "http://127.0.0.1:8188/"
+
+
 def test_comfyui_stop_guard_rejects_nonempty_queue(tmp_path, monkeypatch):
     service = manager.load_config(
         _registry(

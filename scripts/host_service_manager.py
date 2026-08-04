@@ -13,6 +13,7 @@ import re
 import subprocess
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +32,13 @@ ALLOWED_KINDS = {
 }
 MAX_BODY_BYTES = 1024
 MAX_OUTPUT_CHARS = 4000
+LOOPBACK_WEB_HOSTS = {"127.0.0.1", "localhost", "::1"}
+DEFAULT_WEB_URLS = {
+    "docker:local-knowledge-portal": "http://127.0.0.1:3010/",
+    "comfyui": "http://127.0.0.1:8188/",
+    "ai-toolkit": "http://127.0.0.1:8675/",
+    "gpu-scheduler-host": "http://127.0.0.1:8790/",
+}
 
 
 class ConfigurationError(ValueError):
@@ -51,6 +59,7 @@ class ServiceDefinition:
     control: bool
     warning: str | None
     health_url: str | None
+    web_url: str | None
     config: dict[str, Any]
 
 
@@ -60,6 +69,28 @@ def _utc_now() -> str:
 
 def _bounded(value: object) -> str:
     return str(value or "")[:MAX_OUTPUT_CHARS]
+
+
+def _validated_web_url(value: object, *, service_id: str) -> str | None:
+    if not value:
+        return None
+    raw = str(value)[:500]
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigurationError(f"invalid web_url for {service_id}") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in LOOPBACK_WEB_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise ConfigurationError(f"web_url must be a credential-free loopback URL: {service_id}")
+    return raw
 
 
 def load_config(path: Path) -> list[ServiceDefinition]:
@@ -96,6 +127,7 @@ def load_config(path: Path) -> list[ServiceDefinition]:
                 control=control,
                 warning=str(raw["warning"])[:500] if raw.get("warning") else None,
                 health_url=str(raw["health_url"]) if raw.get("health_url") else None,
+                web_url=_validated_web_url(raw.get("web_url"), service_id=service_id),
                 config=config,
             )
         )
@@ -313,6 +345,7 @@ def service_status(service: ServiceDefinition) -> dict[str, Any]:
         "can_stop": service.control
         and state in {"healthy", "running", "degraded", "pending", "unmanaged"},
         "warning": service.warning,
+        "web_url": service.web_url or DEFAULT_WEB_URLS.get(service.id),
         "components": components,
     }
 
@@ -486,7 +519,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/api/health":
-            self._write(HTTPStatus.OK, {"status": "healthy"})
+            self._write(
+                HTTPStatus.OK,
+                {"status": "healthy", "capabilities": ["loopback_web_url"]},
+            )
             return
         if self.path != "/api/services":
             self._write(HTTPStatus.NOT_FOUND, {"error": "not_found"})

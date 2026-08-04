@@ -782,6 +782,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File "\\wsl.localhost\Ubuntu\home\kutae\src\local-knowledge-portal\scripts\install-service-manager.ps1"
 ```
 
+After changing only the host-manager source, deploy it without rebuilding the
+portal containers or rereading the service registry:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "\\wsl.localhost\Ubuntu\home\kutae\src\local-knowledge-portal\scripts\deploy-host-service-manager.ps1"
+```
+
+The deployer creates a timestamped operational backup, places the maintenance
+marker so the guard does not race the restart, targets only the exact manager
+task, verifies loopback health, and restores the backup automatically on
+failure.
+
 The installer preserves an existing registry unless `-RefreshRegistry` is
 explicitly supplied, backs up the operational `.env` before adding a secret,
 registers `\Codex\Local Knowledge Service Manager` for logon startup, and
@@ -815,6 +828,13 @@ shared data infrastructure. Start and stop always use a server-issued,
 that challenge; it does not send a control request. **취소** has the initial
 keyboard focus and must leave the service state unchanged. A protected service
 shows **조회 전용**.
+
+When a registered repository or tool has a browser UI, add an explicit
+credential-free loopback `web_url` such as `http://127.0.0.1:8080/` to its
+allowlisted registry entry. A healthy service then shows **웹 열기**. Do not
+infer web links from published ports: database and internal API ports must not
+be presented as user interfaces. URLs with external hosts, credentials, query
+strings, or fragments fail closed during registry loading.
 
 ComfyUI's HTTP server is a lightweight `http_process`, not a long-lived GPU
 reservation. Starting the UI must not create a `comfyui-server` GPUQ job.

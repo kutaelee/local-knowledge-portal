@@ -29,6 +29,12 @@ manager with a server-side bearer token and proxies only status, start, and
 stop for an allowlisted ID. It never returns that host token, command
 arguments, or registry paths to the browser.
 
+An allowlisted service may also declare a credential-free loopback `web_url`.
+The manager rejects non-HTTP schemes, non-loopback hosts, credentials, query
+strings, and fragments. The portal shows an **Open web** link only while that
+service is in a reachable state; it never guesses a UI address from a database
+or other published port.
+
 Start and stop use a two-request confirmation challenge. The first request
 issues a random, 90-second, one-time token bound to the exact service ID and
 action. The second request must include that token and `{"confirmed": true}`.

@@ -88,6 +88,14 @@ function Get-ServiceLabel([string]$Project) {
   return $Project
 }
 
+function Get-ServiceWebUrl([string]$Project) {
+  $urls = @{
+    'local-knowledge-portal' = 'http://127.0.0.1:3010/'
+  }
+  if ($urls.ContainsKey($Project)) { return $urls[$Project] }
+  return $null
+}
+
 if ($RefreshRegistry -or -not (Test-Path -LiteralPath $configPath)) {
   $containers = docker ps --format '{{.ID}}'
   if ($LASTEXITCODE -ne 0) { throw 'Docker inventory failed.' }
@@ -109,6 +117,7 @@ if ($RefreshRegistry -or -not (Test-Path -LiteralPath $configPath)) {
         description = 'Registered service group managed by Docker Compose.'
         kind = 'docker_compose'
         control = $project -ne 'local-knowledge-portal'
+        web_url = Get-ServiceWebUrl $project
         warning = if ($project -eq 'local-knowledge-portal') {
           'The portal cannot stop itself from this screen.'
         } else {
@@ -137,6 +146,7 @@ if ($RefreshRegistry -or -not (Test-Path -LiteralPath $configPath)) {
     control = $true
     warning = 'Safe stop is rejected while generation jobs are running or queued.'
     health_url = 'http://127.0.0.1:8188/system_stats'
+    web_url = 'http://127.0.0.1:8188/'
     config = [ordered]@{
       stop_guard = 'comfyui_queue_empty'
       queue_url = 'http://127.0.0.1:8188/queue'
@@ -163,6 +173,7 @@ if ($RefreshRegistry -or -not (Test-Path -LiteralPath $configPath)) {
     control = $true
     warning = 'Check training job state before stopping this interface.'
     health_url = 'http://127.0.0.1:8675'
+    web_url = 'http://127.0.0.1:8675/'
     config = [ordered]@{
       distro = $WslDistribution
       unit = 'ai-toolkit-ui.service'
@@ -189,6 +200,7 @@ if ($RefreshRegistry -or -not (Test-Path -LiteralPath $configPath)) {
     control = $false
     warning = 'The GPU safety boundary is protected from portal stop controls.'
     health_url = 'http://127.0.0.1:8790/api/health'
+    web_url = 'http://127.0.0.1:8790/'
     config = @{}
   })
   $registry = [ordered]@{ schema_version = 1; services = $services }

@@ -8,6 +8,7 @@
       "description": "A pre-approved Docker Compose project.",
       "kind": "docker_compose",
       "control": true,
+      "web_url": "http://127.0.0.1:8080/",
       "warning": "Stopping this group interrupts every listed component.",
       "config": {
         "runner": "windows",

@@ -39,4 +39,21 @@ Describe "Host service manager control-plane guard" {
         Assert-Contains $source "install-service-manager-guard.ps1"
         Assert-Contains $source "guard_task = `$guard.guard_task"
     }
+
+    It "deploys the host manager with an exact-task maintenance boundary and rollback" {
+        $source = Get-Content (
+            Join-Path $repoRoot "scripts/deploy-host-service-manager.ps1"
+        ) -Raw
+        Assert-Contains $source "maintenance.disabled"
+        Assert-Contains $source "service_manager.`$stamp.py.bak"
+        Assert-Contains $source "Stop-ScheduledTask -TaskPath `$TaskPath -TaskName `$TaskName"
+        Assert-Contains $source "Disable-ScheduledTask -TaskPath `$TaskPath -TaskName `$TaskName"
+        Assert-Contains $source "Enable-ScheduledTask -TaskPath `$TaskPath -TaskName `$TaskName"
+        Assert-Contains $source "Expected exactly one host service manager listener."
+        Assert-Contains $source "Refusing to stop an unowned or unexpected process on port 8791."
+        Assert-Contains $source "Stop-Process -Id `$process.ProcessId -Force"
+        Assert-Contains $source "Copy-Item -LiteralPath `$backup -Destination `$installed -Force"
+        Assert-Contains $source "http://127.0.0.1:8791/api/health"
+        Assert-Contains $source "`$health.capabilities -contains 'loopback_web_url'"
+    }
 }
