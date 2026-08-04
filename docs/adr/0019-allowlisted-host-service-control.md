@@ -49,7 +49,13 @@ stopping that one process. It never kills by process name. No endpoint accepts
 arbitrary commands, paths, URLs, service names, or compose files.
 
 The manager is installed as the per-user scheduled task
-`\Codex\Local Knowledge Service Manager` and restarts after failure. Registry
+`\Codex\Local Knowledge Service Manager` and restarts after failure. A separate
+CPU-only `\Codex\Local Knowledge Service Manager Guard` task checks the exact
+manager task and loopback health endpoint every five minutes. It re-enables a
+manager task that was accidentally disabled, but never enumerates or changes
+GPU, embedding, generation, or nightly-maintenance tasks. An explicit
+`C:\Docker\local-knowledge-portal\host-manager\maintenance.disabled` marker
+suppresses repair for a deliberate manager maintenance window. Registry
 generation occurs only on first install or an explicit `-RefreshRegistry`;
 routine discovery cannot grant control to a newly found service.
 
@@ -71,3 +77,6 @@ misreported as a portal timeout.
   operator.
 - The manager is a separate localhost dependency; read-only portal health can
   still show its failure when control is unavailable.
+- Pausing GPU or LLM work cannot intentionally disable the service-management
+  control plane, and an isolated accidental disable self-recovers within five
+  minutes unless an operator maintenance marker is present.

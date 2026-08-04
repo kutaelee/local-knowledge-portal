@@ -784,7 +784,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 The installer preserves an existing registry unless `-RefreshRegistry` is
 explicitly supplied, backs up the operational `.env` before adding a secret,
-and registers `\Codex\Local Knowledge Service Manager` for logon startup. The
+registers `\Codex\Local Knowledge Service Manager` for logon startup, and
+registers the CPU-only `\Codex\Local Knowledge Service Manager Guard` for
+logon plus a five-minute exact-task health check. The guard is independent of
+GPU, embedding, generation, and nightly LLM schedules. Never disable either
+control-plane task when pausing those workloads. The
 registry is
 `C:\Docker\local-knowledge-portal\config\managed-services.json`; runtime logs
 are under `E:\Data\LocalKnowledgePortal\runtime\logs`. Never put the bearer
@@ -796,7 +800,14 @@ Verify the manager and portal proxy without displaying the secret:
 Invoke-RestMethod http://127.0.0.1:8791/api/health
 Invoke-RestMethod http://127.0.0.1:8010/api/v1/service-manager
 Get-ScheduledTask -TaskPath '\Codex\' -TaskName 'Local Knowledge Service Manager'
+Get-ScheduledTask -TaskPath '\Codex\' -TaskName 'Local Knowledge Service Manager Guard'
 ```
+
+For a deliberate host-manager maintenance window only, create
+`C:\Docker\local-knowledge-portal\host-manager\maintenance.disabled` before
+stopping or disabling the manager task. Remove that exact marker and run
+`scripts\ensure-service-manager.ps1` to resume. Without the marker, the guard
+repairs an accidental disable and restores loopback health within five minutes.
 
 The portal's **레포·서비스 관리** page groups registered projects, AI tools, and
 shared data infrastructure. Start and stop always use a server-issued,

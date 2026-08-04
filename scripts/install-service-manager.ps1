@@ -21,6 +21,7 @@ $installedStopScript = Join-Path $managerRoot 'stop-comfyui.ps1'
 $launcherPath = Join-Path $managerRoot 'start-service-manager.ps1'
 $logRoot = Join-Path $RuntimeRoot 'runtime\logs'
 $logPath = Join-Path $logRoot 'host-service-manager.log'
+$guardInstaller = Join-Path $PSScriptRoot 'install-service-manager-guard.ps1'
 
 if (-not (Test-Path -LiteralPath $sourceScript)) {
   throw "Missing host service manager source: $sourceScript"
@@ -33,6 +34,9 @@ if (-not (Test-Path -LiteralPath $sourceStartScript)) {
 }
 if (-not (Test-Path -LiteralPath $envPath)) {
   throw "Missing operational environment file: $envPath"
+}
+if (-not (Test-Path -LiteralPath $guardInstaller)) {
+  throw "Missing service manager guard installer: $guardInstaller"
 }
 
 New-Item -ItemType Directory -Force -Path $managerRoot, $configRoot, $logRoot | Out-Null
@@ -313,10 +317,15 @@ if ($health.status -ne 'healthy') {
   throw "Host service manager did not become healthy. Check $logPath"
 }
 
+$guard = & $guardInstaller `
+  -OperationalRoot $OperationalRoot `
+  -ManagerTaskName $TaskName
+
 [pscustomobject]@{
   status = 'healthy'
   endpoint = 'http://127.0.0.1:8791'
   registry = $configPath
   task = $TaskName
+  guard_task = $guard.guard_task
   token = 'configured-and-not-displayed'
 }
