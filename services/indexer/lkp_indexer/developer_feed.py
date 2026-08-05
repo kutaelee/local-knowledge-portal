@@ -156,7 +156,8 @@ def _eligible_batch(
 ) -> FeedBatch | None:
     last_embedding = session.scalar(
         select(func.max(DeveloperFeedPost.source_embedding_to)).where(
-            DeveloperFeedPost.post_type == "activity"
+            DeveloperFeedPost.post_type == "activity",
+            allowed_project_expression(DeveloperFeedPost.project_key),
         )
     )
     cursor = last_embedding or (
@@ -548,6 +549,7 @@ def publish_once(
             session.scalars(
                 select(DeveloperFeedPost).where(
                     DeveloperFeedPost.post_type == "activity",
+                    allowed_project_expression(DeveloperFeedPost.project_key),
                     DeveloperFeedPost.sequence == 0,
                     DeveloperFeedPost.created_at >= day_start,
                     DeveloperFeedPost.created_at < day_end,
