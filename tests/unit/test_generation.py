@@ -234,6 +234,8 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         assert "troubleshooting" in payload["messages"][0]["content"]
         assert "Draft Korean first" in payload["messages"][0]["content"]
         assert "해요/했어요/됐네요" in payload["messages"][0]["content"]
+        assert "between 4 and 16 replies" in payload["messages"][0]["content"]
+        assert "not to the whole technical article" in payload["messages"][0]["content"]
         if attempts == 1:
             posts = _valid_feed_posts()
             posts[0]["source_ids"] = ["INVENTED"]
@@ -270,6 +272,83 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         "afterthought",
     ]
     assert digest == "sha256:gemma4"
+
+
+def test_developer_feed_allows_a_long_article_split_into_per_reply_limits():
+    posts = _valid_feed_posts()
+    posts.insert(
+        2,
+        {
+            "role": "meaning",
+            "sentences_ko": [
+                "이 순서를 API 입구에서 적용하면 잘못된 후보는 답변 문맥에 들어오기 전에 빠져요."
+            ],
+            "sentences_en": [
+                "Apply this order at the API boundary so invalid candidates leave before "
+                "they enter answer context."
+            ],
+            "source_ids": ["D1"],
+        },
+    )
+    posts.insert(
+        4,
+        {
+            "role": "possibility",
+            "sentences_ko": [
+                "응답 품질은 아직 측정하지 않았고, 다음 평가는 같은 질문의 전후 결과를 "
+                "비교해야 해요."
+            ],
+            "sentences_en": [
+                "Response quality has not been measured; the next evaluation must compare "
+                "paired answers to the same questions."
+            ],
+            "source_ids": ["D1"],
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "content": json.dumps(
+                        _valid_feed_response(posts),
+                        ensure_ascii=False,
+                    )
+                }
+            },
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    draft, _ = provider.write_developer_feed(
+        {"post_type": "information_update", "sources": [_valid_feed_source()]},
+        prompt_version="feed-test-v1",
+    )
+
+    assert len(draft.posts) == 6
+    assert [post.role for post in draft.posts] == [
+        "observation",
+        "meaning",
+        "meaning",
+        "possibility",
+        "possibility",
+        "afterthought",
+    ]
+    assert sum(len(post.content_en) for post in draft.posts) > 280
+    assert all(len(post.content_ko) <= 140 for post in draft.posts)
+    assert all(len(post.content_en) <= 280 for post in draft.posts)
 
 
 def test_developer_feed_repairs_embedding_work_log_copy():

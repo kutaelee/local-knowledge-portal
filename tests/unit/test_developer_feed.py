@@ -68,8 +68,8 @@ def test_feed_contract_enforces_x_limits_and_reply_thread():
         ]
     )
     assert len(draft.posts) == 4
-    assert all(2 <= len(post.sentences_ko) <= 3 for post in draft.posts)
-    assert all(2 <= len(post.sentences_en) <= 3 for post in draft.posts)
+    assert all(1 <= len(post.sentences_ko) <= 3 for post in draft.posts)
+    assert all(1 <= len(post.sentences_en) <= 3 for post in draft.posts)
     assert all(len(post.content_ko) <= 140 for post in draft.posts)
     assert all(len(post.content_en) <= 280 for post in draft.posts)
 
@@ -120,8 +120,8 @@ def test_feed_defaults_to_three_hour_gemma_batch():
     assert settings.developer_feed_daily_hour == 18
     assert settings.developer_feed_max_batches_per_run == 8
     assert settings.developer_feed_model == "gemma4:12b"
-    assert settings.developer_feed_persona_version == "peer-developer-v9-reproducible-sharing"
-    assert settings.developer_feed_prompt_version == "developer-feed-v9-method-outcome"
+    assert settings.developer_feed_persona_version == "peer-developer-v10-threaded-sharing"
+    assert settings.developer_feed_prompt_version == "developer-feed-v10-variable-thread"
     assert settings.developer_feed_temperature == 0.65
 
 

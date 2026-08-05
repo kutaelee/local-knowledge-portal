@@ -48,7 +48,7 @@ const textByLocale = {
       eyebrow: "프로젝트 지식", title: "프로젝트 지식",
       subtitle: "개발 일지와 재사용 가능한 검증 사례를 원본 파일과 분리해 관리합니다.",
       cases: "검증 지식 사례", candidates: "승격 보류·근거 보완", occurrences: "회 발생",
-      feed: "개발자 피드", feedSubtitle: "문제·기술·작업 방법·검증 효과를 재현 가능한 기술 글로 공유합니다.",
+      feed: "개발자 피드", feedSubtitle: "문제·기술·작업 방법·검증 효과를 필요한 만큼 답글로 이어서 공유합니다.",
       feedEmpty: "공유할 수 있는 검증된 기술 정보가 아직 없습니다.",
       dailySummary: "오늘의 기술 메모", embeddedEvidence: "임베딩 근거",
       hierarchy: "프로젝트 · 작업 특성", allProjects: "전체 프로젝트",

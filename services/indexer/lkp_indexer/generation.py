@@ -138,8 +138,8 @@ class ProjectArticleFlatDraft(BaseModel):
 
 class DeveloperFeedMessage(BaseModel):
     role: Literal["observation", "meaning", "possibility", "afterthought"]
-    sentences_ko: list[str] = Field(min_length=2, max_length=3)
-    sentences_en: list[str] = Field(min_length=2, max_length=3)
+    sentences_ko: list[str] = Field(min_length=1, max_length=3)
+    sentences_en: list[str] = Field(min_length=1, max_length=3)
     source_ids: list[str] = Field(min_length=1, max_length=20)
 
     @property
@@ -179,7 +179,7 @@ class DeveloperFeedDraft(BaseModel):
         "not_measured",
     ]
     outcome_source_ids: list[str] = Field(min_length=1, max_length=20)
-    posts: list[DeveloperFeedMessage] = Field(min_length=1, max_length=6)
+    posts: list[DeveloperFeedMessage] = Field(min_length=4, max_length=16)
     screenshot_source_id: str | None = None
     screenshot_reason: str | None = Field(default=None, max_length=280)
 
@@ -711,13 +711,16 @@ class OllamaGenerationProvider:
             "reproduction boundary: version, environment, precondition, failure mode, or what must "
             "be checked before applying it). Afterthought is not a personal diary aside or "
             "resolution. "
-            "Return all four roles exactly once in that order for both information_update and "
-            "daily_summary. Each reply should normally contain two or "
-            "three compact sentences in sentences_ko and sentences_en and should flow from the "
-            "previous reply; do not make every sentence its own post. Code joins each language's "
-            "sentence array into one reply. Use the available space when supported, but never "
-            "pad a post with a generic benefit or transition just to make it longer. A shorter "
-            "specific remark is better than an abstract conclusion. Draft Korean first as "
+            "Use all four roles in that order for both information_update and daily_summary. "
+            "Repeat a role in adjacent replies when the evidence needs more room, but never return "
+            "to an earlier role. Produce between 4 and 16 replies based on content, not a fixed "
+            "thread length. Each reply may contain one to three compact sentences in sentences_ko "
+            "and sentences_en and must flow from the previous reply. Code joins each language's "
+            "sentence array into one X reply. The 140/280 character ceilings apply to each reply, "
+            "not to the whole technical article; continue the thread instead of dropping a useful "
+            "step, result, metric, or caveat. Never pad a reply or create a new reply only for a "
+            "generic transition. A shorter specific remark is better than an abstract conclusion. "
+            "Draft Korean first as "
             "natural contemporary Korean, "
             "not as a translation of English. Korean should read like a quick firsthand note: "
             "prefer 해요/했어요/됐네요/같아요 and vary the endings naturally. A small amount of "
@@ -873,10 +876,14 @@ class OllamaGenerationProvider:
             draft = DeveloperFeedDraft.model_validate_json(content)
             roles = [post.role for post in draft.posts]
             required_roles = ["observation", "meaning", "possibility", "afterthought"]
-            if roles != required_roles:
+            role_order = {role: index for index, role in enumerate(required_roles)}
+            if set(roles) != set(required_roles) or any(
+                role_order[current] > role_order[following]
+                for current, following in zip(roles, roles[1:], strict=False)
+            ):
                 raise ValueError(
-                    f"{post_type} must use one connected four-part narrative: "
-                    f"{required_roles}"
+                    f"{post_type} must use all four contiguous role groups in order: "
+                    f"{required_roles}; adjacent roles may repeat"
                 )
             normalized_topic = re.sub(
                 r"\s+", " ", draft.technology_or_method.strip().casefold()
@@ -952,7 +959,7 @@ class OllamaGenerationProvider:
                     raise ValueError(
                         "developer feed English used generic product prose"
                     )
-                if len(post.content_ko) < 55 or len(post.content_en) < 100:
+                if len(post.content_ko) < 25 or len(post.content_en) < 50:
                     raise ValueError(
                         "developer feed reply is too terse for the narrative contract"
                     )
@@ -962,9 +969,14 @@ class OllamaGenerationProvider:
                 raise ValueError(
                     "developer feed thread is too terse for the narrative contract"
                 )
-            meaning = draft.posts[1]
+            meaning_ko = " ".join(
+                post.content_ko for post in draft.posts if post.role == "meaning"
+            )
+            meaning_en = " ".join(
+                post.content_en for post in draft.posts if post.role == "meaning"
+            )
             korean_procedure_marker = any(
-                marker in meaning.content_ko
+                marker in meaning_ko
                 for marker in (
                     "때문",
                     "원인",
@@ -985,7 +997,7 @@ class OllamaGenerationProvider:
                 )
             )
             english_procedure_marker = any(
-                marker in meaning.content_en.casefold()
+                marker in meaning_en.casefold()
                 for marker in (
                     "because",
                     "cause",
@@ -1008,7 +1020,12 @@ class OllamaGenerationProvider:
                 raise ValueError(
                     "meaning must give a concrete procedure and mechanism in both languages"
                 )
-            possibility = draft.posts[2]
+            possibility_ko = " ".join(
+                post.content_ko for post in draft.posts if post.role == "possibility"
+            )
+            possibility_en = " ".join(
+                post.content_en for post in draft.posts if post.role == "possibility"
+            )
             outcome_markers = {
                 "verified_effect": (
                     ("줄었", "늘었", "빨라", "느려", "통과", "해결", "개선", "성공", "효과"),
@@ -1043,16 +1060,21 @@ class OllamaGenerationProvider:
                 ),
             }
             korean_outcomes, english_outcomes = outcome_markers[draft.outcome_status]
-            if not any(marker in possibility.content_ko for marker in korean_outcomes) or not any(
-                marker in possibility.content_en.casefold() for marker in english_outcomes
+            if not any(marker in possibility_ko for marker in korean_outcomes) or not any(
+                marker in possibility_en.casefold() for marker in english_outcomes
             ):
                 raise ValueError(
                     "possibility must state the selected measured, no-effect, mixed, or "
                     "not-measured outcome in both languages"
                 )
-            afterthought = draft.posts[3]
+            afterthought_ko = " ".join(
+                post.content_ko for post in draft.posts if post.role == "afterthought"
+            )
+            afterthought_en = " ".join(
+                post.content_en for post in draft.posts if post.role == "afterthought"
+            )
             korean_caveat_marker = any(
-                marker in afterthought.content_ko
+                marker in afterthought_ko
                 for marker in (
                     "다만",
                     "경우",
@@ -1067,7 +1089,7 @@ class OllamaGenerationProvider:
                 )
             )
             english_caveat_marker = any(
-                marker in afterthought.content_en.casefold()
+                marker in afterthought_en.casefold()
                 for marker in (
                     "but",
                     "only",
@@ -1114,8 +1136,11 @@ class OllamaGenerationProvider:
                             "The previous JSON failed deterministic validation. Return the "
                             "complete corrected object once. Shorten prose to the fixed limits "
                             "without dropping supported meaning and never invent a source ID. "
-                            "Keep exactly four ordered roles and combine at least two sentences "
-                            "per reply. Name an evidence-supported technology/method and "
+                            "Keep all four contiguous role groups in order, using 4 to 16 "
+                            "replies; adjacent roles may repeat when supported detail needs "
+                            "more room. Use one to three sentences per reply and apply the "
+                            "140/280 limits to each reply, not the whole thread. Name an "
+                            "evidence-supported technology/method and "
                             "searchable problem in observation. Put the actual steps and mechanism "
                             "in meaning, the honest measured/no-effect/mixed/not-measured result "
                             "in "

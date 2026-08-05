@@ -207,20 +207,23 @@ describe the actual information that changed, what was learned, and supported re
 cites exact source IDs in metadata and a deterministic validator rejects invented IDs. One repair
 is allowed for schema, citation, or length errors; a second failure publishes nothing.
 
-Each update is stored as one four-part bilingual X-style technical thread: a searchable problem and
-named technology/method, the actual settings/commands/component order and mechanism, the verified
-effect or explicit lack of effect (or an honest `not_measured` result), and the reproduction
-boundary. The editor chooses `troubleshooting`, `technology_explainer`, `practical_method`, or
+Each update is stored as one bilingual X-style technical thread with four contiguous narrative
+groups: a searchable problem and named technology/method, the actual settings/commands/component
+order and mechanism, the verified effect or explicit lack of effect (or an honest `not_measured`
+result), and the reproduction boundary. Each group can span adjacent replies when supported detail
+needs more room; the thread contains 4 to 16 replies rather than forcing every topic into four.
+The editor chooses `troubleshooting`, `technology_explainer`, `practical_method`, or
 `experiment_result`. It copies the topic and problem from cited evidence, so phrases such as “이
 방식” or “이번 변경” cannot stand in for information that only the author knows. A work diary,
 daily status, release note, personal resolution, unsupported fix, or effect inferred from a passing
 build fails validation. Korean is drafted first with ordinary `해요/했어요/됐네요` cadence instead
 of report-style `합니다/습니다`; English is independently localized from the same facts.
-Every reply combines two or three sentences and carries enough context to avoid release-note
+Every reply contains one to three sentences and carries enough context to avoid release-note
 fragments. Procedures use `claim_mode=reproducible_method`; results use `verified_outcome` only when
 at least one cited source has `claim_scope=verified_result`, otherwise `unmeasured_outcome`; closing
-conditions use `reproduction_boundary`. Korean posts are limited to 140 Unicode code points and
-English posts to 280. The UI defaults to Korean.
+conditions use `reproduction_boundary`. The limit applies to each reply, not the whole thread:
+Korean replies are limited to 140 Unicode code points and English replies to 280. The UI defaults
+to Korean.
 The source manifest records journal/document/version provenance, the embedding revision/time, and
 the exact Gemma model digest and prompt version. A screenshot is only recommended when a source
 explicitly identifies a stable non-secret visual artifact; capture remains a separate reviewed

@@ -154,8 +154,8 @@ class Settings(BaseSettings):
     developer_feed_max_sources_per_run: int = Field(default=12, ge=1, le=100)
     developer_feed_max_batches_per_run: int = Field(default=8, ge=1, le=50)
     developer_feed_max_input_chars: int = Field(default=24_000, ge=4_000, le=100_000)
-    developer_feed_persona_version: str = "peer-developer-v9-reproducible-sharing"
-    developer_feed_prompt_version: str = "developer-feed-v9-method-outcome"
+    developer_feed_persona_version: str = "peer-developer-v10-threaded-sharing"
+    developer_feed_prompt_version: str = "developer-feed-v10-variable-thread"
     developer_feed_model: str = "gemma4:12b"
     developer_feed_model_digest: str = (
         "4eb23ef187e2c5462566d6a1d3bbbc2f1346d0b4327cbb66d58fffbcc9b2b05c"
