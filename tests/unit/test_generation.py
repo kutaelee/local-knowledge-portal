@@ -16,48 +16,78 @@ def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
         {
             "role": "observation",
             "sentences_ko": [
-                "현재 문서가 오래된 리비전보다 먼저 나오도록 검색 우선순위를 손봤어요.",
-                "다른 프로젝트 근거가 한 답변에 슬쩍 끼지 못하게 경계도 막았고요.",
+                "비슷한 검색 결과가 섞이면 유사도보다 문서 리비전과 프로젝트 경계를 먼저 보세요.",
+                "최신 근거가 아니면 그럴듯한 답도 금방 엉뚱한 결론이 돼요.",
             ],
             "sentences_en": [
-                "Search now puts the current document ahead of stale revisions.",
-                "Evidence from another project boundary no longer leaks into the same answer.",
+                (
+                    "When search results look alike, check the document revision and project "
+                    "boundary before similarity."
+                ),
+                "A plausible answer can still be wrong when its evidence is stale or out of scope.",
             ],
             "source_ids": [source_id],
         },
         {
             "role": "meaning",
             "sentences_ko": [
-                "겉으로 비슷한 증상만 보고 같은 원인이라고 덥석 답할 일이 줄었어요.",
-                "근거가 약하면 멈추는 이유도 보여서 다시 볼 지점이 또렷해졌고요.",
+                (
+                    "벡터 유사도는 문장이 닮은 정도만 보여줄 뿐, 같은 프로젝트의 최신 "
+                    "사실인지는 보장하지 않아요."
+                ),
+                "그래서 리비전과 프로젝트 범위를 검색 점수보다 앞선 기준으로 둬야 해요.",
             ],
             "sentences_en": [
-                "This reduces the chance of treating similar symptoms as the same cause.",
-                "When evidence is weak, the system stops and makes the reason for review clearer.",
+                (
+                    "Vector similarity only measures resemblance; it does not mean a result is "
+                    "current or belongs to the same project."
+                ),
+                (
+                    "That difference is why revision and scope need to gate evidence before "
+                    "ranking scores do."
+                ),
             ],
             "source_ids": [source_id],
         },
         {
             "role": "possibility",
             "sentences_ko": [
-                "다음에는 이 경계 판단을 리뷰 화면 옆에 짧게 붙여볼까 해요.",
-                "왜 보류됐는지 바로 읽히는 작은 디버깅 지도로 써봐도 괜찮겠네요.",
+                (
+                    "같은 증상인데 원인이 다를 때는 후보의 프로젝트 키, 소스 해시, "
+                    "리비전을 먼저 비교해보세요."
+                ),
+                "하나라도 맞지 않으면 답변 근거가 아니라 탐색 힌트로만 남기면 돼요.",
             ],
             "sentences_en": [
-                "Next, this boundary decision could become an explanation in the review view.",
-                "It might serve as a small debugging map that makes a hold easier to understand.",
+                (
+                    "If identical symptoms may have different causes, first compare the project "
+                    "key, source hash, and revision."
+                ),
+                (
+                    "When any of them differs, use that candidate only as a navigation hint, "
+                    "not answer evidence."
+                ),
             ],
             "source_ids": [source_id],
         },
         {
             "role": "afterthought",
             "sentences_ko": [
-                "막상 써보니 답이 없는 이유가 보이는 쪽이 괜히 많이 말하는 것보다 편했다.",
-                "다음에 또 비슷한 버그를 만나도 오늘처럼 한참 헤매지는 않을 것 같다.",
+                (
+                    "다만 최신 리비전 표기가 없는 문서는 바로 버리기보다 원문 확인용으로만 "
+                    "남길 수 있어요."
+                ),
+                "경계 정보를 복구하기 전에는 그 문서로 결론을 내리지 않는 게 핵심이에요.",
             ],
             "sentences_en": [
-                "In practice, seeing why there is no answer feels better than getting extra noise.",
-                "The next similar bug should involve less staring at the screen and wondering.",
+                (
+                    "A document without revision metadata can still help navigation, but only as "
+                    "a pointer to the original source."
+                ),
+                (
+                    "Do not draw a conclusion from it before the missing boundary information is "
+                    "restored."
+                ),
             ],
             "source_ids": [source_id],
         },
@@ -181,9 +211,11 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         payload = json.loads(request.content)
         assert payload["keep_alive"] == "0"
         assert payload["options"]["num_batch"] == 1024
-        assert "not about embedding" in payload["messages"][0]["content"]
+        assert "Do not make embedding" in payload["messages"][0]["content"]
         assert "untrusted data" in payload["messages"][0]["content"]
-        assert "jotting down" in payload["messages"][0]["content"]
+        assert "teaches other developers" in payload["messages"][0]["content"]
+        assert "not a work diary" in payload["messages"][0]["content"]
+        assert "troubleshooting" in payload["messages"][0]["content"]
         assert "Draft Korean first" in payload["messages"][0]["content"]
         assert "해요/했어요/됐네요" in payload["messages"][0]["content"]
         if attempts == 1:
@@ -320,7 +352,7 @@ def test_developer_feed_repairs_manifesto_tone():
     assert draft.posts[3].role == "afterthought"
 
 
-def test_developer_feed_allows_casual_self_imposed_plan_without_calling_it_a_belief():
+def test_developer_feed_repairs_personal_resolution_into_reader_facing_caveat():
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -332,10 +364,11 @@ def test_developer_feed_allows_casual_self_imposed_plan_without_calling_it_a_bel
             )
         attempts += 1
         posts = _valid_feed_posts()
-        posts[3]["sentences_ko"] = [
-            "GPU를 오래 잡은 프로세스 때문에 잠깐 당황했어요.",
-            "앞으로는 서버와 연산 작업을 확실히 분리해서 관리해야겠어요.",
-        ]
+        if attempts == 1:
+            posts[3]["sentences_ko"] = [
+                "GPU를 오래 잡은 프로세스 때문에 잠깐 당황했어요.",
+                "앞으로는 서버와 연산 작업을 확실히 분리해서 관리해야겠어요.",
+            ]
         return httpx.Response(
             200,
             json={
@@ -364,8 +397,9 @@ def test_developer_feed_allows_casual_self_imposed_plan_without_calling_it_a_bel
         {"sources": [{"id": "D1", "content": "current document"}]},
         prompt_version="feed-test-v1",
     )
-    assert attempts == 1
-    assert "해야겠" in draft.posts[3].content_ko
+    assert attempts == 2
+    assert "앞으로는" not in draft.posts[3].content_ko
+    assert "다만" in draft.posts[3].content_ko
 
 
 def test_developer_feed_repairs_formal_translated_korean():
@@ -472,18 +506,23 @@ def test_developer_feed_repairs_vague_product_prose():
     assert "context-rich" not in draft.posts[2].content_en
 
 
-def test_developer_feed_accepts_proposal_marker_in_one_localization():
+def test_developer_feed_repairs_proposal_without_a_practical_method():
+    attempts = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
         if request.url.path == "/api/tags":
             return httpx.Response(
                 200,
                 json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
             )
+        attempts += 1
         posts = _valid_feed_posts()
-        posts[2]["sentences_en"] = [
-            "The boundary decision appears beside each held result.",
-            "A short note beside it explains the relevant evidence.",
-        ]
+        if attempts == 1:
+            posts[2]["sentences_en"] = [
+                "The boundary decision could appear beside each held result.",
+                "A short note might explain the relevant evidence someday.",
+            ]
         return httpx.Response(
             200,
             json={
@@ -512,6 +551,8 @@ def test_developer_feed_accepts_proposal_marker_in_one_localization():
         {"sources": [{"id": "D1", "content": "current document"}]},
         prompt_version="feed-test-v1",
     )
+    assert attempts == 2
+    assert "first compare" in draft.posts[2].content_en
     assert draft.posts[2].role == "possibility"
 
 

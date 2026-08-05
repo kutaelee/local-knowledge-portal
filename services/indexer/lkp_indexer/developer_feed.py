@@ -21,6 +21,7 @@ from lkp.models import (
     ProjectJournalEntry,
 )
 from lkp.redaction import redact_text, redact_value
+from lkp.security_boundary import allowed_project_expression
 from lkp.settings import Settings, get_settings
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -166,6 +167,7 @@ def _eligible_batch(
             select(ProjectJournalEntry)
             .where(
                 ProjectJournalEntry.verification_status.in_(_FEED_JOURNAL_STATUSES),
+                allowed_project_expression(ProjectJournalEntry.project_key),
                 ProjectJournalEntry.occurred_at
                 >= now - timedelta(hours=settings.developer_feed_initial_lookback_hours),
             )
@@ -319,9 +321,9 @@ def _add_thread(
                 "post_source_ids": message.source_ids,
                 "editorial_role": message.role,
                 "claim_mode": (
-                    "proposal"
+                    "practical_guidance"
                     if message.role == "possibility"
-                    else "personal_aside"
+                    else "scope_caveat"
                     if message.role == "afterthought"
                     else "evidence_bound"
                 ),
@@ -460,8 +462,10 @@ def publish_once(
             {
                 "post_type": "information_update",
                 "editorial_intent": (
-                    "Tell one connected story: observed change, practical meaning, "
-                    "a clearly proposed new use or experiment, and a casual afterthought."
+                    "Publish a reader-facing technical explanation, troubleshooting method, "
+                    "or reusable lesson rather than a work log. Lead with the concrete finding, "
+                    "explain the mechanism in plain language, give a supported check or method, "
+                    "and close with its scope or caveat."
                     " Sources marked observed_change_only prove only that the current embedded "
                     "change exists; do not present their claimed success, effect, or metric as "
                     "verified."
@@ -563,8 +567,12 @@ def publish_once(
                     "post_type": "daily_summary",
                     "local_date": local_date,
                     "editorial_intent": (
-                        "Make a rich daily narrative, not a changelog: connect the day's work, "
-                        "explain its practical meaning, propose one next use, and close casually."
+                        "Choose the day's strongest reusable technical lesson for other "
+                        "developers. "
+                        "Explain the problem or technology simply, give a practical diagnostic or "
+                        "application, and state the supported boundary. Do not narrate the day, "
+                        "list "
+                        "completed work, or call this a daily summary."
                     ),
                     "sources": sources,
                 },
@@ -575,27 +583,11 @@ def publish_once(
                 prompt_version=settings.developer_feed_prompt_version,
             )
         else:
-            digest = settings.developer_feed_model_digest
-            draft = DeveloperFeedDraft(
-                posts=[
-                    {
-                        "role": "afterthought",
-                        "sentences_ko": [
-                            f"{local_date} 오늘은 새로 확인된 프로젝트 정보가 없다.",
-                            "근거 없는 진행 상황은 덧붙이지 않고 조용히 기록을 닫는다.",
-                        ],
-                        "sentences_en": [
-                            f"{local_date}: no new project information was verified today.",
-                            "I am closing the daily note without inventing progress.",
-                        ],
-                        "source_ids": ["NO_UPDATE"],
-                    }
-                ]
-            )
-            payload = {
-                "post_type": "daily_summary",
-                "local_date": local_date,
-                "sources": [{"id": "NO_UPDATE", "source_type": "no_verified_update"}],
+            return {
+                "state": "idle_no_shareable_daily_sources",
+                "activity_threads": activity_threads,
+                "daily_threads": 0,
+                "posts": len(created),
             }
         manifest = {
             "local_date": local_date,
@@ -673,7 +665,7 @@ def run(settings: Settings) -> int:
         print(
             json.dumps(
                 {
-                    "state": "published",
+                    "state": "published" if totals["posts"] else "idle",
                     **totals,
                     "remaining_pending_sources": remaining["pending_sources"],
                     "remaining_daily_due": remaining["daily_due"],

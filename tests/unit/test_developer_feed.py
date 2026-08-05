@@ -115,7 +115,8 @@ def test_feed_defaults_to_three_hour_gemma_batch():
     assert settings.developer_feed_daily_hour == 18
     assert settings.developer_feed_max_batches_per_run == 8
     assert settings.developer_feed_model == "gemma4:12b"
-    assert settings.developer_feed_persona_version.endswith("-session-notes")
+    assert settings.developer_feed_persona_version == "peer-developer-v8-practical-sharing"
+    assert settings.developer_feed_prompt_version == "developer-feed-v8-explain-troubleshoot"
     assert settings.developer_feed_temperature == 0.65
 
 
