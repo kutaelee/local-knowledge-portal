@@ -318,13 +318,25 @@ def _add_thread(
             content_en=message.content_en.strip(),
             source_manifest_json={
                 **manifest,
+                "editorial_contract": {
+                    "publication_kind": draft.publication_kind,
+                    "technology_or_method": draft.technology_or_method,
+                    "reader_problem_or_goal": draft.reader_problem_or_goal,
+                    "outcome_status": draft.outcome_status,
+                    "outcome_source_ids": draft.outcome_source_ids,
+                },
                 "post_source_ids": message.source_ids,
                 "editorial_role": message.role,
                 "claim_mode": (
-                    "practical_guidance"
+                    "verified_outcome"
                     if message.role == "possibility"
-                    else "scope_caveat"
+                    and draft.outcome_status != "not_measured"
+                    else "unmeasured_outcome"
+                    if message.role == "possibility"
+                    else "reproduction_boundary"
                     if message.role == "afterthought"
+                    else "reproducible_method"
+                    if message.role == "meaning"
                     else "evidence_bound"
                 ),
             },
@@ -462,10 +474,11 @@ def publish_once(
             {
                 "post_type": "information_update",
                 "editorial_intent": (
-                    "Publish a reader-facing technical explanation, troubleshooting method, "
-                    "or reusable lesson rather than a work log. Lead with the concrete finding, "
-                    "explain the mechanism in plain language, give a supported check or method, "
-                    "and close with its scope or caveat."
+                    "Publish a searchable, reproducible technical post rather than a work log. "
+                    "Name the technology or method and the problem it solves, give the actual "
+                    "settings, commands, component order, or diagnostic steps, report the verified "
+                    "effect, verified lack of effect, trade-off, or unmeasured status honestly, "
+                    "and close with the environment or failure boundary."
                     " Sources marked observed_change_only prove only that the current embedded "
                     "change exists; do not present their claimed success, effect, or metric as "
                     "verified."
@@ -567,12 +580,12 @@ def publish_once(
                     "post_type": "daily_summary",
                     "local_date": local_date,
                     "editorial_intent": (
-                        "Choose the day's strongest reusable technical lesson for other "
-                        "developers. "
-                        "Explain the problem or technology simply, give a practical diagnostic or "
-                        "application, and state the supported boundary. Do not narrate the day, "
-                        "list "
-                        "completed work, or call this a daily summary."
+                        "Choose the day's most reproducible technical lesson for other developers. "
+                        "Name the method and searchable problem, explain exact steps or settings, "
+                        "state the measured effect, lack of effect, trade-off, or unmeasured "
+                        "status, "
+                        "and give the environment boundary. Do not narrate the day, list completed "
+                        "work, or call this a daily summary."
                     ),
                     "sources": sources,
                 },

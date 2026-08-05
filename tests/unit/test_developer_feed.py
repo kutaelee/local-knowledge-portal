@@ -8,6 +8,11 @@ from lkp_indexer.generation import DeveloperFeedDraft
 
 def test_feed_contract_enforces_x_limits_and_reply_thread():
     draft = DeveloperFeedDraft(
+        publication_kind="troubleshooting",
+        technology_or_method="리비전 게이트",
+        reader_problem_or_goal="오래된 문서가 최신 근거보다 먼저 나온다",
+        outcome_status="not_measured",
+        outcome_source_ids=["J1"],
         posts=[
             {
                 "role": "observation",
@@ -115,8 +120,8 @@ def test_feed_defaults_to_three_hour_gemma_batch():
     assert settings.developer_feed_daily_hour == 18
     assert settings.developer_feed_max_batches_per_run == 8
     assert settings.developer_feed_model == "gemma4:12b"
-    assert settings.developer_feed_persona_version == "peer-developer-v8-practical-sharing"
-    assert settings.developer_feed_prompt_version == "developer-feed-v8-explain-troubleshoot"
+    assert settings.developer_feed_persona_version == "peer-developer-v9-reproducible-sharing"
+    assert settings.developer_feed_prompt_version == "developer-feed-v9-method-outcome"
     assert settings.developer_feed_temperature == 0.65
 
 

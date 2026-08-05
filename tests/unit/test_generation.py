@@ -16,15 +16,15 @@ def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
         {
             "role": "observation",
             "sentences_ko": [
-                "비슷한 검색 결과가 섞이면 유사도보다 문서 리비전과 프로젝트 경계를 먼저 보세요.",
-                "최신 근거가 아니면 그럴듯한 답도 금방 엉뚱한 결론이 돼요.",
+                "RAG에서 과거 문서가 최신 해결책보다 먼저 나오면 답이 그럴듯하게 틀려져요.",
+                "이 증상은 리비전 게이트가 검색 순위 뒤에 있을 때 생겨요.",
             ],
             "sentences_en": [
                 (
-                    "When search results look alike, check the document revision and project "
-                    "boundary before similarity."
+                    "In RAG, stale documents can outrank the current fix and produce a plausible "
+                    "but wrong answer."
                 ),
-                "A plausible answer can still be wrong when its evidence is stale or out of scope.",
+                "This happens when the revision gate runs after similarity ranking.",
             ],
             "source_ids": [source_id],
         },
@@ -32,19 +32,19 @@ def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
             "role": "meaning",
             "sentences_ko": [
                 (
-                    "벡터 유사도는 문장이 닮은 정도만 보여줄 뿐, 같은 프로젝트의 최신 "
-                    "사실인지는 보장하지 않아요."
+                    "후보를 넓게 뽑은 뒤 프로젝트 키, 소스 해시, 리비전 순서로 먼저 "
+                    "확인해요."
                 ),
-                "그래서 리비전과 프로젝트 범위를 검색 점수보다 앞선 기준으로 둬야 해요.",
+                "세 값이 맞는 문서만 유사도로 정렬하면 오래된 근거가 점수로 되살아나지 않아요.",
             ],
             "sentences_en": [
                 (
-                    "Vector similarity only measures resemblance; it does not mean a result is "
-                    "current or belongs to the same project."
+                    "First collect a broad candidate set, then check project key, source hash, "
+                    "and revision in that order."
                 ),
                 (
-                    "That difference is why revision and scope need to gate evidence before "
-                    "ranking scores do."
+                    "Rank only matching documents by similarity, because a high score cannot "
+                    "make stale evidence current."
                 ),
             ],
             "source_ids": [source_id],
@@ -52,21 +52,15 @@ def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
         {
             "role": "possibility",
             "sentences_ko": [
-                (
-                    "같은 증상인데 원인이 다를 때는 후보의 프로젝트 키, 소스 해시, "
-                    "리비전을 먼저 비교해보세요."
-                ),
-                "하나라도 맞지 않으면 답변 근거가 아니라 탐색 힌트로만 남기면 돼요.",
+                "이 합성 사례에서는 차단 순서만 검증했고 정확도 상승은 측정하지 않았어요.",
+                "수치가 없으니 효과가 있었다고 단정하지 않는 상태예요.",
             ],
             "sentences_en": [
                 (
-                    "If identical symptoms may have different causes, first compare the project "
-                    "key, source hash, and revision."
+                    "This synthetic case verified the gate order, but accuracy improvement was "
+                    "not measured."
                 ),
-                (
-                    "When any of them differs, use that candidate only as a navigation hint, "
-                    "not answer evidence."
-                ),
+                "Without a metric, the effect remains unverified rather than positive.",
             ],
             "source_ids": [source_id],
         },
@@ -74,24 +68,46 @@ def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
             "role": "afterthought",
             "sentences_ko": [
                 (
-                    "다만 최신 리비전 표기가 없는 문서는 바로 버리기보다 원문 확인용으로만 "
-                    "남길 수 있어요."
+                    "다만 리비전 메타데이터가 비어 있으면 이 순서를 적용하기 전에 원문과 "
+                    "현재 커밋을 대조해야 해요."
                 ),
-                "경계 정보를 복구하기 전에는 그 문서로 결론을 내리지 않는 게 핵심이에요.",
+                "경계를 복구하지 못한 문서는 답변 근거가 아니라 탐색 힌트로만 남겨요.",
             ],
             "sentences_en": [
                 (
-                    "A document without revision metadata can still help navigation, but only as "
-                    "a pointer to the original source."
+                    "If revision metadata is missing, compare the source with the current commit "
+                    "before applying this order."
                 ),
-                (
-                    "Do not draw a conclusion from it before the missing boundary information is "
-                    "restored."
-                ),
+                "Until that boundary is restored, keep the document only as a navigation hint.",
             ],
             "source_ids": [source_id],
         },
     ]
+
+
+def _valid_feed_response(posts: list[dict] | None = None) -> dict:
+    return {
+        "publication_kind": "troubleshooting",
+        "technology_or_method": "리비전 게이트",
+        "reader_problem_or_goal": "과거 문서가 최신 해결책보다 먼저 나온다",
+        "outcome_status": "not_measured",
+        "outcome_source_ids": ["D1"],
+        "posts": posts or _valid_feed_posts(),
+        "screenshot_source_id": None,
+        "screenshot_reason": None,
+    }
+
+
+def _valid_feed_source() -> dict:
+    return {
+        "id": "D1",
+        "claim_scope": "observed_change_only",
+        "content": (
+            "리비전 게이트: RAG에서 과거 문서가 최신 해결책보다 먼저 나온다. "
+            "프로젝트 키, 소스 해시, 리비전 순서로 후보를 차단한다. "
+            "차단 순서만 확인했으며 정확도 효과는 측정하지 않았다."
+        ),
+    }
 
 
 def test_generation_is_disabled_by_default():
@@ -225,11 +241,7 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         else:
             assert "failed deterministic validation" in payload["messages"][-1]["content"]
             posts = _valid_feed_posts()
-        content = {
-            "posts": posts,
-            "screenshot_source_id": None,
-            "screenshot_reason": None,
-        }
+        content = _valid_feed_response(posts)
         return httpx.Response(
             200,
             json={"message": {"content": json.dumps(content, ensure_ascii=False)}},
@@ -246,7 +258,7 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
     draft, digest = provider.write_developer_feed(
         {
             "post_type": "information_update",
-            "sources": [{"id": "D1", "content": "current document content"}],
+            "sources": [_valid_feed_source()],
         },
         prompt_version="feed-test-v1",
     )
@@ -281,11 +293,7 @@ def test_developer_feed_repairs_embedding_work_log_copy():
                 "Processed three newly embedded files.",
                 "This is only an embedding work log and does not explain the information.",
             ]
-        content = {
-            "posts": posts,
-            "screenshot_source_id": None,
-            "screenshot_reason": None,
-        }
+        content = _valid_feed_response(posts)
         return httpx.Response(200, json={"message": {"content": json.dumps(content)}})
 
     provider = OllamaGenerationProvider(
@@ -297,7 +305,7 @@ def test_developer_feed_repairs_embedding_work_log_copy():
         transport=httpx.MockTransport(handler),
     )
     draft, _ = provider.write_developer_feed(
-        {"sources": [{"id": "D1", "content": "current document"}]},
+        {"sources": [_valid_feed_source()]},
         prompt_version="feed-test-v1",
     )
     assert attempts == 2
@@ -325,11 +333,7 @@ def test_developer_feed_repairs_manifesto_tone():
                 "Tools should serve as a fence that protects our attention.",
                 "I believe this is a core value every developer must defend.",
             ]
-        content = {
-            "posts": posts,
-            "screenshot_source_id": None,
-            "screenshot_reason": None,
-        }
+        content = _valid_feed_response(posts)
         return httpx.Response(
             200,
             json={"message": {"content": json.dumps(content, ensure_ascii=False)}},
@@ -344,7 +348,7 @@ def test_developer_feed_repairs_manifesto_tone():
         transport=httpx.MockTransport(handler),
     )
     draft, _ = provider.write_developer_feed(
-        {"sources": [{"id": "D1", "content": "current document"}]},
+        {"sources": [_valid_feed_source()]},
         prompt_version="feed-test-v1",
     )
     assert attempts == 2
@@ -374,11 +378,7 @@ def test_developer_feed_repairs_personal_resolution_into_reader_facing_caveat():
             json={
                 "message": {
                     "content": json.dumps(
-                        {
-                            "posts": posts,
-                            "screenshot_source_id": None,
-                            "screenshot_reason": None,
-                        },
+                        _valid_feed_response(posts),
                         ensure_ascii=False,
                     )
                 }
@@ -394,7 +394,7 @@ def test_developer_feed_repairs_personal_resolution_into_reader_facing_caveat():
         transport=httpx.MockTransport(handler),
     )
     draft, _ = provider.write_developer_feed(
-        {"sources": [{"id": "D1", "content": "current document"}]},
+        {"sources": [_valid_feed_source()]},
         prompt_version="feed-test-v1",
     )
     assert attempts == 2
@@ -424,11 +424,7 @@ def test_developer_feed_repairs_formal_translated_korean():
             json={
                 "message": {
                     "content": json.dumps(
-                        {
-                            "posts": posts,
-                            "screenshot_source_id": None,
-                            "screenshot_reason": None,
-                        },
+                        _valid_feed_response(posts),
                         ensure_ascii=False,
                     )
                 }
@@ -444,7 +440,7 @@ def test_developer_feed_repairs_formal_translated_korean():
         transport=httpx.MockTransport(handler),
     )
     draft, _ = provider.write_developer_feed(
-        {"sources": [{"id": "D1", "content": "current document"}]},
+        {"sources": [_valid_feed_source()]},
         prompt_version="feed-test-v1",
     )
     assert attempts == 2
@@ -478,11 +474,7 @@ def test_developer_feed_repairs_vague_product_prose():
             json={
                 "message": {
                     "content": json.dumps(
-                        {
-                            "posts": posts,
-                            "screenshot_source_id": None,
-                            "screenshot_reason": None,
-                        },
+                        _valid_feed_response(posts),
                         ensure_ascii=False,
                     )
                 }
@@ -498,7 +490,7 @@ def test_developer_feed_repairs_vague_product_prose():
         transport=httpx.MockTransport(handler),
     )
     draft, _ = provider.write_developer_feed(
-        {"sources": [{"id": "D1", "content": "current document"}]},
+        {"sources": [_valid_feed_source()]},
         prompt_version="feed-test-v1",
     )
     assert attempts == 2
@@ -506,7 +498,7 @@ def test_developer_feed_repairs_vague_product_prose():
     assert "context-rich" not in draft.posts[2].content_en
 
 
-def test_developer_feed_repairs_proposal_without_a_practical_method():
+def test_developer_feed_repairs_result_without_an_outcome():
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -528,11 +520,7 @@ def test_developer_feed_repairs_proposal_without_a_practical_method():
             json={
                 "message": {
                     "content": json.dumps(
-                        {
-                            "posts": posts,
-                            "screenshot_source_id": None,
-                            "screenshot_reason": None,
-                        },
+                        _valid_feed_response(posts),
                         ensure_ascii=False,
                     )
                 }
@@ -548,12 +536,139 @@ def test_developer_feed_repairs_proposal_without_a_practical_method():
         transport=httpx.MockTransport(handler),
     )
     draft, _ = provider.write_developer_feed(
-        {"sources": [{"id": "D1", "content": "current document"}]},
+        {"sources": [_valid_feed_source()]},
         prompt_version="feed-test-v1",
     )
     assert attempts == 2
-    assert "first compare" in draft.posts[2].content_en
+    assert "not measured" in draft.posts[2].content_en
     assert draft.posts[2].role == "possibility"
+
+
+def test_developer_feed_repairs_project_insider_opening():
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        attempts += 1
+        posts = _valid_feed_posts()
+        if attempts == 1:
+            posts[0]["sentences_ko"] = [
+                "이 방식으로 오래된 결과가 섞이는 문제를 막을 수 있어요.",
+                "해당 내용을 적용하면 답변 흐름도 달라져요.",
+            ]
+            posts[0]["sentences_en"] = [
+                "This approach keeps old results out of the answer.",
+                "The change also alters how the response flows for this project.",
+            ]
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "content": json.dumps(
+                        _valid_feed_response(posts),
+                        ensure_ascii=False,
+                    )
+                }
+            },
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    draft, _ = provider.write_developer_feed(
+        {"sources": [_valid_feed_source()]},
+        prompt_version="feed-test-v1",
+    )
+    assert attempts == 2
+    assert "RAG" in draft.posts[0].content_ko
+
+
+def test_developer_feed_rejects_measured_effect_from_observed_change_only():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        content = _valid_feed_response()
+        content["outcome_status"] = "verified_effect"
+        content["posts"][2]["sentences_ko"] = [
+            "정확도가 크게 개선됐고 오래된 답변도 줄었어요.",
+            "효과는 검증을 통과했어요.",
+        ]
+        content["posts"][2]["sentences_en"] = [
+            "Accuracy improved and stale answers decreased.",
+            "The effect passed verification.",
+        ]
+        return httpx.Response(
+            200,
+            json={"message": {"content": json.dumps(content, ensure_ascii=False)}},
+        )
+
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(ValueError, match="verified_result source"):
+        provider.write_developer_feed(
+            {"sources": [_valid_feed_source()]},
+            prompt_version="feed-test-v1",
+        )
+
+
+def test_developer_feed_accepts_verified_no_effect_result():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "gemma4:12b", "digest": "sha256:gemma4"}]},
+            )
+        content = _valid_feed_response()
+        content["outcome_status"] = "verified_no_effect"
+        content["posts"][2]["sentences_ko"] = [
+            "동일 평가셋에서 정확도 차이가 없었고 오래된 답변 수도 변화가 없었어요.",
+            "이 조건에서는 리비전 게이트의 품질 효과가 없었어요.",
+        ]
+        content["posts"][2]["sentences_en"] = [
+            "The paired evaluation showed no accuracy difference and no change in stale answers.",
+            "Under this condition, the revision gate had no measured quality effect.",
+        ]
+        return httpx.Response(
+            200,
+            json={"message": {"content": json.dumps(content, ensure_ascii=False)}},
+        )
+
+    source = _valid_feed_source()
+    source["claim_scope"] = "verified_result"
+    source["content"] += " 동일 평가셋에서 정확도 차이와 오래된 답변 수 변화가 없었다."
+    provider = OllamaGenerationProvider(
+        "http://127.0.0.1:11434",
+        "gemma4:12b",
+        "sha256:gemma4",
+        5,
+        keep_alive="0",
+        transport=httpx.MockTransport(handler),
+    )
+    draft, _ = provider.write_developer_feed(
+        {"sources": [source]},
+        prompt_version="feed-test-v1",
+    )
+    assert draft.outcome_status == "verified_no_effect"
+    assert "차이가 없" in draft.posts[2].content_ko
 
 
 def test_ollama_curator_uses_evidence_schema_and_treats_payload_as_data():

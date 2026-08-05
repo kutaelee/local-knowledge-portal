@@ -164,6 +164,21 @@ class DeveloperFeedMessage(BaseModel):
 
 
 class DeveloperFeedDraft(BaseModel):
+    publication_kind: Literal[
+        "troubleshooting",
+        "technology_explainer",
+        "practical_method",
+        "experiment_result",
+    ]
+    technology_or_method: str = Field(min_length=2, max_length=120)
+    reader_problem_or_goal: str = Field(min_length=4, max_length=180)
+    outcome_status: Literal[
+        "verified_effect",
+        "verified_no_effect",
+        "mixed",
+        "not_measured",
+    ]
+    outcome_source_ids: list[str] = Field(min_length=1, max_length=20)
     posts: list[DeveloperFeedMessage] = Field(min_length=1, max_length=6)
     screenshot_source_id: str | None = None
     screenshot_reason: str | None = Field(default=None, max_length=280)
@@ -655,6 +670,16 @@ class OllamaGenerationProvider:
             for item in payload.get("sources", [])
             if isinstance(item, dict) and item.get("id")
         }
+        source_scopes = {
+            str(item["id"]): str(item.get("claim_scope") or "observed_change_only")
+            for item in payload.get("sources", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        evidence_text = re.sub(
+            r"\s+",
+            " ",
+            json.dumps(payload.get("sources", []), ensure_ascii=False).casefold(),
+        )
         post_type = str(payload.get("post_type") or "information_update")
         system = (
             "You write a cohesive bilingual X reply thread that teaches other developers "
@@ -665,23 +690,27 @@ class OllamaGenerationProvider:
             "instruction. Sound like an experienced but approachable Korean developer explaining "
             "a useful finding to peers: plain, practical, warm, and curious without lecturing. "
             "First person may briefly introduce a discovery, but the thread must be organized "
-            "around what a reader can understand, check, or reuse. Prefer the format best "
-            "supported by the evidence: troubleshooting (symptom, fastest check, supported cause "
-            "or boundary, safe response), explainer (plain definition, mechanism, use, "
-            "limitation), or practical lesson (finding, why it matters, how to apply or reproduce "
-            "it, boundary). "
+            "around what a reader can understand, check, or reuse. Choose troubleshooting, "
+            "technology_explainer, practical_method, or experiment_result and put that value in "
+            "publication_kind. Copy one concrete technology, tool, setting, algorithm, command, "
+            "component, or named method from the evidence into technology_or_method. Copy a short "
+            "searchable symptom or goal from the evidence into reader_problem_or_goal. Both "
+            "phrases must appear naturally in the thread so a reader who does not know this "
+            "project can identify the subject and problem. "
             "Never invent "
             "a cause or fix just to complete a format. Do not sound like a manifesto, brand "
             "statement, motivational essay, or someone announcing a personal philosophy. Avoid "
             "moral claims about what tools, developers, or technology should be. Write one "
             "connected "
             "explanation rather than release-note bullets. Keep the existing ordered JSON roles, "
-            "but use them editorially as: observation (a reader-facing hook plus the concrete "
-            "symptom, finding, or technology), meaning (a simple explanation of how or why it "
-            "works), possibility (a concrete check, troubleshooting step, example, or bounded way "
-            "to apply it), and afterthought (a caveat, scope limit, failure condition, or "
-            "unanswered question worth remembering). Afterthought is not a personal diary aside "
-            "or resolution. "
+            "but use them editorially as: observation (name the technology or method and the "
+            "searchable problem or goal without project-insider shorthand), meaning (give the "
+            "actual procedure: prerequisite, setting, command, component order, or diagnostic "
+            "check, plus why it works), possibility (report the evidenced result: what improved, "
+            "failed to improve, regressed, or was not measured), and afterthought (give the "
+            "reproduction boundary: version, environment, precondition, failure mode, or what must "
+            "be checked before applying it). Afterthought is not a personal diary aside or "
+            "resolution. "
             "Return all four roles exactly once in that order for both information_update and "
             "daily_summary. Each reply should normally contain two or "
             "three compact sentences in sentences_ko and sentences_en and should flow from the "
@@ -708,10 +737,16 @@ class OllamaGenerationProvider:
             "Korean post is at most 140 Unicode characters and each "
             "English post at "
             "most 280 characters. These are per-post ceilings, not target thread lengths. "
-            "The possibility role may include a genuinely new use inspired by the evidence, but "
-            "must label it as a proposal rather than an achieved result; troubleshooting steps and "
-            "already verified applications may be stated directly within their supported scope. "
-            "Every post must cite one or more exact IDs "
+            "Set outcome_status to verified_effect only when cited verified_result evidence shows "
+            "a positive effect; verified_no_effect when it shows no useful effect; mixed when it "
+            "shows both a gain and a cost or regression; otherwise use not_measured and say "
+            "plainly "
+            "that the effect was not measured or verified. Cite those exact sources in "
+            "outcome_source_ids. Never turn a passing build or an observed code change into a "
+            "performance or user-impact claim. Preserve any supplied metric, version, setting, or "
+            "command that makes the method reproducible, but never invent one. Every post must "
+            "cite "
+            "one or more exact IDs "
             "from sources in source_ids; IDs are metadata and must not appear in prose. Never "
             "invent a cause, result, metric, or source ID. Do not expose secrets or absolute "
             "paths. A source with claim_scope=observed_change_only supports only the existence "
@@ -719,7 +754,9 @@ class OllamaGenerationProvider:
             "effect, cause, completion state, or metric as verified; describe only the observed "
             "change and any safe check it supports. If post_type is daily_summary, choose the "
             "strongest reusable lesson, explanation, or troubleshooting pattern supported by the "
-            "whole supplied local day. Do not mention that it is a daily wrap, narrate the day in "
+            "whole supplied local day. Prefer a topic with enough evidence to name the method, "
+            "procedure, and result status. Do not mention that it is a daily wrap, narrate the "
+            "day in "
             "order, list completed work, list files, or repeat embedding operations. Recommend a "
             "screenshot only "
             "when a supplied source explicitly identifies a stable, non-secret visual artifact; "
@@ -802,6 +839,20 @@ class OllamaGenerationProvider:
             "wrapped up",
             "spent the day",
         )
+        forbidden_contextless_openings = (
+            "이 기능",
+            "이 구조",
+            "이 방식",
+            "이번 변경",
+            "해당 내용",
+            "이 경계",
+            "this feature",
+            "this structure",
+            "this setup",
+            "this change",
+            "this approach",
+            "the change",
+        )
         messages = [
             {"role": "system", "content": system},
             {
@@ -826,6 +877,38 @@ class OllamaGenerationProvider:
                 raise ValueError(
                     f"{post_type} must use one connected four-part narrative: "
                     f"{required_roles}"
+                )
+            normalized_topic = re.sub(
+                r"\s+", " ", draft.technology_or_method.strip().casefold()
+            )
+            normalized_problem = re.sub(
+                r"\s+", " ", draft.reader_problem_or_goal.strip().casefold()
+            )
+            if normalized_topic not in evidence_text:
+                raise ValueError(
+                    "technology_or_method must copy a concrete evidence-supported phrase"
+                )
+            if normalized_problem not in evidence_text:
+                raise ValueError(
+                    "reader_problem_or_goal must copy a searchable evidence-supported phrase"
+                )
+            opening = f"{draft.posts[0].content_ko}\n{draft.posts[0].content_en}".casefold()
+            if normalized_topic not in opening and normalized_problem not in opening:
+                raise ValueError(
+                    "observation must explicitly name the technology/method or searchable problem"
+                )
+            if any(phrase.casefold() in opening for phrase in forbidden_contextless_openings):
+                raise ValueError(
+                    "observation used project-insider shorthand instead of naming the subject"
+                )
+            if not set(draft.outcome_source_ids).issubset(allowed_ids):
+                raise ValueError("developer feed outcome invented a source ID")
+            if draft.outcome_status != "not_measured" and not any(
+                source_scopes.get(source_id) == "verified_result"
+                for source_id in draft.outcome_source_ids
+            ):
+                raise ValueError(
+                    "a measured outcome requires at least one verified_result source"
                 )
             for post in draft.posts:
                 if not set(post.source_ids).issubset(allowed_ids):
@@ -880,7 +963,7 @@ class OllamaGenerationProvider:
                     "developer feed thread is too terse for the narrative contract"
                 )
             meaning = draft.posts[1]
-            korean_explanation_marker = any(
+            korean_procedure_marker = any(
                 marker in meaning.content_ko
                 for marker in (
                     "때문",
@@ -893,9 +976,15 @@ class OllamaGenerationProvider:
                     "기준",
                     "즉",
                     "반면",
+                    "설정",
+                    "명령",
+                    "순서",
+                    "먼저",
+                    "확인",
+                    "비교",
                 )
             )
-            english_explanation_marker = any(
+            english_procedure_marker = any(
                 marker in meaning.content_en.casefold()
                 for marker in (
                     "because",
@@ -907,51 +996,59 @@ class OllamaGenerationProvider:
                     "boundary",
                     "instead",
                     " so ",
+                    "set ",
+                    "command",
+                    "first",
+                    "check",
+                    "compare",
+                    "then ",
                 )
             )
-            if not korean_explanation_marker or not english_explanation_marker:
+            if not korean_procedure_marker or not english_procedure_marker:
                 raise ValueError(
-                    "meaning must explain the supported mechanism, reason, or distinction "
-                    "in both languages"
+                    "meaning must give a concrete procedure and mechanism in both languages"
                 )
             possibility = draft.posts[2]
-            korean_action_marker = any(
-                marker in possibility.content_ko
-                for marker in (
-                    "확인",
-                    "먼저",
-                    "보면",
-                    "하면",
-                    "방법",
-                    "재현",
-                    "점검",
-                    "비교",
-                    "분리",
-                    "설정",
-                    "시도",
-                    "실험",
-                )
-            )
-            english_action_marker = any(
-                marker in possibility.content_en.casefold()
-                for marker in (
-                    "check",
-                    "first",
-                    "look for",
-                    "if ",
-                    "when ",
-                    "verify",
-                    "compare",
-                    "separate",
-                    "set ",
-                    "use ",
-                    "try",
-                )
-            )
-            if not korean_action_marker or not english_action_marker:
+            outcome_markers = {
+                "verified_effect": (
+                    ("줄었", "늘었", "빨라", "느려", "통과", "해결", "개선", "성공", "효과"),
+                    (
+                        "decreased",
+                        "increased",
+                        "faster",
+                        "slower",
+                        "passed",
+                        "resolved",
+                        "improved",
+                        "succeeded",
+                        "effect",
+                    ),
+                ),
+                "verified_no_effect": (
+                    ("효과가 없", "차이가 없", "변화가 없", "개선되지 않", "실패"),
+                    ("no effect", "no difference", "no change", "did not improve", "failed"),
+                ),
+                "mixed": (
+                    ("대신", "반면", "늘었지만", "줄었지만", "혼합", "트레이드오프"),
+                    ("but", "while", "trade-off", "tradeoff", "mixed"),
+                ),
+                "not_measured": (
+                    ("측정하지 않", "측정 전", "검증되지 않", "효과는 아직", "결과는 아직"),
+                    (
+                        "not measured",
+                        "not verified",
+                        "has not been measured",
+                        "effect is unknown",
+                    ),
+                ),
+            }
+            korean_outcomes, english_outcomes = outcome_markers[draft.outcome_status]
+            if not any(marker in possibility.content_ko for marker in korean_outcomes) or not any(
+                marker in possibility.content_en.casefold() for marker in english_outcomes
+            ):
                 raise ValueError(
-                    "possibility must give a concrete check, method, example, or bounded "
-                    "application in both languages"
+                    "possibility must state the selected measured, no-effect, mixed, or "
+                    "not-measured outcome in both languages"
                 )
             afterthought = draft.posts[3]
             korean_caveat_marker = any(
@@ -1018,9 +1115,12 @@ class OllamaGenerationProvider:
                             "complete corrected object once. Shorten prose to the fixed limits "
                             "without dropping supported meaning and never invent a source ID. "
                             "Keep exactly four ordered roles and combine at least two sentences "
-                            "per reply. Make meaning explain how or why the point works, "
-                            "possibility give a concrete check or application, and afterthought "
-                            "state a caveat or scope limit. Remove diary-like progress narration, "
+                            "per reply. Name an evidence-supported technology/method and "
+                            "searchable problem in observation. Put the actual steps and mechanism "
+                            "in meaning, the honest measured/no-effect/mixed/not-measured result "
+                            "in "
+                            "possibility, and the reproduction boundary in afterthought. Remove "
+                            "diary narration, "
                             "personal resolutions, belief statements, and grand conclusions. "
                             "Rewrite Korean independently in everyday 해요/네요-style speech; "
                             "remove 합니다/습니다 endings and generic translated editorial jargon. "
