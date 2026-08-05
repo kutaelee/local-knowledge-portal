@@ -207,20 +207,18 @@ describe the actual information that changed, what was learned, and supported re
 cites exact source IDs in metadata and a deterministic validator rejects invented IDs. One repair
 is allowed for schema, citation, or length errors; a second failure publishes nothing.
 
-Each update is stored as one four-part bilingual X-style narrative: observed change, practical
-meaning, a clearly future-tense possibility, and a casual afterthought from the workstation
-developer. The persona sounds like a developer sharing recent tinkering with a small circle, not a
-manifesto or personal philosophy. Korean is drafted first as an informal firsthand work note,
-uses ordinary `해요/했어요/됐네요` cadence instead of report-style `합니다/습니다`, and rejects
-generic translated editorial jargon. Vague product-language padding such as “가독성”, “소통
-도구”, or “확장 가능성” also fails validation; the reply must name a concrete action, awkward
-moment, or next experiment. English is independently localized from the same facts instead of
-being translated sentence by sentence. The closing afterthought may describe a small reaction or
-annoyance from that work session, but must not introduce a principle, duty, future policy, or
-self-imposed rule.
+Each update is stored as one four-part bilingual X-style technical thread: a reader-facing finding
+or symptom, a plain-language mechanism or reason, a concrete diagnostic/application, and a scope
+caveat or failure condition. The editor chooses the evidence-supported form: troubleshooting,
+technology explainer, or reusable practical lesson. It must teach another developer something they
+can understand, check, or reuse; a work diary, daily status, release note, personal resolution, or
+unsupported fix fails validation. Korean is drafted first with ordinary `해요/했어요/됐네요`
+cadence instead of report-style `합니다/습니다`, and generic translated editorial jargon also
+fails. English is independently localized from the same facts instead of being translated sentence
+by sentence.
 Every reply combines two or three sentences and carries enough context to avoid release-note
-fragments. Possibilities are recorded as `claim_mode=proposal` and afterthoughts as
-`claim_mode=personal_aside`; neither is promoted as verified fact. Korean posts are limited to 140
+fragments. Practical steps are recorded as `claim_mode=practical_guidance` and closing boundaries as
+`claim_mode=scope_caveat`; neither expands the cited evidence. Korean posts are limited to 140
 Unicode code points and English posts to 280. The UI defaults to Korean.
 The source manifest records journal/document/version provenance, the embedding revision/time, and
 the exact Gemma model digest and prompt version. A screenshot is only recommended when a source
@@ -228,8 +226,9 @@ explicitly identifies a stable non-secret visual artifact; capture remains a sep
 action.
 
 At 07:30 `Asia/Seoul`, the daily entrypoint creates the idempotent `daily:YYYY-MM-DD`
-synthesis for the previous local calendar day. A day with no verified update gets a deterministic
-transparent closeout without loading the model.
+synthesis for the previous local calendar day. It selects the strongest reusable lesson instead of
+narrating the day. A day with no shareable verified update publishes no placeholder post and does
+not load the model.
 
 ```powershell
 .\scripts\install-nightly-maintenance-schedule.ps1
