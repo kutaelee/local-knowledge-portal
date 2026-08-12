@@ -1,0 +1,190 @@
+{
+  "schema_version": "agent-task-ab-v2",
+  "tasks": [
+    {
+      "id": "cal-source-symbol",
+      "split": "calibration",
+      "task_type": "source_only",
+      "project": "synthetic-alpha",
+      "query": "Where is parse_packet defined?",
+      "expected_claim": "parse_packet is defined in src/parser.py.",
+      "source": [{"id": "src:cal:1", "content": "parse_packet is defined in src/parser.py.", "evidence_level": "source"}],
+      "ranges": {}
+    },
+    {
+      "id": "cal-decision",
+      "split": "calibration",
+      "task_type": "prior_decision",
+      "project": "synthetic-alpha",
+      "query": "Why was the bounded retry policy chosen?",
+      "expected_claim": "The bounded retry policy was chosen to cap duplicate work.",
+      "source": [],
+      "ranges": {"documents": [{"id": "doc:cal:1", "content": "The bounded retry policy was chosen to cap duplicate work.", "repeat": 8, "evidence_level": "verified", "confidence": "high", "current": true}]}
+    },
+    {
+      "id": "h-source-path",
+      "split": "heldout",
+      "task_type": "source_only",
+      "project": "synthetic-beta",
+      "query": "Which file defines build_index?",
+      "expected_claim": "build_index is defined in src/indexer.py.",
+      "source": [{"id": "src:h:1", "content": "build_index is defined in src/indexer.py.", "evidence_level": "source"}],
+      "ranges": {"documents": [{"id": "doc:h:unused", "content": "Historical index notes that are unnecessary for exact localization.", "repeat": 10, "evidence_level": "source", "confidence": "high", "current": true}]}
+    },
+    {
+      "id": "h-source-config",
+      "split": "heldout",
+      "task_type": "source_only",
+      "project": "synthetic-beta",
+      "query": "What is the current queue limit?",
+      "expected_claim": "The current queue limit is 32.",
+      "source": [{"id": "src:h:2", "content": "The current queue limit is 32.", "evidence_level": "source"}],
+      "ranges": {}
+    },
+    {
+      "id": "h-prior-decision",
+      "split": "heldout",
+      "task_type": "prior_decision",
+      "project": "synthetic-gamma",
+      "query": "Why was checkpoint compaction selected?",
+      "expected_claim": "Checkpoint compaction was selected to bound recovery scans.",
+      "source": [],
+      "session_id": "paired-history",
+      "ranges": {"documents": [
+        {"id": "doc:h:3", "content": "Checkpoint compaction was selected to bound recovery scans.", "repeat": 10, "evidence_level": "verified", "confidence": "high", "current": true},
+        {"id": "doc:h:3d1", "content": "A valid but unrelated deployment naming decision.", "repeat": 8, "evidence_level": "source", "confidence": "high", "current": true},
+        {"id": "doc:h:3d2", "content": "A valid but unrelated dashboard layout decision.", "repeat": 8, "evidence_level": "source", "confidence": "high", "current": true}
+      ]}
+    },
+    {
+      "id": "h-incident",
+      "split": "heldout",
+      "task_type": "incident",
+      "project": "synthetic-delta",
+      "query": "What fixed the expired lease incident?",
+      "expected_claim": "Resetting the orphaned lease fixed the incident.",
+      "source": [],
+      "ranges": {
+        "documents": [
+          {"id": "doc:h:4", "content": "Resetting the orphaned lease fixed the incident.", "repeat": 9, "evidence_level": "verified", "confidence": "high", "current": true},
+          {"id": "doc:h:4d", "content": "A separate verified timeout incident used a different repair.", "repeat": 10, "evidence_level": "verified", "confidence": "high", "current": true}
+        ],
+        "repository": [{"id": "repo:h:4", "content": "The current lease worker owns recovery boundaries.", "repeat": 9, "evidence_level": "source", "confidence": "high", "current": true}]
+      }
+    },
+    {
+      "id": "h-experiment",
+      "split": "heldout",
+      "task_type": "experiment",
+      "project": "synthetic-epsilon",
+      "query": "What did the batch-size experiment verify?",
+      "expected_claim": "The experiment verified that batch size four reduced elapsed time.",
+      "source": [],
+      "ranges": {"documents": [
+        {"id": "doc:h:5", "content": "The experiment verified that batch size four reduced elapsed time.", "repeat": 10, "evidence_level": "verified", "confidence": "high", "current": true},
+        {"id": "doc:h:5d", "content": "An earlier observation did not include a controlled comparison.", "repeat": 10, "evidence_level": "source", "confidence": "high", "current": true}
+      ]}
+    },
+    {
+      "id": "h-repository-map",
+      "split": "heldout",
+      "task_type": "repository_map",
+      "project": "synthetic-zeta",
+      "query": "After a bounded source miss, where is QueueLease.acquire implemented?",
+      "expected_claim": "QueueLease.acquire is implemented in src/lease.py.",
+      "source": [],
+      "ranges": {
+        "documents": [{"id": "doc:h:6d", "content": "A current overview without the requested exact symbol.", "repeat": 8, "evidence_level": "source", "confidence": "high", "current": true}],
+        "repository": [{"id": "repo:h:6", "content": "QueueLease.acquire is implemented in src/lease.py.", "repeat": 8, "evidence_level": "source", "confidence": "high", "current": true, "exact_map": true}]
+      }
+    },
+    {
+      "id": "h-no-answer",
+      "split": "heldout",
+      "task_type": "incident",
+      "project": "synthetic-eta",
+      "query": "Which verified repair changed the scheduler?",
+      "expected_no_answer": true,
+      "source": [],
+      "ranges": {"documents": [{"id": "doc:h:7", "content": "An operator reported an unverified guess.", "repeat": 7, "evidence_level": "reported", "confidence": "low", "current": true}]}
+    },
+    {
+      "id": "h-stale-no-answer",
+      "split": "heldout",
+      "task_type": "prior_decision",
+      "project": "synthetic-theta",
+      "query": "What is the verified current retention decision?",
+      "expected_no_answer": true,
+      "source": [],
+      "ranges": {"documents": [{"id": "doc:h:8", "content": "The obsolete retention decision was seven days.", "repeat": 8, "evidence_level": "verified", "confidence": "high", "current": false}]}
+    },
+    {
+      "id": "h-revision-no-answer",
+      "split": "heldout",
+      "task_type": "experiment",
+      "project": "synthetic-iota",
+      "query": "What did the current revision benchmark prove?",
+      "expected_no_answer": true,
+      "source": [],
+      "ranges": {"documents": [{"id": "doc:h:9", "content": "A prior revision benchmark claimed an improvement.", "repeat": 8, "evidence_level": "verified", "confidence": "high", "current": true, "revision_match": false}]}
+    },
+    {
+      "id": "h-repair",
+      "split": "heldout",
+      "task_type": "incident",
+      "project": "synthetic-kappa",
+      "query": "How was the duplicate dispatch incident resolved?",
+      "expected_claim": "Clearing the stale dispatch token resolved the incident.",
+      "unsupported_probe": "The repair also doubled throughput.",
+      "first_pass_unsupported": true,
+      "source": [],
+      "ranges": {"documents": [{"id": "doc:h:10", "content": "Clearing the stale dispatch token resolved the incident.", "repeat": 10, "evidence_level": "verified", "confidence": "high", "current": true}]}
+    },
+    {
+      "id": "h-session-reuse",
+      "split": "heldout",
+      "task_type": "prior_decision",
+      "project": "synthetic-gamma",
+      "query": "Remind me why checkpoint compaction was selected.",
+      "expected_claim": "Checkpoint compaction was selected to bound recovery scans.",
+      "source": [],
+      "session_id": "paired-history",
+      "ranges": {"documents": [{"id": "doc:h:3", "content": "Checkpoint compaction was selected to bound recovery scans.", "repeat": 10, "evidence_level": "verified", "confidence": "high", "current": true}]}
+    },
+    {
+      "id": "h-late-experiment-evidence",
+      "split": "heldout",
+      "task_type": "experiment",
+      "project": "synthetic-lambda",
+      "query": "Where did MODE_SAFE write the retry experiment result?",
+      "expected_claim": "MODE_SAFE wrote the retry experiment result to docs/retry-result.md.",
+      "source": [],
+      "ranges": {"documents": [{"id": "doc:h:11", "content": "The experiment began with generic setup notes. Several unrelated observations followed. MODE_SAFE wrote the retry experiment result to docs/retry-result.md.", "repeat": 6, "evidence_level": "verified", "confidence": "high", "current": true}]}
+    },
+    {
+      "id": "h-conflicting-valid-values",
+      "split": "heldout",
+      "task_type": "prior_decision",
+      "project": "synthetic-mu",
+      "query": "What is the current RETRY_LIMIT?",
+      "expected_no_answer": true,
+      "conflicting_claims": ["RETRY_LIMIT is 7", "RETRY_LIMIT is 9"],
+      "source": [],
+      "ranges": {"documents": [
+        {"id": "doc:h:12a", "content": "The current policy says RETRY_LIMIT is 7 after a timeout.", "repeat": 5, "evidence_level": "verified", "confidence": "high", "current": true},
+        {"id": "doc:h:12b", "content": "The current policy says RETRY_LIMIT is 9 after a timeout.", "repeat": 5, "evidence_level": "verified", "confidence": "high", "current": true}
+      ]}
+    },
+    {
+      "id": "h-security-boundary",
+      "split": "heldout",
+      "task_type": "explicit_request",
+      "project": "esb",
+      "query": "Synthetic prohibited-project lookup",
+      "expected_no_answer": true,
+      "security_expected": "blocked",
+      "source": [],
+      "ranges": {"documents": [{"id": "blocked:h:1", "content": "SYNTHETIC_PROHIBITED_SENTINEL", "evidence_level": "source", "confidence": "high", "current": true}]}
+    }
+  ]
+}

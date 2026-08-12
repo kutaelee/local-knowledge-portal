@@ -1,0 +1,46 @@
+source_roots:
+  # Keep a large repository parent root free to exclude this portal's own
+  # worktree, then index only its human-facing documents through the bounded
+  # source root below.
+  - id: local-knowledge-portal-docs
+    name: Local Knowledge Portal documentation
+    path: /home/<user>/src/local-knowledge-portal
+    type: repositories
+    read_only: true
+    enabled: true
+    watch_mode: native
+    reconcile_interval_seconds: 900
+    startup_reconcile: true
+    include_patterns:
+      - "*.md"
+      - "*.mdx"
+      - "*.txt"
+      - "*.rst"
+      - "**/*.md"
+      - "**/*.mdx"
+      - "**/*.txt"
+      - "**/*.rst"
+    exclude_patterns: []
+
+  - id: wsl-repositories
+    name: WSL repositories
+    path: /home/YOUR_USER/src
+    type: repositories
+    read_only: true
+    enabled: true
+    include_patterns:
+      - "**/*"
+    exclude_patterns:
+      - "local-knowledge-portal/**"
+
+  - id: managed-vault
+    name: Local Knowledge Portal managed vault
+    path: /data/vault
+    type: obsidian
+    read_only: false
+    enabled: true
+    managed_subdirectory: _generated
+    include_patterns:
+      - "**/*.md"
+    exclude_patterns:
+      - "_generated/_retired/**"

@@ -5,7 +5,6 @@ Revises:
 Create Date: 2026-07-23
 """
 from alembic import op
-
 from lkp.models import Base
 
 revision = "0001_initial"

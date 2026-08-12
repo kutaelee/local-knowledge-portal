@@ -1,0 +1,378 @@
+name: local-knowledge-portal
+
+x-app: &app
+  image: local-knowledge-portal-app:${LKP_IMAGE_TAG:-wsl}
+  build:
+    context: ${LKP_REPO_PATH:?set LKP_REPO_PATH}
+    dockerfile: infra/docker/Dockerfile.api
+  env_file: ${LKP_ENV_FILE:-/mnt/c/Docker/local-knowledge-portal/.env}
+  environment:
+    LKP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    LKP_SOURCE_ROOTS_CONFIG: /config/source-roots.yaml
+    LKP_SETTINGS_CONFIG: /config/settings.yaml
+    LKP_RUNTIME_DIR: /data/runtime
+    LKP_INGEST_DIR: /data/ingest
+    LKP_HOOK_SPOOL_DIR: /hook-spool
+    LKP_LOCAL_LLM_SPOOL_DIR: /data/ingest/local-llm-spool
+    LKP_HOOK_SPOOL_FALLBACK_DIR: /fallback
+    LKP_CODEX_SESSIONS_DIR: /codex-sessions
+    LKP_VAULT_DIR: /data/vault
+    LKP_BACKUP_DIR: /backups
+    LKP_OLLAMA_BASE_URL: ${LKP_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    LKP_GENERATION_BASE_URL: ${LKP_GENERATION_BASE_URL:-http://host.docker.internal:11434}
+    LKP_EMBEDDING_BATCH_SIZE: ${LKP_EMBEDDING_BATCH_SIZE:-1}
+    LKP_EMBEDDING_BATCH_COOLDOWN_SECONDS: ${LKP_EMBEDDING_BATCH_COOLDOWN_SECONDS:-1}
+    LKP_EMBEDDING_REQUEST_TIMEOUT_SECONDS: ${LKP_EMBEDDING_REQUEST_TIMEOUT_SECONDS:-90}
+    LKP_EMBEDDING_INPUT_MAX_CHARS: ${LKP_EMBEDDING_INPUT_MAX_CHARS:-2400}
+    LKP_EMBEDDING_TIMEOUT_CIRCUIT_THRESHOLD: ${LKP_EMBEDDING_TIMEOUT_CIRCUIT_THRESHOLD:-3}
+    LKP_EMBEDDING_TIMEOUT_CIRCUIT_WINDOW_SECONDS: ${LKP_EMBEDDING_TIMEOUT_CIRCUIT_WINDOW_SECONDS:-3600}
+    LKP_EMBEDDING_RUNTIME_MODE: ${LKP_EMBEDDING_RUNTIME_MODE:-enabled}
+    LKP_EMBEDDING_MAX_CHUNKS_PER_DOCUMENT: ${LKP_EMBEDDING_MAX_CHUNKS_PER_DOCUMENT:-128}
+    LKP_EMBEDDING_MAX_CHARS_PER_DOCUMENT: ${LKP_EMBEDDING_MAX_CHARS_PER_DOCUMENT:-250000}
+    LKP_SEMANTIC_HIGH_CONFIDENCE_SIMILARITY: ${LKP_SEMANTIC_HIGH_CONFIDENCE_SIMILARITY:-0.6}
+    LKP_QUERY_EMBEDDING_CACHE_SIZE: ${LKP_QUERY_EMBEDDING_CACHE_SIZE:-512}
+    LKP_QUERY_EMBEDDING_CACHE_TTL_SECONDS: ${LKP_QUERY_EMBEDDING_CACHE_TTL_SECONDS:-86400}
+    LKP_QUERY_EMBEDDING_TIMEOUT_SECONDS: ${LKP_QUERY_EMBEDDING_TIMEOUT_SECONDS:-5}
+    # Do not wake a CPU-only embedding model merely because the API restarts.
+    # A GPU-scheduled semantic path can opt in explicitly later.
+    LKP_QUERY_EMBEDDING_PREWARM: ${LKP_QUERY_EMBEDDING_PREWARM:-false}
+    LKP_SEARCH_STATEMENT_TIMEOUT_MS: ${LKP_SEARCH_STATEMENT_TIMEOUT_MS:-5000}
+    LKP_GPU_SCHEDULER_BASE_URL: ${LKP_GPU_SCHEDULER_BASE_URL:-http://host.docker.internal:8790}
+    LKP_GPU_SCHEDULER_TIMEOUT_SECONDS: ${LKP_GPU_SCHEDULER_TIMEOUT_SECONDS:-2}
+    LKP_GPU_SCHEDULER_CONTROL_TOKEN: ${LKP_GPU_SCHEDULER_CONTROL_TOKEN:-}
+    LKP_COMFYUI_BRIDGE_HEALTH_URL: ${LKP_COMFYUI_BRIDGE_HEALTH_URL:-http://host.docker.internal:8188/gpuq_bridge/health}
+    LKP_REPOSITORY_EMBEDDING_MODE: ${LKP_REPOSITORY_EMBEDDING_MODE:-docs_only}
+    LKP_PIPELINE_VERSION: ${LKP_PIPELINE_VERSION:-1.2.0}
+    LKP_WORKER_JOB_COOLDOWN_SECONDS: ${LKP_WORKER_JOB_COOLDOWN_SECONDS:-1}
+    LKP_WORKER_ID: ${LKP_WORKER_ID:-worker-service:primary}
+    LKP_WORKER_BURST_JOBS: ${LKP_WORKER_BURST_JOBS:-20}
+    LKP_WORKER_BURST_COOLDOWN_SECONDS: ${LKP_WORKER_BURST_COOLDOWN_SECONDS:-15}
+    LKP_WORKER_LEXICAL_JOB_COOLDOWN_SECONDS: ${LKP_WORKER_LEXICAL_JOB_COOLDOWN_SECONDS:-0.05}
+    LKP_WORKER_LEXICAL_BURST_JOBS: ${LKP_WORKER_LEXICAL_BURST_JOBS:-200}
+    LKP_WORKER_LEXICAL_BURST_COOLDOWN_SECONDS: ${LKP_WORKER_LEXICAL_BURST_COOLDOWN_SECONDS:-2}
+    LKP_WORKER_PAUSE_FILE: /data/runtime/embedding.pause
+    LKP_WORKER_PAUSE_POLL_SECONDS: ${LKP_WORKER_PAUSE_POLL_SECONDS:-5}
+    LKP_WATCH_FORCE_POLLING: ${LKP_WATCH_FORCE_POLLING:-false}
+    LKP_WATCH_POLLING_ROOTS: ${LKP_WATCH_POLLING_ROOTS:-/data/vault}
+    LKP_WATCH_POLL_DELAY_MS: ${LKP_WATCH_POLL_DELAY_MS:-2000}
+    LKP_WATCH_CPU_WARNING_PERCENT: ${LKP_WATCH_CPU_WARNING_PERCENT:-50}
+    LKP_WATCH_CPU_WARNING_SAMPLES: ${LKP_WATCH_CPU_WARNING_SAMPLES:-3}
+    LKP_WATCH_CPU_GRACE_SECONDS: ${LKP_WATCH_CPU_GRACE_SECONDS:-60}
+  volumes:
+    - ${LKP_CONFIG_ROOT:?set LKP_CONFIG_ROOT}:/config:ro
+    - ${LKP_DATA_ROOT:?set LKP_DATA_ROOT}:/data
+    - ${LKP_BACKUP_ROOT:?set LKP_BACKUP_ROOT}:/backups
+    - ${LKP_REPO_PATH:?set LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
+  networks: [backend]
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg18-trixie@sha256:b7337db8fe39d12fe8ecb0003c72680f24479813a744b43154eee6f2eab5a5f3
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --data-checksums
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [backend]
+
+  ollama:
+    image: ollama/ollama:0.32.1@sha256:6345fbc18bd73a1e16404be681dbc6fd291a027cab43ed541abe78c4c81051b0
+    profiles: ["legacy-ollama"]
+    restart: unless-stopped
+    cpus: "${LKP_OLLAMA_CPUS:-1.0}"
+    mem_limit: ${LKP_OLLAMA_MEMORY_LIMIT:-6g}
+    pids_limit: 256
+    environment:
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_MAX_QUEUE: "8"
+      OLLAMA_KEEP_ALIVE: ${LKP_OLLAMA_KEEP_ALIVE:-24h}
+    volumes:
+      - ${LKP_MODEL_ROOT:?set LKP_MODEL_ROOT}:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+    networks: [backend]
+
+  ollama-model:
+    image: ollama/ollama:0.32.1@sha256:6345fbc18bd73a1e16404be681dbc6fd291a027cab43ed541abe78c4c81051b0
+    profiles: ["legacy-ollama"]
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["OLLAMA_HOST=http://ollama:11434 ollama pull qwen3-embedding:0.6b"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks: [backend]
+
+  ollama-generation:
+    image: ollama/ollama:0.32.1@sha256:6345fbc18bd73a1e16404be681dbc6fd291a027cab43ed541abe78c4c81051b0
+    profiles: ["legacy-ollama"]
+    restart: unless-stopped
+    gpus: all
+    cpus: "${LKP_GENERATION_OLLAMA_CPUS:-2.0}"
+    mem_limit: ${LKP_GENERATION_OLLAMA_MEMORY_LIMIT:-16g}
+    pids_limit: 256
+    environment:
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_MAX_QUEUE: "1"
+      OLLAMA_KEEP_ALIVE: ${LKP_GENERATION_KEEP_ALIVE:-2m}
+      OLLAMA_MODELS: /model-store/generation/models
+    volumes:
+      - ${LKP_MODEL_ROOT:?set LKP_MODEL_ROOT}:/model-store
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+    networks: [backend]
+
+  ollama-generation-model:
+    image: ollama/ollama:0.32.1@sha256:6345fbc18bd73a1e16404be681dbc6fd291a027cab43ed541abe78c4c81051b0
+    profiles: ["legacy-ollama"]
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "OLLAMA_HOST=http://ollama-generation:11434 ollama pull ${LKP_GENERATION_MODEL:-gemma4:e4b}"
+    depends_on:
+      ollama-generation:
+        condition: service_healthy
+    networks: [backend]
+
+  ollama-embedding-batch:
+    image: ollama/ollama:0.32.1@sha256:6345fbc18bd73a1e16404be681dbc6fd291a027cab43ed541abe78c4c81051b0
+    profiles: ["legacy-ollama"]
+    restart: "no"
+    gpus: all
+    cpus: "${LKP_GPU_EMBEDDING_OLLAMA_CPUS:-1.0}"
+    mem_limit: ${LKP_GPU_EMBEDDING_OLLAMA_MEMORY_LIMIT:-4g}
+    pids_limit: 128
+    environment:
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_MAX_QUEUE: "1"
+      OLLAMA_KEEP_ALIVE: "0"
+    volumes:
+      - ${LKP_MODEL_ROOT:?set LKP_MODEL_ROOT}:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks: [backend]
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["uvicorn", "lkp.main:app", "--host", "0.0.0.0", "--port", "8010"]
+    cpus: "${LKP_API_CPUS:-1.0}"
+    mem_limit: 1g
+    pids_limit: 256
+    ports:
+      - "127.0.0.1:8010:8010"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "lkp_indexer.worker_service"]
+    cpus: "${LKP_WORKER_CPUS:-1.0}"
+    mem_limit: ${LKP_WORKER_MEMORY_LIMIT:-1g}
+    pids_limit: 256
+    volumes:
+      - ${LKP_CONFIG_ROOT}:/config:ro
+      - ${LKP_DATA_ROOT}:/data
+      - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_SOURCE_ROOT:?set LKP_SOURCE_ROOT}:${LKP_SOURCE_ROOT}:ro
+      - ${LKP_WINDOWS_REPOSITORY_ROOT:-/mnt/c/Dev/Repos}:/sources/windows-repositories:ro
+      - ${LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  watcher:
+    <<: *app
+    command: ["python", "-m", "lkp_indexer.watcher_service"]
+    cpus: "${LKP_WATCHER_CPUS:-0.5}"
+    mem_limit: 512m
+    pids_limit: 128
+    volumes:
+      - ${LKP_CONFIG_ROOT}:/config:ro
+      - ${LKP_DATA_ROOT}:/data
+      - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_SOURCE_ROOT}:${LKP_SOURCE_ROOT}:ro
+      - ${LKP_WINDOWS_REPOSITORY_ROOT:-/mnt/c/Dev/Repos}:/sources/windows-repositories:ro
+      - ${LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  hook-collector:
+    <<: *app
+    command: ["python", "-m", "lkp_indexer.hook_collector", "--watch"]
+    cpus: "${LKP_HOOK_COLLECTOR_CPUS:-0.5}"
+    mem_limit: 512m
+    pids_limit: 128
+    volumes:
+      - ${LKP_CONFIG_ROOT}:/config:ro
+      - ${LKP_DATA_ROOT}:/data
+      - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_HOOK_SPOOL_HOST_PATH:-/mnt/e/Data/LocalKnowledgePortal/ingest/codex-spool}:/hook-spool
+      - ${LKP_HOOK_FALLBACK_ROOT:?set LKP_HOOK_FALLBACK_ROOT}:/fallback
+      - ${LKP_CODEX_SESSIONS_HOST_PATH:?set LKP_CODEX_SESSIONS_HOST_PATH}:/codex-sessions:ro
+      - ${LKP_AI_ASSETS_ROOT:-/mnt/e/AI/Assets}:/sources/ai-assets:ro
+      - ${LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  developer-feed:
+    <<: *app
+    profiles: ["manual-developer-feed"]
+    command: ["python", "-m", "lkp_indexer.developer_feed"]
+    restart: "no"
+    cpus: "${LKP_DEVELOPER_FEED_CPUS:-0.5}"
+    mem_limit: 768m
+    pids_limit: 128
+    environment:
+      LKP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      LKP_SOURCE_ROOTS_CONFIG: /config/source-roots.yaml
+      LKP_SETTINGS_CONFIG: /config/settings.yaml
+      LKP_RUNTIME_DIR: /data/runtime
+      LKP_GENERATION_BASE_URL: ${LKP_GENERATION_BASE_URL:-http://host.docker.internal:11434}
+      LKP_DEVELOPER_FEED_MODEL: ${LKP_DEVELOPER_FEED_MODEL:-gemma4:12b}
+      LKP_DEVELOPER_FEED_MODEL_DIGEST: ${LKP_DEVELOPER_FEED_MODEL_DIGEST:-4eb23ef187e2c5462566d6a1d3bbbc2f1346d0b4327cbb66d58fffbcc9b2b05c}
+      LKP_DEVELOPER_FEED_DAILY_HOUR: "${LKP_DEVELOPER_FEED_DAILY_HOUR:-18}"
+      LKP_DEVELOPER_FEED_DAILY_SUMMARY_LAG_DAYS: "${LKP_DEVELOPER_FEED_DAILY_SUMMARY_LAG_DAYS:-0}"
+    volumes:
+      - ${LKP_CONFIG_ROOT}:/config:ro
+      - ${LKP_DATA_ROOT}:/data
+      - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  knowledge-curator:
+    <<: *app
+    profiles: ["manual-curation"]
+    command: ["python", "-m", "lkp_indexer.knowledge_curator", "--once"]
+    restart: "no"
+    gpus: all
+    cpus: "${LKP_KNOWLEDGE_CURATOR_CPUS:-0.5}"
+    mem_limit: 768m
+    pids_limit: 128
+    volumes:
+      - ${LKP_CONFIG_ROOT}:/config:ro
+      - ${LKP_DATA_ROOT}:/data
+      - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_SOURCE_ROOT}:${LKP_SOURCE_ROOT}:ro
+      - ${LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  project-article-curator:
+    <<: *app
+    profiles: ["manual-curation"]
+    command: ["python", "-m", "lkp_indexer.project_article"]
+    restart: "no"
+    cpus: "${LKP_KNOWLEDGE_CURATOR_CPUS:-0.5}"
+    mem_limit: 1024m
+    pids_limit: 128
+    volumes:
+      - ${LKP_CONFIG_ROOT}:/config:ro
+      - ${LKP_DATA_ROOT}:/data
+      - ${LKP_BACKUP_ROOT}:/backups
+      - ${LKP_SOURCE_ROOT}:${LKP_SOURCE_ROOT}:ro
+      - ${LKP_REPO_PATH}/pyproject.toml:/mount-guards/source-pyproject.toml:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  embedding-reindex:
+    <<: *app
+    profiles: ["manual-embedding"]
+    command: ["python", "-m", "lkp_indexer.embedding_reindex"]
+    restart: "no"
+    cpus: "${LKP_EMBEDDING_REINDEX_CPUS:-0.5}"
+    mem_limit: 768m
+    pids_limit: 128
+    environment:
+      # `environment` replaces the anchored mapping for this one-shot service.
+      # Keep the DB endpoint on the private Compose network; the host-only value
+      # in the operational env file is for Windows tools, not containers.
+      LKP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      LKP_SOURCE_ROOTS_CONFIG: /config/source-roots.yaml
+      LKP_SETTINGS_CONFIG: /config/settings.yaml
+      LKP_RUNTIME_DIR: /data/runtime
+      LKP_OLLAMA_BASE_URL: ${LKP_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      # CPU worker ingestion remains at its separately configured batch size.
+      # The RTX 5090 gpuq profile uses four inputs after the two-input baseline
+      # left the GPU underutilized. Timeout handling still splits recursively.
+      LKP_EMBEDDING_BATCH_SIZE: "${LKP_GPU_EMBEDDING_BATCH_SIZE:-4}"
+      LKP_EMBEDDING_BATCH_COOLDOWN_SECONDS: "${LKP_GPU_EMBEDDING_BATCH_COOLDOWN_SECONDS:-0.05}"
+      # Reuse the model only inside this gpuq-owned batch. Python unloads it in
+      # a finally block before the reservation exits.
+      LKP_EMBEDDING_KEEP_ALIVE: "2m"
+      LKP_EMBEDDING_TIMEOUT_CIRCUIT_BYPASS: "true"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    image: local-knowledge-portal-web:${LKP_IMAGE_TAG:-wsl}
+    build:
+      context: ${LKP_REPO_PATH}
+      dockerfile: infra/docker/Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_URL: http://127.0.0.1:8010
+    restart: unless-stopped
+    cpus: "${LKP_WEB_CPUS:-0.5}"
+    mem_limit: 512m
+    pids_limit: 128
+    ports:
+      - "127.0.0.1:3010:3010"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [backend]
+
+volumes:
+  postgres-data:
+
+networks:
+  backend: {}

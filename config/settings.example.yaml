@@ -12,13 +12,71 @@ worker:
   lease_seconds: 120
   max_attempts: 5
   retry_base_seconds: 2
+  embedding_batch_size: 1
+  embedding_batch_cooldown_seconds: 1
+  # A worker never waits indefinitely on a local CPU embedding request. Long
+  # chunks are represented deterministically (without changing source text).
+  embedding_request_timeout_seconds: 90
+  # Ordinary calls release VRAM immediately. gpuq batches override this to 2m
+  # and explicitly unload before their reservation exits.
+  embedding_keep_alive: "0"
+  embedding_input_max_chars: 2400
+  # Open a durable circuit after repeated provider timeouts. Documents continue
+  # through lexical indexing and advertise a deferred semantic state instead of
+  # repeatedly consuming CPU until a GPU-scheduled reindex is available.
+  embedding_timeout_circuit_threshold: 3
+  embedding_timeout_circuit_window_seconds: 3600
+  # Reserved for the one-shot gpuq runner only; never enable for normal
+  # worker or API containers.
+  embedding_timeout_circuit_bypass: false
+  # Set to deferred_gpu_recovery after a CPU thermal/timeout incident. This
+  # keeps lexical ingestion available and waits for the gpuq batch reindex.
+  embedding_runtime_mode: "enabled"
+  semantic_high_confidence_similarity: 0.6
+  query_embedding_cache_size: 512
+  query_embedding_cache_ttl_seconds: 86400
+  query_embedding_timeout_seconds: 30
+  # Keep false for the CPU-safe default. Enable only with a measured,
+  # scheduler-aware semantic runtime.
+  query_embedding_prewarm: false
+  search_statement_timeout_ms: 5000
+  embedding_max_chunks_per_document: 128
+  embedding_max_chars_per_document: 250000
+  repository_embedding_mode: "docs_only"
+  job_cooldown_seconds: 1
+  burst_jobs: 20
+  burst_cooldown_seconds: 15
+  pause_file: "runtime/embedding.pause"
 chunking:
   max_chars: 6000
   overlap_lines: 8
   parser_version: "markdown-it-py-4"
   chunker_version: "lkp-heading-symbol-v1"
 pipeline:
-  version: "1.0.0"
+  version: "1.2.0"
+  knowledge_value_policy: "purpose-aware-v2"
+codex_capture:
+  enabled: true
+  source: "%USERPROFILE%\\.codex\\sessions"
+  additional_homes: []
+  managed_output: "E:\\LocalKnowledgePortal\\vault\\_generated\\codex-sessions"
+  poll_seconds: 5
+  include_roles:
+    - user
+    - assistant
+  exclude_system_instructions: true
+  exclude_reasoning: true
+  exclude_tool_io: true
+  redact_likely_secrets: true
+generation:
+  provider: "disabled"
+  base_url: "http://127.0.0.1:11434"
+  model: ""
+  model_digest: "unresolved"
+  timeout_seconds: 120
+  max_input_chars: 40000
+  output: "E:\\LocalKnowledgePortal\\vault\\_generated\\codex-summaries"
+  required_for_ingestion: false
 search:
   default_top_k: 10
   minimum_similarity: 0.2

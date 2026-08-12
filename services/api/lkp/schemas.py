@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -10,9 +11,11 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=10, ge=1, le=100)
     source_root_id: UUID | None = None
     project: str | None = None
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    tag_mode: Literal["all", "any"] = "all"
     path_prefix: str | None = None
     embedding_revision: str | None = None
-    minimum_similarity: float = Field(default=0.2, ge=-1, le=1)
+    minimum_similarity: float = Field(default=0.5, ge=-1, le=1)
 
 
 class Provenance(BaseModel):
@@ -30,6 +33,8 @@ class Provenance(BaseModel):
 
 class SearchResult(BaseModel):
     title: str
+    project: str | None = None
+    tags: list[str] = Field(default_factory=list)
     heading_or_symbol: str | None
     snippet: str
     lexical_rank: float | None
@@ -52,3 +57,65 @@ class RagRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=30)
     max_chars: int = Field(default=12000, ge=1000, le=100000)
     filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvidenceInput(BaseModel):
+    evidence_type: str = Field(min_length=1, max_length=50)
+    claim: str = Field(min_length=1, max_length=4000)
+    locator: str | None = Field(default=None, max_length=4000)
+    reported_value: str | None = Field(default=None, max_length=4000)
+    verified_value: str | None = Field(default=None, max_length=4000)
+    exit_code: int | None = None
+    verified: bool = False
+    activity_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidateCreate(BaseModel):
+    category: Literal[
+        "error_resolution",
+        "implementation",
+        "custom_success",
+        "performance",
+        "operations",
+    ]
+    title: str = Field(min_length=1, max_length=500)
+    problem: str = Field(min_length=1, max_length=10000)
+    symptom: str = Field(min_length=1, max_length=10000)
+    root_cause: str = Field(min_length=1, max_length=10000)
+    solution: str = Field(min_length=1, max_length=10000)
+    reported_result: str | None = Field(default=None, max_length=10000)
+    verified_result: str | None = Field(default=None, max_length=10000)
+    evidence: list[EvidenceInput] = Field(default_factory=list, max_length=100)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidatePublish(BaseModel):
+    confirmation: Literal["HUMAN_APPROVED"]
+    reviewer: str = Field(default="local-user", min_length=1, max_length=100)
+
+
+class GpuQueueReorderRequest(BaseModel):
+    """Complete, optimistic-concurrency queue order from the local portal."""
+
+    job_ids: list[UUID] = Field(min_length=1, max_length=1000)
+
+
+class ServiceControlRequest(BaseModel):
+    confirmed: Literal[True]
+    confirmation_token: str = Field(min_length=20, max_length=128)
+
+
+class LocalChatCapture(BaseModel):
+    session_id: str = Field(min_length=1, max_length=100)
+    turn_id: str = Field(min_length=1, max_length=100)
+    project_key: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    model: str = Field(min_length=1, max_length=200)
+    user_message: str = Field(min_length=1, max_length=32_000)
+    assistant_message: str = Field(min_length=1, max_length=32_000)
+    occurred_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

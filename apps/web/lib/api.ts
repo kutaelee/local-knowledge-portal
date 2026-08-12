@@ -10,15 +10,116 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export type Metrics = {
+  generated_at: string;
   projects: number;
   documents: number;
   chunks: number;
+  semantic_chunks: number;
+  semantic_coverage: number;
+  embedding_runtime: {
+    open: boolean;
+    mode: "enabled" | "deferred_gpu_recovery";
+    reason: string | null;
+    recent_timeouts: number;
+    threshold: number;
+    window_seconds: number;
+    last_timeout_at: string | null;
+  };
+  document_breakdown: {
+    knowledge_documents: number;
+    code_files: number;
+    support_files: number;
+  };
+  pending_breakdown: {
+    initial_scan: number;
+    live_changes: number;
+  };
   jobs: Record<string, number>;
   oldest_pending_seconds: number;
+  queue_rate_per_hour: number;
+  queue_eta_seconds: number | null;
+  succeeded_last_3h: number;
+  failed_last_hour: number;
   workers: number;
+  worker_states: Record<string, number>;
+  latest_indexed_at: string | null;
+  latest_source_modified_at: string | null;
+  throughput: { bucket: string; count: number }[];
+  recent_documents: {
+    id: string;
+    filename: string;
+    relative_path: string;
+    project: string | null;
+    source_root: string;
+    modified_at: string;
+    indexed_at: string;
+    change_type: string;
+  }[];
+  source_roots: {
+    id: string;
+    name: string;
+    source_type: string;
+    document_count: number;
+    last_reconciled_at: string | null;
+    last_seen_at: string | null;
+  }[];
   embedding_model: string;
   embedding_revision: string;
   pipeline_version: string;
+  repository_embedding_mode: string;
+  query_embedding_cache: {
+    entries: number;
+    hits: number;
+    misses: number;
+    max_entries: number;
+    ttl_seconds: number;
+  };
+  search_latency_last_hour: Record<string, {
+    queries: number;
+    p50_ms: number;
+    p95_ms: number;
+  }>;
+};
+
+export type EmbeddingRecovery = {
+  runtime: Metrics["embedding_runtime"];
+  reindex: null | {
+    id: string;
+    status: string;
+    submitted_at: string | null;
+    started_at: string | null;
+    finished_at: string | null;
+    requested_vram_mb: number | null;
+    estimated_seconds: number | null;
+    priority: number | null;
+    scheduling_note: string | null;
+    error: string | null;
+  };
+  validation: null | {
+    state: "verified" | "failed" | "invalid";
+    checked_at?: string | null;
+    embedding_revision?: string | null;
+    reason?: string | null;
+    error_type?: string | null;
+    semantic?: {
+      result_count?: number | null;
+      vector_result_count?: number | null;
+      best_similarity?: number | null;
+      provenance_complete?: boolean | null;
+    } | null;
+    hybrid?: {
+      result_count?: number | null;
+      vector_result_count?: number | null;
+      best_similarity?: number | null;
+      provenance_complete?: boolean | null;
+    } | null;
+  };
+  progress: {
+    pending_documents: number;
+    pending_chunks: number;
+    embedding_revision: string;
+  };
+  scheduler_decision: string | null;
 };
 
 export type TreeItem = {
@@ -26,11 +127,14 @@ export type TreeItem = {
   source_root_id: string;
   project: string;
   path: string;
+  source_relative_path: string;
   state: string;
 };
 
 export type SearchResult = {
   title: string;
+  project: string | null;
+  tags: string[];
   heading_or_symbol: string | null;
   snippet: string;
   lexical_rank: number | null;

@@ -1,17 +1,24 @@
 # Retrieval baseline
 
-Executed 2026-07-23 against one bilingual fixture document, using keyword mode only. Semantic quality was not evaluated because Ollama and the production model were unavailable.
+Executed 2026-07-24 against a disposable dedicated PostgreSQL test database and four-document Korean,
+English, and code corpus. Semantic and hybrid modes used the real local Ollama
+`qwen3-embedding:0.6b` production revision; the script refuses the production database.
 
-| Metric | Baseline |
-|---|---:|
-| Hit Rate@5 | 0.75 |
-| Hit Rate@10 | 0.75 |
-| MRR | 0.75 |
-| no-answer correctness | 1.00 |
-| citation structural correctness | 1.00 |
+| Mode | Hit Rate@5 | Hit Rate@10 | MRR | Filter correctness | Citation correctness |
+|---|---:|---:|---:|---:|---:|
+| Keyword | 0.8889 | 0.8889 | 0.8889 | 1.00 | 1.00 |
+| Semantic | 1.00 | 1.00 | 0.8519 | 1.00 | 1.00 |
+| Hybrid | 1.00 | 1.00 | 0.9259 | 1.00 | 1.00 |
 
-Six of eight answerable queries retrieved the fixture at rank 1. The simple PostgreSQL configuration missed a Korean natural-language query and a similar-expression query. Both expected no-answer cases returned no results. Filename, partial path, exact phrase, lease error, work reason, and ADR decision queries succeeded.
+No-answer correctness and stale-document exclusion both passed. The nine answerable cases cover
+exact filename, partial path, Korean natural language, code symbol, exact error, work reason, ADR
+decision, similar expression, and change time. Hybrid improves the lexical baseline without
+hiding lexical/vector/fused score provenance.
 
-This is a baseline, not a release target. It demonstrates the expected weakness of simple lexical search and provides a non-regression reference for a later Ollama-backed hybrid evaluation. Citation correctness here means a canonical path, positive ordered line range, and 64-character content hash were present; it does not claim human semantic verification beyond the fixture.
+The baseline was rerun after project/tag filtering, trigram candidate indexes, and project overview
+materialization. Semantic and hybrid scores were unchanged from the previous baseline; keyword
+Hit@5, Hit@10, and MRR improved from 0.6667 to 0.8889. This is recorded as an observed baseline,
+not a preset success threshold.
 
-Reproduce with `uv run python tests/retrieval/evaluate.py`.
+Reproduce by setting `LKP_TEST_DATABASE_URL` to the dedicated test database and running
+`uv run python tests/retrieval/evaluate.py`.

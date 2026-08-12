@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 node_modules/
+.pnpm-store/
 .next/
 coverage/
 playwright-report/
@@ -15,5 +16,6 @@ config/settings.yaml
 runtime/
 *.log
 *.dump
+*.tsbuildinfo
 .DS_Store
 Thumbs.db

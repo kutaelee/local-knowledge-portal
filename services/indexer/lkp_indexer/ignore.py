@@ -6,8 +6,12 @@ DEFAULT_IGNORES = [
     ".git/",
     "node_modules/",
     ".next/",
+    # Next.js alternate build directories such as .next-prod-v24 are derived.
+    "**/.next*/",
+    ".turbo/",
     "dist/",
     "build/",
+    "out/",
     "coverage/",
     "target/",
     "bin/",
@@ -19,8 +23,27 @@ DEFAULT_IGNORES = [
     ".idea/",
     ".vscode/",
     "vendor/",
+    # Vendored source and generated documentation search bundles overwhelm
+    # retrieval without representing project decisions or operating knowledge.
+    "**/third_party/",
+    "**/docs/search/",
+    "**/docs/searchindex.js",
+    "**/docs/jquery.js",
+    "**/cutlass/test/unit/data/hashes/",
+    "**/old/review_imgs_debug.json",
     "tmp/",
     "temp/",
+    # Playwright/Chromium profiles contain LevelDB and browser caches, not logs
+    # intended for human retrieval.
+    "**/playwright-profile*/",
+    "**/.playwright/",
+    # Generated tokenizer payloads are model artifacts rather than human knowledge.
+    # They can contain tens of thousands of merge/vocabulary records and otherwise
+    # monopolize a single embedding job for many minutes.
+    "**/tokenizer_configs/",
+    "**/tokenizer/merges.txt",
+    "**/tokenizer/vocab.json",
+    "**/tokenizer/tokenizer.json",
 ]
 
 
@@ -43,3 +66,14 @@ class IgnoreRules:
         if is_dir:
             normalized += "/"
         return self.spec.match_file(normalized)
+
+
+class IncludeRules:
+    def __init__(self, patterns: list[str] | None = None) -> None:
+        self.spec = pathspec.PathSpec.from_lines(
+            "gitwildmatch",
+            patterns or ["**/*"],
+        )
+
+    def matches(self, relative_path: str) -> bool:
+        return self.spec.match_file(relative_path.replace("\\", "/"))

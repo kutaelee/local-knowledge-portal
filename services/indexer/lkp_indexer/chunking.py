@@ -48,6 +48,19 @@ CODE_EXTENSIONS = SUPPORTED_EXTENSIONS - {
     ".properties",
 }
 
+RETRIEVAL_FRONTMATTER_FIELDS = (
+    "project",
+    "tags",
+    "category",
+    "case_id",
+    "case_revision",
+    "evidence_gate",
+    "knowledge_value_tier",
+    "knowledge_value_labels",
+    "lifecycle_status",
+    "last_verified_at",
+)
+
 
 @dataclass(slots=True)
 class Chunk:
@@ -79,7 +92,29 @@ def _split_long(chunk: Chunk, max_chars: int = 6000, overlap_lines: int = 8) -> 
             size += len(lines[end]) + 1
             end += 1
         if end == cursor:
-            end += 1
+            oversized = lines[cursor]
+            for start_char in range(0, len(oversized), max_chars):
+                end_char = min(len(oversized), start_char + max_chars)
+                result.append(
+                    Chunk(
+                        index=0,
+                        kind=chunk.kind,
+                        content=oversized[start_char:end_char],
+                        start_line=chunk.start_line + cursor,
+                        end_line=chunk.start_line + cursor,
+                        heading_path=chunk.heading_path,
+                        symbol_name=chunk.symbol_name,
+                        language=chunk.language,
+                        metadata={
+                            **chunk.metadata,
+                            "oversized_line_segment": True,
+                            "start_char": start_char,
+                            "end_char": end_char,
+                        },
+                    )
+                )
+            cursor += 1
+            continue
         result.append(
             Chunk(
                 index=0,
@@ -100,6 +135,9 @@ def _split_long(chunk: Chunk, max_chars: int = 6000, overlap_lines: int = 8) -> 
 def chunk_markdown(text: str, max_chars: int = 6000) -> tuple[list[Chunk], dict]:
     parsed = frontmatter.loads(text)
     metadata = dict(parsed.metadata)
+    retrieval_metadata = {
+        key: metadata[key] for key in RETRIEVAL_FRONTMATTER_FIELDS if metadata.get(key) is not None
+    }
     lines = text.splitlines()
     headings: list[tuple[int, str]] = []
     starts: list[int] = [1]
@@ -125,6 +163,7 @@ def chunk_markdown(text: str, max_chars: int = 6000) -> tuple[list[Chunk], dict]
         )
     for index, chunk in enumerate(chunks):
         chunk.index = index
+        chunk.metadata = {**chunk.metadata, **retrieval_metadata}
     return chunks, metadata
 
 

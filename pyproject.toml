@@ -43,6 +43,7 @@ include = ["lkp*", "lkp_indexer*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = ["--import-mode=importlib"]
 markers = ["integration: requires PostgreSQL"]
 
 [tool.ruff]

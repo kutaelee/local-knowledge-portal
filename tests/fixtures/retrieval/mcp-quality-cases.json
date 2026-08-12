@@ -1,0 +1,57 @@
+{
+  "cases": [
+    {
+      "name": "esb-architecture-lifecycle",
+      "category": "representative",
+      "query": "ESB가 무엇을 하고 요청을 어떻게 처리하는지 구조와 라이프사이클",
+      "project": "esb",
+      "purpose": "architecture",
+      "answerable": true,
+      "expected_source_kind": "repository_analysis",
+      "expected_knowledge_types": ["ARCHITECTURE", "REPOSITORY_OVERVIEW", "COMPONENT_FLOW"]
+    },
+    {
+      "name": "embedding-cpu-safety-case",
+      "category": "representative",
+      "query": "local-knowledge-portal Ollama 임베딩이 CPU 1503%와 92도를 기록한 원인과 해결책",
+      "project": "local-knowledge-portal",
+      "purpose": "failure",
+      "answerable": true,
+      "expected_case_project": "local-knowledge-portal"
+    },
+    {
+      "name": "bride-identity-v52-cause",
+      "category": "same-symptom-different-cause",
+      "query": "wedding_picture v52 3000-step LoRA 신부 정체성 학습 실패의 원인",
+      "project": "wedding_picture",
+      "purpose": "failure",
+      "answerable": true,
+      "expected_case_project": "wedding_picture"
+    },
+    {
+      "name": "groom-4k-alignment-boundary",
+      "category": "boundary",
+      "query": "wedding_picture 신랑 얼굴 정합성 하락 원인이 화질이 아니라 4K SeedVR2 경로였는지",
+      "project": "wedding_picture",
+      "purpose": "failure",
+      "answerable": true,
+      "expected_case_project": "wedding_picture"
+    },
+    {
+      "name": "configuration-b-ab-success",
+      "category": "success-case",
+      "query": "wedding_picture 머리 크기 인물 거리 포즈가 개선된 A/B 설정 결과",
+      "project": "wedding_picture",
+      "purpose": "decision",
+      "answerable": true,
+      "expected_case_project": "wedding_picture"
+    },
+    {
+      "name": "unknown-protocol",
+      "category": "no-answer",
+      "query": "frobnicator ZXQ-991 lunar telemetry retention protocol",
+      "purpose": "general",
+      "answerable": false
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+FROM node:24.14.0-alpine@sha256:7fddd9ddeae8196abf4a3ef2de34e11f7b1a722119f91f28ddf1e99dcafdf114 AS build
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY apps/web/package.json apps/web/package.json
+RUN pnpm install --frozen-lockfile --filter @lkp/web...
+COPY apps/web apps/web
+ARG NEXT_PUBLIC_API_URL=http://127.0.0.1:8010
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+RUN pnpm --filter @lkp/web build
+
+FROM node:24.14.0-alpine@sha256:7fddd9ddeae8196abf4a3ef2de34e11f7b1a722119f91f28ddf1e99dcafdf114
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
+ENV NODE_ENV=production
+COPY --from=build /app/package.json /app/pnpm-workspace.yaml /app/pnpm-lock.yaml ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/apps/web ./apps/web
+EXPOSE 3010
+CMD ["pnpm", "--filter", "@lkp/web", "exec", "next", "start", "-H", "0.0.0.0", "-p", "3010"]

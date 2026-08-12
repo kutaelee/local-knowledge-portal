@@ -1,0 +1,808 @@
+from __future__ import annotations
+
+import hashlib
+import re
+import uuid
+from datetime import datetime, timezone
+from pathlib import PurePosixPath
+from typing import Any
+
+from lkp.models import (
+    ActivityEvent,
+    EvidenceRecord,
+    KnowledgeCandidate,
+    KnowledgeCase,
+    KnowledgeCaseRelation,
+    KnowledgeCaseRevision,
+    KnowledgeOccurrence,
+)
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+_EXECUTION_TOOLS = {
+    "bash",
+    "exec_command",
+    "powershell",
+    "pwsh",
+    "shell_command",
+    "terminal",
+}
+_EXECUTION_EVIDENCE_TYPES = {
+    "build_pass",
+    "command_failure",
+    "command_success",
+    "test_pass",
+}
+_PRESENTATION_ONLY_SUFFIXES = {".css", ".less", ".sass", ".scss"}
+_VALUE_HARNESS_REVISION = "knowledge-value-v1"
+_DEDUP_STOPWORDS = {
+    "and", "are", "for", "from", "that", "the", "this", "with",
+    "그리고", "대한", "에서", "으로", "작업", "변경", "검증", "완료",
+}
+
+
+def _normalize(value: str) -> str:
+    return " ".join(re.findall(r"\w+", value.casefold(), flags=re.UNICODE))
+
+
+def _hash(*values: str) -> str:
+    return hashlib.sha256("\x1f".join(_normalize(item) for item in values).encode()).hexdigest()
+
+
+def is_execution_tool(tool_name: str | None) -> bool:
+    normalized = (tool_name or "").rsplit(".", 1)[-1].casefold()
+    return normalized in _EXECUTION_TOOLS
+
+
+def dedup_key(category: str, problem: str, root_cause: str, solution: str) -> str:
+    return _hash(category, problem, root_cause, solution)
+
+
+def similarity_key(symptom: str) -> str:
+    return _hash(symptom)
+
+
+def knowledge_key_terms(*values: str, limit: int = 24) -> list[str]:
+    """Return stable, language-neutral candidate terms for vector prefiltering.
+
+    The terms narrow the database vector lookup; they do not decide that two
+    cases are equal. Korean is deliberately preserved as complete Unicode
+    tokens rather than forced through an unavailable morphology plugin.
+    """
+
+    counts: dict[str, int] = {}
+    for value in values:
+        for token in re.findall(r"[\w-]+", value.casefold(), flags=re.UNICODE):
+            normalized = token.strip("_-")
+            if len(normalized) < 2 or normalized in _DEDUP_STOPWORDS:
+                continue
+            counts[normalized] = counts.get(normalized, 0) + 1
+    return [
+        token
+        for token, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
+
+
+def _evidence_value(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def assess_knowledge_value(
+    *,
+    category: str,
+    problem: str,
+    root_cause: str,
+    solution: str,
+    evidence: list[Any],
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Classify reuse value from provenance, not article length or model prose."""
+
+    metadata = dict(metadata or {})
+    verified = [item for item in evidence if _evidence_value(item, "verified", False)]
+    evidence_types = {str(_evidence_value(item, "evidence_type", "")) for item in verified}
+    failed = any(
+        _evidence_value(item, "exit_code") not in {None, 0}
+        or _evidence_value(item, "evidence_type")
+        in {
+            "command_failure",
+            "incident_failure",
+        }
+        for item in verified
+    )
+    succeeded = any(
+        _evidence_value(item, "evidence_type")
+        in {"build_pass", "command_success", "recovery_success", "test_pass"}
+        and (
+            _evidence_value(item, "evidence_type") == "recovery_success"
+            or _evidence_value(item, "exit_code") == 0
+        )
+        for item in verified
+    )
+    changed = bool(evidence_types & {"code_change", "document_version"})
+    validation = bool(
+        evidence_types
+        & {"build_pass", "command_success", "comparison_artifact", "test_pass"}
+    )
+    artifact_experiment = (
+        category != "error_resolution"
+        and changed
+        and "comparison_artifact" in evidence_types
+    )
+    performance = {
+        "performance_before",
+        "performance_after",
+        "load_cause",
+    }.issubset(evidence_types)
+    recovery = {"incident_failure", "recovery_success"}.issubset(evidence_types)
+    lifecycle = failed and changed and succeeded
+    generic_structure = (
+        root_cause.startswith("Observed implementation in ")
+        or solution.startswith("Changed artifacts:")
+        or "재사용 가능한 원인이나 구현 결정은 아직 구조화되지 않았습니다" in root_cause
+    )
+    structured = bool(metadata.get("structured_knowledge"))
+    if not metadata.get("auto_generated"):
+        structured = structured or (
+            min(len(problem.strip()), len(root_cause.strip()), len(solution.strip())) >= 12
+            and not generic_structure
+        )
+
+    changed_paths: list[str] = []
+    for item in verified:
+        if _evidence_value(item, "evidence_type") != "code_change":
+            continue
+        locator = str(_evidence_value(item, "locator", "") or "")
+        changed_paths.extend(part.strip() for part in locator.split(",") if part.strip())
+    path_suffixes = {
+        PurePosixPath(path.replace("\\", "/")).suffix.casefold()
+        for path in changed_paths
+        if PurePosixPath(path.replace("\\", "/")).suffix
+    }
+    presentation_only = bool(path_suffixes) and path_suffixes.issubset(_PRESENTATION_ONLY_SUFFIXES)
+
+    signals: list[str] = []
+    blockers: list[str] = []
+    if lifecycle:
+        signals.append("verified_failure_change_success")
+    if changed and validation:
+        signals.append("verified_change_and_validation")
+    if artifact_experiment:
+        signals.append("verified_artifact_experiment")
+    if performance:
+        signals.append("measured_before_after_with_cause")
+    if recovery:
+        signals.append("verified_incident_recovery")
+    if structured:
+        signals.append("reusable_explanation_present")
+    if len(evidence_types) >= 2:
+        signals.append("multiple_verified_evidence_types")
+    if not verified:
+        blockers.append("no_verified_evidence")
+    if generic_structure:
+        blockers.append("generic_artifact_inventory")
+    if presentation_only and not failed and not structured:
+        blockers.append("presentation_only_change_without_reusable_decision")
+
+    previously_quarantined = (
+        metadata.get("quality_gate_status") == "ACTIVITY_ONLY"
+        or (metadata.get("curation") or {}).get("state") == "activity_only"
+    )
+    # A historical generic completion normally remains activity-only.  The
+    # one exception is a verified, material project-operation journal that is
+    # deliberately reopened for an evidence-bound editorial assessment.  It
+    # is *not* publication approval: the local editor still has to cite the
+    # observed change and validation evidence before it can become a case.
+    journal_reassessment = bool(
+        metadata.get("journal_backed")
+        and (metadata.get("journal_reassessment") or {}).get("version")
+    )
+    if previously_quarantined and not journal_reassessment:
+        blockers.append("previously_quarantined_activity")
+        tier = "activity_only"
+    elif "no_verified_evidence" in blockers or (
+        "presentation_only_change_without_reusable_decision" in blockers
+    ):
+        tier = "activity_only"
+    elif artifact_experiment:
+        # A completed A/B or review-board run is reusable experiment knowledge
+        # even when it is not an incident and has no root cause.  The artifact
+        # verifier proves only execution and board membership; the editor must
+        # keep any preference or winner as reported context.
+        tier = "promote"
+    elif category == "error_resolution":
+        tier = "promote" if lifecycle and structured else "needs_review"
+        if tier != "promote":
+            blockers.append("verified_failure_fix_explanation_required")
+    elif category in {"implementation", "custom_success"}:
+        tier = "promote" if changed and validation and structured else "needs_review"
+        if tier != "promote":
+            blockers.append("reusable_implementation_decision_required")
+    elif category == "performance":
+        tier = "promote" if performance else "needs_review"
+        if tier != "promote":
+            blockers.append("before_after_and_load_cause_required")
+    elif category == "operations":
+        tier = "promote" if recovery else "needs_review"
+        if tier != "promote":
+            blockers.append("incident_recovery_or_editorial_operation_assessment_required")
+    else:
+        tier = "needs_review"
+        blockers.append("unsupported_knowledge_category")
+
+    return {
+        "revision": _VALUE_HARNESS_REVISION,
+        "tier": tier,
+        "publication_eligible": tier == "promote",
+        "signals": sorted(set(signals)),
+        "blockers": sorted(set(blockers)),
+        "embedding_labels": [
+            f"knowledge-value:{tier}",
+            *[f"knowledge-signal:{item}" for item in sorted(set(signals))],
+        ],
+    }
+
+
+def _jaccard(left: str, right: str) -> float:
+    a = set(_normalize(left).split())
+    b = set(_normalize(right).split())
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def create_candidate(
+    session: Session,
+    *,
+    category: str,
+    title: str,
+    problem: str,
+    symptom: str,
+    root_cause: str,
+    solution: str,
+    reported_result: str | None,
+    verified_result: str | None,
+    evidence: list[dict[str, Any]],
+    metadata: dict[str, Any] | None = None,
+) -> KnowledgeCandidate:
+    candidate_metadata = dict(metadata or {})
+    candidate_metadata["knowledge_value"] = assess_knowledge_value(
+        category=category,
+        problem=problem,
+        root_cause=root_cause,
+        solution=solution,
+        evidence=evidence,
+        metadata=candidate_metadata,
+    )
+    candidate = KnowledgeCandidate(
+        category=category,
+        title=title,
+        problem=problem,
+        symptom=symptom,
+        root_cause=root_cause,
+        solution=solution,
+        reported_result=reported_result,
+        verified_result=verified_result,
+        dedup_key=dedup_key(category, problem, root_cause, solution),
+        similarity_key=similarity_key(symptom),
+        metadata_json=candidate_metadata,
+    )
+    session.add(candidate)
+    session.flush()
+    for item in evidence:
+        session.add(
+            EvidenceRecord(
+                candidate_id=candidate.id,
+                activity_id=item.get("activity_id"),
+                evidence_type=item["evidence_type"],
+                claim=item["claim"],
+                locator=item.get("locator"),
+                reported_value=item.get("reported_value"),
+                verified_value=item.get("verified_value"),
+                exit_code=item.get("exit_code"),
+                verified=item.get("verified", False),
+                metadata_json=item.get("metadata", {}),
+            )
+        )
+    session.flush()
+    return candidate
+
+
+def evaluate_gate(session: Session, candidate: KnowledgeCandidate) -> str:
+    evidence = list(
+        session.scalars(select(EvidenceRecord).where(EvidenceRecord.candidate_id == candidate.id))
+    )
+    verified_types = {item.evidence_type for item in evidence if item.verified}
+    failed_command = any(
+        item.verified
+        and item.evidence_type in _EXECUTION_EVIDENCE_TYPES
+        and item.exit_code is not None
+        and item.exit_code != 0
+        for item in evidence
+    )
+    successful_execution = any(
+        item.verified
+        and item.evidence_type
+        in {"build_pass", "command_success", "recovery_success", "test_pass"}
+        and item.exit_code == 0
+        for item in evidence
+    )
+    passed = False
+    if candidate.category == "error_resolution":
+        passed = (
+            failed_command
+            and successful_execution
+            and bool(verified_types & {"code_change", "document_version"})
+        )
+    elif candidate.category in {"implementation", "custom_success"}:
+        passed = bool(verified_types & {"code_change", "document_version"}) and bool(
+            verified_types
+            & {"test_pass", "build_pass", "command_success", "comparison_artifact"}
+        )
+    elif candidate.category == "performance":
+        passed = {
+            "performance_before",
+            "performance_after",
+            "load_cause",
+        }.issubset(verified_types)
+    elif candidate.category == "operations":
+        # A configuration/operating-model change may be verified by a real
+        # code/config mutation plus an execution check even when it was not an
+        # outage.  It remains editorially held until a local model produces an
+        # evidence-cited article; an incident still needs both failure and
+        # recovery evidence.
+        passed = (
+            {"incident_failure", "recovery_success"}.issubset(verified_types)
+            or (
+                bool(verified_types & {"code_change", "document_version"})
+                and bool(
+                    verified_types
+                    & {
+                        "test_pass",
+                        "build_pass",
+                        "command_success",
+                        "comparison_artifact",
+                    }
+                )
+            )
+        )
+    if not passed:
+        candidate.evidence_gate_status = "NEEDS_EVIDENCE"
+        candidate.status = "candidate"
+        metadata = dict(candidate.metadata_json or {})
+        semantic = dict(metadata.get("semantic_dedup") or {})
+        if semantic.get("state") == "pending_gpu_vector_check":
+            semantic["state"] = "blocked_by_evidence_gate"
+            metadata["semantic_dedup"] = semantic
+            candidate.metadata_json = metadata
+        candidate.updated_at = datetime.now(timezone.utc)
+        return candidate.evidence_gate_status
+    candidate.evidence_gate_status = "VERIFIED"
+    candidate.status = "verified"
+    metadata = dict(candidate.metadata_json or {})
+    semantic = dict(metadata.get("semantic_dedup") or {})
+    if semantic.get("state") == "blocked_by_evidence_gate":
+        semantic["state"] = "pending_gpu_vector_check"
+        metadata["semantic_dedup"] = semantic
+        candidate.metadata_json = metadata
+    candidate.updated_at = datetime.now(timezone.utc)
+    return candidate.evidence_gate_status
+
+
+def invalidate_misclassified_execution_evidence(session: Session) -> dict[str, int]:
+    """Retract derived execution evidence that came from an edit tool.
+
+    The original activity event remains immutable. Only the derived evidence
+    assertion is marked unverified, and affected automatic candidates are
+    removed from the review/publication path without deleting their history.
+    """
+
+    rows = session.execute(
+        select(EvidenceRecord, ActivityEvent.tool_name)
+        .join(ActivityEvent, ActivityEvent.id == EvidenceRecord.activity_id)
+        .where(
+            EvidenceRecord.verified.is_(True),
+            EvidenceRecord.evidence_type.in_(_EXECUTION_EVIDENCE_TYPES),
+        )
+    )
+    now = datetime.now(timezone.utc)
+    affected_candidates: set[uuid.UUID] = set()
+    invalidated = 0
+    for evidence, tool_name in rows:
+        if is_execution_tool(tool_name):
+            continue
+        evidence.verified = False
+        evidence.metadata_json = {
+            **(evidence.metadata_json or {}),
+            "invalidated_at": now.isoformat(),
+            "invalidated_reason": "non_execution_tool_misclassified_as_command",
+            "source_tool_name": tool_name,
+        }
+        affected_candidates.add(evidence.candidate_id)
+        invalidated += 1
+    session.flush()
+
+    activity_only = 0
+    for candidate_id in affected_candidates:
+        candidate = session.get(KnowledgeCandidate, candidate_id)
+        if candidate is None:
+            continue
+        if evaluate_gate(session, candidate) == "VERIFIED":
+            continue
+        metadata = dict(candidate.metadata_json or {})
+        if metadata.get("auto_generated"):
+            candidate.status = "activity_only"
+            metadata["quality_gate_status"] = "ACTIVITY_ONLY"
+            metadata["quality_gate_reasons"] = [
+                "misclassified_edit_event_was_not_execution_evidence"
+            ]
+            metadata["evidence_repair"] = {
+                "repaired_at": now.isoformat(),
+                "reason": "non_execution_tool_misclassified_as_command",
+            }
+            candidate.metadata_json = metadata
+            activity_only += 1
+    return {
+        "invalidated_evidence": invalidated,
+        "affected_candidates": len(affected_candidates),
+        "reclassified_activity_only": activity_only,
+    }
+
+
+def evaluate_quality(candidate: KnowledgeCandidate) -> tuple[str, list[str]]:
+    """Evaluate whether verified activity is reusable canonical knowledge.
+
+    Evidence proves that work happened. It does not prove that the candidate
+    explains a reusable cause, decision, or method. Auto-extracted candidates
+    therefore need explicit structure before a human can publish them.
+    """
+
+    reasons: list[str] = []
+    metadata = dict(candidate.metadata_json or {})
+    fields = {
+        "problem": candidate.problem.strip(),
+        "root_cause": candidate.root_cause.strip(),
+        "solution": candidate.solution.strip(),
+    }
+    for name, value in fields.items():
+        if len(value) < 12:
+            reasons.append(f"{name}_too_short")
+    if candidate.root_cause.startswith("Observed implementation in "):
+        reasons.append("generic_file_change_is_not_a_cause")
+    if candidate.solution.startswith("Changed artifacts:"):
+        reasons.append("artifact_list_is_not_a_reusable_solution")
+    if metadata.get("auto_generated") and not metadata.get("structured_knowledge"):
+        reasons.append("auto_report_missing_reusable_structure")
+    value_assessment = metadata.get("knowledge_value") or {}
+    editorial_resolution = metadata.get("editorial_value_resolution") or {}
+    editorially_promoted = bool(
+        editorial_resolution.get("approved")
+        and metadata.get("curation_validation_status") == "PASS"
+    )
+    if (
+        value_assessment
+        and value_assessment.get("tier") != "promote"
+        and not editorially_promoted
+    ):
+        reasons.append("knowledge_value_harness_not_promotable")
+
+    curation_validated = (
+        metadata.get("approval_policy")
+        in {
+            "local_llm_evidence_bound",
+            "deterministic_evidence_gate_with_llm_editor",
+        }
+        and metadata.get("curation_validation_status") == "PASS"
+    )
+    status = (
+        "PASS"
+        if not reasons and (not metadata.get("auto_generated") or curation_validated)
+        else "NEEDS_REVIEW"
+    )
+    if metadata.get("auto_generated") and not curation_validated:
+        reasons.append("local_llm_evidence_validation_required")
+    metadata.update(
+        {
+            "quality_gate_status": status,
+            "quality_gate_reasons": reasons,
+            "approval_policy": (
+                "deterministic_evidence_gate_with_llm_editor"
+                if curation_validated
+                else metadata.get("approval_policy", "human_review")
+            ),
+        }
+    )
+    candidate.metadata_json = metadata
+    return status, reasons
+
+
+def _evidence_summary(session: Session, candidate_id: uuid.UUID) -> dict[str, Any]:
+    evidence = list(
+        session.scalars(select(EvidenceRecord).where(EvidenceRecord.candidate_id == candidate_id))
+    )
+    return {
+        "verified_count": sum(item.verified for item in evidence),
+        "total_count": len(evidence),
+        "types": sorted({item.evidence_type for item in evidence}),
+        "locators": [item.locator for item in evidence if item.locator],
+    }
+
+
+def _new_revision(
+    session: Session,
+    case: KnowledgeCase,
+    candidate: KnowledgeCandidate,
+) -> KnowledgeCaseRevision:
+    latest = session.scalar(
+        select(func.max(KnowledgeCaseRevision.revision_number)).where(
+            KnowledgeCaseRevision.case_id == case.id
+        )
+    )
+    candidate_metadata = dict(candidate.metadata_json or {})
+    revision = KnowledgeCaseRevision(
+        case_id=case.id,
+        revision_number=(latest or 0) + 1,
+        content_json={
+            "title": candidate.title,
+            "problem": candidate.problem,
+            "symptom": candidate.symptom,
+            "root_cause": candidate.root_cause,
+            "solution": candidate.solution,
+            "reported_result": candidate.reported_result,
+            "verified_result": candidate.verified_result,
+            "article_markdown": candidate_metadata.get("article_markdown"),
+            "standfirst": candidate_metadata.get("standfirst"),
+            "limitations": candidate_metadata.get("limitations"),
+            "content_language": candidate_metadata.get("content_language"),
+            "curation": candidate_metadata.get("curation"),
+            "knowledge_value": candidate_metadata.get("knowledge_value"),
+            "project": candidate_metadata.get("project"),
+            "tags": _case_tags_from_candidate(candidate),
+            "evidence_bound_claims": candidate_metadata.get("evidence_bound_claims"),
+        },
+        evidence_summary=_evidence_summary(session, candidate.id),
+    )
+    session.add(revision)
+    session.flush()
+    case.current_revision_id = revision.id
+    return revision
+
+
+_CATEGORY_SITUATION_TAG = {
+    "error_resolution": "situation:troubleshooting",
+    "implementation": "situation:implementation",
+    "custom_success": "situation:implementation",
+    "performance": "situation:performance",
+    "operations": "situation:operations",
+}
+
+
+def _normalized_tag(value: Any) -> str | None:
+    cleaned = re.sub(r"\s+", "-", str(value).strip().lower())
+    cleaned = re.sub(r"[^0-9a-z가-힣_.:-]+", "-", cleaned).strip("-")
+    return cleaned[:120] or None
+
+
+def case_tags(
+    *,
+    category: str,
+    project: str | None,
+    raw_tags: list[Any] | str | None = None,
+    knowledge_value: dict[str, Any] | None = None,
+) -> list[str]:
+    raw_tags = raw_tags or []
+    if isinstance(raw_tags, str):
+        raw_tags = [raw_tags]
+    value = knowledge_value or {}
+    labels = value.get("embedding_labels") or [] if isinstance(value, dict) else []
+    tags: set[str] = {
+        "lifecycle:verified",
+        f"case:{category}",
+    }
+    situation = _CATEGORY_SITUATION_TAG.get(category)
+    if situation:
+        tags.add(situation)
+    normalized_project = _normalized_tag(project)
+    if normalized_project:
+        tags.add(f"project:{normalized_project}")
+    for item in [*raw_tags, *labels]:
+        if normalized := _normalized_tag(item):
+            tags.add(normalized)
+    return sorted(tags)
+
+
+def _case_tags_from_candidate(candidate: KnowledgeCandidate) -> list[str]:
+    metadata = dict(candidate.metadata_json or {})
+    return case_tags(
+        category=candidate.category,
+        project=metadata.get("project"),
+        raw_tags=metadata.get("tags"),
+        knowledge_value=metadata.get("knowledge_value"),
+    )
+
+
+def _case_metadata_from_candidate(candidate: KnowledgeCandidate) -> dict[str, Any]:
+    metadata = dict(candidate.metadata_json or {})
+    result = {
+        key: metadata[key]
+        for key in (
+            "article_markdown",
+            "standfirst",
+            "limitations",
+            "content_language",
+            "curation",
+            "evidence_bound_claims",
+            "approval_policy",
+            "knowledge_value",
+            "project",
+        )
+        if metadata.get(key) is not None
+    }
+    result["tags"] = _case_tags_from_candidate(candidate)
+    return result
+
+
+def publish_candidate(
+    session: Session, candidate: KnowledgeCandidate
+) -> tuple[KnowledgeCase | None, str]:
+    if evaluate_gate(session, candidate) != "VERIFIED":
+        return None, "NEEDS_EVIDENCE"
+    quality_status, _ = evaluate_quality(candidate)
+    if quality_status != "PASS":
+        candidate.status = "needs_review"
+        return None, "NEEDS_REVIEW"
+    supersedes_case_id = (candidate.metadata_json or {}).get("supersedes_case_id")
+    if supersedes_case_id:
+        try:
+            target_id = uuid.UUID(str(supersedes_case_id))
+        except ValueError:
+            candidate.status = "needs_review"
+            candidate.evidence_gate_status = "NEEDS_REVIEW"
+            return None, "NEEDS_REVIEW"
+        target = session.get(KnowledgeCase, target_id)
+        if target is None or target.status != "verified" or target.category != candidate.category:
+            candidate.status = "needs_review"
+            candidate.evidence_gate_status = "NEEDS_REVIEW"
+            return None, "NEEDS_REVIEW"
+        collision = session.scalar(
+            select(KnowledgeCase).where(
+                KnowledgeCase.dedup_key == candidate.dedup_key,
+                KnowledgeCase.id != target.id,
+            )
+        )
+        if collision is not None:
+            candidate.status = "needs_review"
+            candidate.evidence_gate_status = "NEEDS_REVIEW"
+            candidate.metadata_json = {
+                **candidate.metadata_json,
+                "possible_duplicate_case_id": str(collision.id),
+            }
+            return None, "NEEDS_REVIEW"
+        previous_key = target.dedup_key
+        target.category = candidate.category
+        target.title = candidate.title
+        target.problem = candidate.problem
+        target.symptom = candidate.symptom
+        target.root_cause = candidate.root_cause
+        target.solution = candidate.solution
+        target.dedup_key = candidate.dedup_key
+        target.last_seen_at = datetime.now(timezone.utc)
+        target.occurrence_count += 1
+        target.metadata_json = {
+            **(target.metadata_json or {}),
+            **_case_metadata_from_candidate(candidate),
+            "previous_dedup_keys": sorted(
+                {
+                    *(target.metadata_json or {}).get("previous_dedup_keys", []),
+                    previous_key,
+                }
+            ),
+            "last_revision_candidate_id": str(candidate.id),
+        }
+        session.add(
+            KnowledgeOccurrence(
+                case_id=target.id,
+                candidate_id=candidate.id,
+                evidence_json=_evidence_summary(session, candidate.id),
+            )
+        )
+        _new_revision(session, target, candidate)
+        candidate.status = "published"
+        return target, "REVISED_CANONICAL"
+    exact = session.scalar(
+        select(KnowledgeCase).where(KnowledgeCase.dedup_key == candidate.dedup_key)
+    )
+    if exact:
+        occurrence = session.scalar(
+            select(KnowledgeOccurrence).where(
+                KnowledgeOccurrence.case_id == exact.id,
+                KnowledgeOccurrence.candidate_id == candidate.id,
+            )
+        )
+        if occurrence is None:
+            session.add(
+                KnowledgeOccurrence(
+                    case_id=exact.id,
+                    candidate_id=candidate.id,
+                    evidence_json=_evidence_summary(session, candidate.id),
+                )
+            )
+            exact.occurrence_count += 1
+            exact.last_seen_at = datetime.now(timezone.utc)
+            _new_revision(session, exact, candidate)
+            exact.metadata_json = {
+                **(exact.metadata_json or {}),
+                **_case_metadata_from_candidate(candidate),
+                "last_revision_candidate_id": str(candidate.id),
+            }
+        candidate.status = "published"
+        return exact, "MERGED_OCCURRENCE"
+
+    semantic_dedup = (candidate.metadata_json or {}).get("semantic_dedup") or {}
+    if semantic_dedup.get("state") == "pending_gpu_vector_check":
+        # Exact duplicate occurrences are merged above without a model call.
+        # A new canonical case must first pass the GPU worker's key-term scoped
+        # pgvector comparison so near-duplicates never become silent noise.
+        return None, "PENDING_SEMANTIC_DEDUP"
+    if semantic_dedup.get("state") == "needs_review":
+        candidate.status = "needs_review"
+        candidate.evidence_gate_status = "NEEDS_REVIEW"
+        return None, "NEEDS_REVIEW"
+
+    cases = list(session.scalars(select(KnowledgeCase).where(KnowledgeCase.status == "verified")))
+    candidate_text = " ".join([candidate.problem, candidate.root_cause, candidate.solution])
+    for case in cases:
+        case_text = " ".join([case.problem, case.root_cause, case.solution])
+        if _jaccard(
+            candidate_text, case_text
+        ) >= 0.55 and candidate.similarity_key != similarity_key(case.symptom):
+            candidate.status = "needs_review"
+            candidate.evidence_gate_status = "NEEDS_REVIEW"
+            candidate.metadata_json = {
+                **candidate.metadata_json,
+                "possible_duplicate_case_id": str(case.id),
+            }
+            return None, "NEEDS_REVIEW"
+
+    case = KnowledgeCase(
+        category=candidate.category,
+        title=candidate.title,
+        problem=candidate.problem,
+        symptom=candidate.symptom,
+        root_cause=candidate.root_cause,
+        solution=candidate.solution,
+        dedup_key=candidate.dedup_key,
+        status="verified",
+        metadata_json=_case_metadata_from_candidate(candidate),
+    )
+    session.add(case)
+    session.flush()
+    session.add(
+        KnowledgeOccurrence(
+            case_id=case.id,
+            candidate_id=candidate.id,
+            evidence_json=_evidence_summary(session, candidate.id),
+        )
+    )
+    _new_revision(session, case, candidate)
+    same_symptom = next(
+        (item for item in cases if similarity_key(item.symptom) == candidate.similarity_key),
+        None,
+    )
+    if same_symptom:
+        relation = (
+            "same_symptom_different_cause"
+            if _normalize(same_symptom.root_cause) != _normalize(candidate.root_cause)
+            else "same_symptom_alternative_solution"
+        )
+        session.add(
+            KnowledgeCaseRelation(
+                source_case_id=same_symptom.id,
+                target_case_id=case.id,
+                relation_type=relation,
+            )
+        )
+    candidate.status = "published"
+    return case, "CREATED_CANONICAL"

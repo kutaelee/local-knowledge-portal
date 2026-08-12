@@ -40,12 +40,16 @@ def main() -> None:
                 name="validation-fixture",
                 canonical_path=str(validation_root.resolve()),
                 source_type="validation",
+                data_scope="validation",
                 read_only=True,
                 enabled=True,
                 include_patterns=["**/*"],
                 exclude_patterns=[],
             )
             session.add(root)
+            session.commit()
+        elif root.data_scope != "validation":
+            root.data_scope = "validation"
             session.commit()
         stats = scan_root(session, root, settings.max_file_bytes)
         session.commit()
