@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Literal, Protocol
 
 import httpx
@@ -179,9 +180,372 @@ class DeveloperFeedDraft(BaseModel):
         "not_measured",
     ]
     outcome_source_ids: list[str] = Field(min_length=1, max_length=20)
-    posts: list[DeveloperFeedMessage] = Field(min_length=4, max_length=16)
+    posts: list[DeveloperFeedMessage] = Field(min_length=4, max_length=21)
     screenshot_source_id: str | None = None
     screenshot_reason: str | None = Field(default=None, max_length=280)
+
+
+def _split_oversized_feed_replies(parsed: object) -> object:
+    """Split paired sentences into adjacent replies without rewriting their content."""
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("posts"), list):
+        return parsed
+    normalized: list[object] = []
+    for post in parsed["posts"]:
+        if not isinstance(post, dict):
+            normalized.append(post)
+            continue
+        korean = post.get("sentences_ko")
+        english = post.get("sentences_en")
+        if (
+            not isinstance(korean, list)
+            or not isinstance(english, list)
+            or len(korean) != len(english)
+            or len(korean) <= 1
+            or not all(isinstance(item, str) for item in [*korean, *english])
+        ):
+            normalized.append(post)
+            continue
+        joined_korean = " ".join(item.strip() for item in korean)
+        joined_english = " ".join(item.strip() for item in english)
+        if len(joined_korean) <= 140 and len(joined_english) <= 280:
+            normalized.append(post)
+            continue
+        if any(len(item.strip()) > 140 for item in korean) or any(
+            len(item.strip()) > 280 for item in english
+        ):
+            normalized.append(post)
+            continue
+        normalized.extend(
+            {
+                **post,
+                "sentences_ko": [korean_sentence],
+                "sentences_en": [english_sentence],
+            }
+            for korean_sentence, english_sentence in zip(korean, english, strict=True)
+        )
+    if len(normalized) > 21:
+        return parsed
+    return {**parsed, "posts": normalized}
+
+
+def _opening_mentions_anchor(opening: str, anchor: str) -> bool:
+    normalized_opening = re.sub(r"[^0-9a-z가-힣]+", "", opening.casefold())
+    normalized_anchor = re.sub(r"[^0-9a-z가-힣]+", "", anchor.casefold())
+    if not normalized_opening or not normalized_anchor:
+        return False
+    if normalized_anchor in normalized_opening:
+        return True
+    width = min(6, len(normalized_anchor))
+    if width < 4:
+        return False
+    return any(
+        normalized_anchor[index : index + width] in normalized_opening
+        for index in range(len(normalized_anchor) - width + 1)
+    )
+
+
+def _canonicalize_feed_exact_phrases(
+    parsed: object,
+    phrase_catalog: dict[str, object],
+    *,
+    minimum_similarity: float = 0.45,
+) -> object:
+    """Map only close model variants back to a verbatim evidence phrase."""
+    if not isinstance(parsed, dict):
+        return parsed
+    normalized = dict(parsed)
+    for field in ("technology_or_method", "reader_problem_or_goal"):
+        raw_value = normalized.get(field)
+        raw_candidates = phrase_catalog.get(field)
+        if not isinstance(raw_value, str) or not isinstance(raw_candidates, list):
+            continue
+        candidates = [item for item in raw_candidates if isinstance(item, str) and item.strip()]
+        if not candidates:
+            continue
+
+        def compact(value: str) -> str:
+            return re.sub(r"[^0-9a-z가-힣]+", "", value.casefold())
+
+        current = compact(raw_value)
+        exact = next((item for item in candidates if compact(item) == current), None)
+        if exact is not None:
+            normalized[field] = exact
+            continue
+        scored = [
+            (SequenceMatcher(None, current, compact(item)).ratio(), item)
+            for item in candidates
+            if compact(item)
+        ]
+        if scored:
+            score, candidate = max(scored, key=lambda item: item[0])
+            if score >= minimum_similarity:
+                normalized[field] = candidate
+    return normalized
+
+
+def _ensure_feed_opening_anchor(parsed: object) -> object:
+    """Add an evidence-keyed subject line without changing generated claims."""
+    if not isinstance(parsed, dict):
+        return parsed
+    posts = parsed.get("posts")
+    technology = parsed.get("technology_or_method")
+    problem = parsed.get("reader_problem_or_goal")
+    if (
+        not isinstance(posts, list)
+        or not posts
+        or not isinstance(posts[0], dict)
+        or not isinstance(technology, str)
+        or not isinstance(problem, str)
+    ):
+        return parsed
+    first = posts[0]
+    korean = first.get("sentences_ko")
+    english = first.get("sentences_en")
+    source_ids = first.get("source_ids")
+    if (
+        not isinstance(korean, list)
+        or not isinstance(english, list)
+        or not isinstance(source_ids, list)
+    ):
+        return parsed
+    opening = "\n".join([*(str(item) for item in korean), *(str(item) for item in english)])
+    if _opening_mentions_anchor(opening, technology) or _opening_mentions_anchor(
+        opening, problem
+    ):
+        return parsed
+    normalized_posts = list(posts)
+    while len(normalized_posts) >= 21:
+        role_counts: dict[str, int] = {}
+        for post in normalized_posts:
+            if isinstance(post, dict) and isinstance(post.get("role"), str):
+                role = str(post["role"])
+                role_counts[role] = role_counts.get(role, 0) + 1
+        removable = [
+            (index, post)
+            for index, post in enumerate(normalized_posts[1:], start=1)
+            if isinstance(post, dict)
+            and isinstance(post.get("role"), str)
+            and role_counts.get(str(post["role"]), 0) > 1
+        ]
+        if not removable:
+            return parsed
+        remove_index, _ = min(
+            removable,
+            key=lambda item: sum(
+                len(str(sentence))
+                for field in ("sentences_ko", "sentences_en")
+                for sentence in item[1].get(field, [])
+            ),
+        )
+        del normalized_posts[remove_index]
+    subject = min((technology, problem), key=len)
+    korean_subject = (
+        subject
+        if len(subject) >= 25
+        else f"{subject}: 재현할 때 먼저 확인해요."
+    )
+    english_subject = (
+        subject
+        if len(subject) >= 50
+        else f"{subject}: start here when reproducing the same issue."
+    )
+    subject_post = {
+        "role": "observation",
+        "sentences_ko": [korean_subject],
+        "sentences_en": [english_subject],
+        "source_ids": list(source_ids),
+    }
+    if (
+        len(subject_post["sentences_ko"][0]) > 140
+        or len(subject_post["sentences_en"][0]) > 280
+    ):
+        return parsed
+    return {**parsed, "posts": [subject_post, *normalized_posts]}
+
+
+def _downgrade_unverified_feed_outcome(
+    parsed: object,
+    *,
+    verified_result_source_ids: set[str],
+    allowed_source_ids: set[str],
+) -> object:
+    """Remove measured-effect prose when the batch contains no result evidence."""
+    if (
+        verified_result_source_ids
+        or not isinstance(parsed, dict)
+        or not isinstance(parsed.get("posts"), list)
+        or not allowed_source_ids
+    ):
+        return parsed
+    posts = parsed["posts"]
+    possibility = next(
+        (
+            post
+            for post in posts
+            if isinstance(post, dict) and post.get("role") == "possibility"
+        ),
+        None,
+    )
+    if possibility is None:
+        return parsed
+    cited = {
+        item
+        for item in possibility.get("source_ids", [])
+        if isinstance(item, str) and item in allowed_source_ids
+    }
+    source_ids = sorted(cited or allowed_source_ids)[:20]
+    replacement = {
+        "role": "possibility",
+        "sentences_ko": [
+            "변경 내용은 확인했지만 효과는 아직 측정하지 않았어요.",
+            "같은 조건의 전후 비교가 나오기 전에는 개선으로 단정할 수 없어요.",
+        ],
+        "sentences_en": [
+            "The change is present, but its effect has not been measured.",
+            "I would not call it an improvement without a before-and-after comparison "
+            "under the same conditions.",
+        ],
+        "source_ids": source_ids,
+    }
+    normalized_posts: list[object] = []
+    inserted = False
+    for post in posts:
+        if isinstance(post, dict) and post.get("role") == "possibility":
+            if not inserted:
+                normalized_posts.append(replacement)
+                inserted = True
+            continue
+        normalized_posts.append(post)
+    return {
+        **parsed,
+        "outcome_status": "not_measured",
+        "outcome_source_ids": source_ids,
+        "posts": normalized_posts,
+    }
+
+
+def _casualize_feed_korean_endings(parsed: object) -> object:
+    """Normalize a narrow set of formal endings without changing factual content."""
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("posts"), list):
+        return parsed
+    replacements = (
+        ("가능성이 보입니다", "여지가 있어요"),
+        ("하였습니다", "했어요"),
+        ("되었습니다", "됐어요"),
+        ("했습니다", "했어요"),
+        ("였습니다", "였어요"),
+        ("있습니다", "있어요"),
+        ("없습니다", "없어요"),
+        ("같습니다", "같아요"),
+        ("입니다", "이에요"),
+        ("됩니다", "돼요"),
+        ("합니다", "해요"),
+        ("대폭 개선", "개선"),
+        ("실제 의미를 담", "구체적인 내용을 담"),
+        ("개인적인 통찰", "확인한 점"),
+        ("구조를 잡", "순서를 정리"),
+        ("이 구조를 활용", "이 방법을 사용"),
+        ("바로 쓸 수 있을 것", "바로 확인할 수 있을 것"),
+        ("콘텐츠가 생성", "글이 만들어"),
+        ("실제 데이터 기반", "확인된 자료 기반"),
+        ("문맥이 담긴 정보", "근거가 연결된 정보"),
+        ("가독성", "읽기 쉬운 정도"),
+        ("단순 기록을 넘어", "작업 기록에서 그치지 않고"),
+        ("소통 도구", "공유 글"),
+        ("가능성이 보", "여지가 있"),
+        ("확장할 수 있는", "다른 곳에도 적용할 수 있는"),
+        ("시스템 안정성", "시스템 동작"),
+        ("안정성을 확보", "오류 조건을 줄"),
+        ("훨씬 명확", "더 구체적"),
+        ("규칙을 강화", "검사를 추가"),
+    )
+    normalized_posts: list[object] = []
+    for post in parsed["posts"]:
+        if not isinstance(post, dict) or not isinstance(post.get("sentences_ko"), list):
+            normalized_posts.append(post)
+            continue
+        sentences = []
+        for raw_sentence in post["sentences_ko"]:
+            sentence = str(raw_sentence)
+            for formal, casual in replacements:
+                sentence = sentence.replace(formal, casual)
+            # Some phrase-level replacements can expose a formal ending after the
+            # first ending pass (for example, "가능성이 보입니다" ->
+            # "활용할 여지가 있습니다"). Normalize endings once more after all
+            # semantic-preserving phrase substitutions have completed.
+            for formal, casual in replacements[:11]:
+                sentence = sentence.replace(formal, casual)
+            sentence = re.sub(
+                r"([가-힣]+)습니다",
+                lambda match: (
+                    f"{match.group(1)}어요"
+                    if (ord(match.group(1)[-1]) - 0xAC00) % 28 == 20
+                    else match.group(0)
+                ),
+                sentence,
+            )
+            sentences.append(sentence)
+        normalized_posts.append({**post, "sentences_ko": sentences})
+    return {**parsed, "posts": normalized_posts}
+
+
+def _ensure_feed_afterthought_boundary(parsed: object) -> object:
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("posts"), list):
+        return parsed
+    posts = parsed["posts"]
+    afterthoughts = [
+        post
+        for post in posts
+        if isinstance(post, dict) and post.get("role") == "afterthought"
+    ]
+    if not afterthoughts:
+        return parsed
+    korean = " ".join(
+        str(item)
+        for post in afterthoughts
+        for item in post.get("sentences_ko", [])
+    )
+    english = " ".join(
+        str(item)
+        for post in afterthoughts
+        for item in post.get("sentences_en", [])
+    ).casefold()
+    korean_markers = ("다만", "경우", "전에는", "주의", "한계", "확인해야", "때만")
+    english_markers = ("but", "only", "unless", "caveat", "limit", "before", "when ", "if ")
+    if any(item in korean for item in korean_markers) and any(
+        item in english for item in english_markers
+    ):
+        return parsed
+    source_ids = [
+        item
+        for item in afterthoughts[-1].get("source_ids", [])
+        if isinstance(item, str)
+    ]
+    replacement = {
+        "role": "afterthought",
+        "sentences_ko": [
+            "다만 이 내용은 현재 확인된 변경 범위에만 해당해요.",
+            "적용 전에는 같은 환경과 전제인지 먼저 확인해야 해요.",
+        ],
+        "sentences_en": [
+            "This applies only to the change scope verified here.",
+            "Before applying it, check that the environment and preconditions match.",
+        ],
+        "source_ids": source_ids,
+    }
+    return {
+        **parsed,
+        "posts": [
+            *(
+                post
+                for post in posts
+                if not (
+                    isinstance(post, dict) and post.get("role") == "afterthought"
+                )
+            ),
+            replacement,
+        ],
+    }
 
 
 def _normalize_project_article_flat_payload(
@@ -483,6 +847,7 @@ class OllamaGenerationProvider:
         temperature: float = 0,
         context_window: int = 16_384,
         num_batch: int = 1_024,
+        max_output_tokens: int | None = None,
         keep_alive: str = "2m",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -497,6 +862,7 @@ class OllamaGenerationProvider:
             "temperature": temperature,
             "context_window": context_window,
             "num_batch": num_batch,
+            "max_output_tokens": max_output_tokens,
             "keep_alive": keep_alive,
         }
         self._performance = {
@@ -606,6 +972,11 @@ class OllamaGenerationProvider:
                     "temperature": self.generation_parameters["temperature"],
                     "num_ctx": self.generation_parameters["context_window"],
                     "num_batch": self.generation_parameters["num_batch"],
+                    **(
+                        {"num_predict": self.generation_parameters["max_output_tokens"]}
+                        if self.generation_parameters["max_output_tokens"] is not None
+                        else {}
+                    ),
                 },
                 "keep_alive": self.generation_parameters["keep_alive"],
             },
@@ -675,6 +1046,18 @@ class OllamaGenerationProvider:
             for item in payload.get("sources", [])
             if isinstance(item, dict) and item.get("id")
         }
+        verified_result_source_ids = {
+            source_id
+            for source_id, claim_scope in source_scopes.items()
+            if claim_scope == "verified_result"
+        }
+        phrase_catalog = payload.get("exact_phrase_candidates", {})
+        technology_candidates_json = json.dumps(
+            phrase_catalog.get("technology_or_method", []), ensure_ascii=False
+        )
+        problem_candidates_json = json.dumps(
+            phrase_catalog.get("reader_problem_or_goal", []), ensure_ascii=False
+        )
         evidence_text = re.sub(
             r"\s+",
             " ",
@@ -696,7 +1079,19 @@ class OllamaGenerationProvider:
             "component, or named method from the evidence into technology_or_method. Copy a short "
             "searchable symptom or goal from the evidence into reader_problem_or_goal. Both "
             "phrases must appear naturally in the thread so a reader who does not know this "
-            "project can identify the subject and problem. "
+            "project can identify the subject and problem. The payload includes "
+            "exact_phrase_candidates copied from the evidence. Set technology_or_method "
+            "verbatim to one value from exact_phrase_candidates.technology_or_method and set "
+            "reader_problem_or_goal verbatim to one value from "
+            "exact_phrase_candidates.reader_problem_or_goal. Do not translate, inflect, "
+            "abbreviate, or combine these two metadata values. Repeat at least one selected "
+            "value verbatim in the opening observation. "
+            "The payload may include recent_topics_to_avoid. Those entries are prior publication "
+            "metadata, not evidence: never cite or copy them. Choose a materially different "
+            "technology/method and reader problem from the supplied new sources. Rewording the "
+            "same lesson is still a duplicate. If novelty_repair is present, the prior candidate "
+            "failed a deterministic similarity gate; select another supported topic instead of "
+            "paraphrasing it. "
             "Never invent "
             "a cause or fix just to complete a format. Do not sound like a manifesto, brand "
             "statement, motivational essay, or someone announcing a personal philosophy. Avoid "
@@ -706,15 +1101,18 @@ class OllamaGenerationProvider:
             "but use them editorially as: observation (name the technology or method and the "
             "searchable problem or goal without project-insider shorthand), meaning (give the "
             "actual procedure: prerequisite, setting, command, component order, or diagnostic "
-            "check, plus why it works), possibility (report the evidenced result: what improved, "
+            "check, plus why it works). Make that procedure explicit in both languages with "
+            "literal operational wording such as 설정/명령/순서/확인/적용 and "
+            "set/command/first/check/apply; do not leave it implicit. Possibility (report the "
+            "evidenced result: what improved, "
             "failed to improve, regressed, or was not measured), and afterthought (give the "
             "reproduction boundary: version, environment, precondition, failure mode, or what must "
             "be checked before applying it). Afterthought is not a personal diary aside or "
             "resolution. "
             "Use all four roles in that order for both information_update and daily_summary. "
             "Repeat a role in adjacent replies when the evidence needs more room, but never return "
-            "to an earlier role. Produce between 4 and 16 replies based on content, not a fixed "
-            "thread length. Each reply may contain one to three compact sentences in sentences_ko "
+            "to an earlier role. Produce normally 4 to 16 replies based on content, never more "
+            "than 20. Each reply may contain one to three compact sentences in sentences_ko "
             "and sentences_en and must flow from the previous reply. Code joins each language's "
             "sentence array into one X reply. The 140/280 character ceilings apply to each reply, "
             "not to the whole technical article; continue the thread instead of dropping a useful "
@@ -873,7 +1271,19 @@ class OllamaGenerationProvider:
             return self._request_developer_feed(current_messages, schema)
 
         def validate(content: str) -> DeveloperFeedDraft:
-            draft = DeveloperFeedDraft.model_validate_json(content)
+            parsed = _canonicalize_feed_exact_phrases(
+                json.loads(content), phrase_catalog
+            )
+            parsed = _casualize_feed_korean_endings(parsed)
+            parsed = _ensure_feed_opening_anchor(parsed)
+            parsed = _downgrade_unverified_feed_outcome(
+                parsed,
+                verified_result_source_ids=verified_result_source_ids,
+                allowed_source_ids=allowed_ids,
+            )
+            parsed = _split_oversized_feed_replies(parsed)
+            parsed = _ensure_feed_afterthought_boundary(parsed)
+            draft = DeveloperFeedDraft.model_validate(parsed)
             roles = [post.role for post in draft.posts]
             required_roles = ["observation", "meaning", "possibility", "afterthought"]
             role_order = {role: index for index, role in enumerate(required_roles)}
@@ -900,11 +1310,21 @@ class OllamaGenerationProvider:
                     "reader_problem_or_goal must copy a searchable evidence-supported phrase"
                 )
             opening = f"{draft.posts[0].content_ko}\n{draft.posts[0].content_en}".casefold()
-            if normalized_topic not in opening and normalized_problem not in opening:
+            if not _opening_mentions_anchor(
+                opening, draft.technology_or_method
+            ) and not _opening_mentions_anchor(opening, draft.reader_problem_or_goal):
                 raise ValueError(
                     "observation must explicitly name the technology/method or searchable problem"
                 )
-            if any(phrase.casefold() in opening for phrase in forbidden_contextless_openings):
+            observation_text = "\n".join(
+                f"{post.content_ko}\n{post.content_en}"
+                for post in draft.posts
+                if post.role == "observation"
+            ).casefold()
+            if any(
+                phrase.casefold() in observation_text
+                for phrase in forbidden_contextless_openings
+            ):
                 raise ValueError(
                     "observation used project-insider shorthand instead of naming the subject"
                 )
@@ -935,15 +1355,27 @@ class OllamaGenerationProvider:
                         "developer feed draft narrated a personal work log instead of "
                         "teaching a reusable technical point"
                     )
-                if any(
-                    phrase in post.content_ko
-                    for phrase in forbidden_stiff_korean_phrases
-                ) or re.search(
-                    r"(?:습니다|합니다|됩니다|있습니다|같습니다)(?:[.!?]|$)",
+                matched_stiff_phrase = next(
+                    (
+                        phrase
+                        for phrase in forbidden_stiff_korean_phrases
+                        if phrase in post.content_ko
+                    ),
+                    None,
+                )
+                matched_formal_ending = re.search(
+                    r"\S*(?:습니다|입니다|합니다|됩니다|있습니다|같습니다)(?:[.!?]|$)",
                     post.content_ko,
-                ):
+                )
+                if matched_stiff_phrase or matched_formal_ending:
+                    diagnostic = (
+                        f"phrase:{matched_stiff_phrase}"
+                        if matched_stiff_phrase
+                        else f"ending:{matched_formal_ending.group(0)[-32:]}"
+                    )
                     raise ValueError(
-                        "developer feed Korean used translated or formal report phrasing"
+                        "developer feed Korean used translated or formal report phrasing "
+                        f"({diagnostic})"
                     )
                 if any(
                     phrase in post.content_ko
@@ -994,6 +1426,16 @@ class OllamaGenerationProvider:
                     "먼저",
                     "확인",
                     "비교",
+                    "사용",
+                    "적용",
+                    "추가",
+                    "분리",
+                    "연결",
+                    "지정",
+                    "선택",
+                    "제거",
+                    "검증",
+                    "바꿔",
                 )
             )
             english_procedure_marker = any(
@@ -1014,6 +1456,16 @@ class OllamaGenerationProvider:
                     "check",
                     "compare",
                     "then ",
+                    "use ",
+                    "apply",
+                    "add ",
+                    "separate",
+                    "connect",
+                    "select",
+                    "remove",
+                    "validate",
+                    "replace",
+                    "configure",
                 )
             )
             if not korean_procedure_marker or not english_procedure_marker:
@@ -1136,13 +1588,18 @@ class OllamaGenerationProvider:
                             "The previous JSON failed deterministic validation. Return the "
                             "complete corrected object once. Shorten prose to the fixed limits "
                             "without dropping supported meaning and never invent a source ID. "
-                            "Keep all four contiguous role groups in order, using 4 to 16 "
+                            "Keep all four contiguous role groups in order, normally 4 to 16 and "
+                            "never more than 20 "
                             "replies; adjacent roles may repeat when supported detail needs "
                             "more room. Use one to three sentences per reply and apply the "
                             "140/280 limits to each reply, not the whole thread. Name an "
                             "evidence-supported technology/method and "
                             "searchable problem in observation. Put the actual steps and mechanism "
-                            "in meaning, the honest measured/no-effect/mixed/not-measured result "
+                            "in meaning, using explicit operational wording in both languages "
+                            "(for example 설정/명령/순서/확인/적용 and "
+                            "set/command/first/check/apply), while keeping every step supported by "
+                            "the supplied sources. Put the honest "
+                            "measured/no-effect/mixed/not-measured result "
                             "in "
                             "possibility, and the reproduction boundary in afterthought. Remove "
                             "diary narration, "
@@ -1150,6 +1607,10 @@ class OllamaGenerationProvider:
                             "Rewrite Korean independently in everyday 해요/네요-style speech; "
                             "remove 합니다/습니다 endings and generic translated editorial jargon. "
                             f"Allowed source IDs: {json.dumps(sorted(allowed_ids))}.\n"
+                            "Use these exact technology_or_method candidates verbatim: "
+                            f"{technology_candidates_json}.\n"
+                            "Use these exact reader_problem_or_goal candidates verbatim: "
+                            f"{problem_candidates_json}.\n"
                             "Validation errors:\n"
                             f"{json.dumps(validation_errors, ensure_ascii=False)}"
                         ),
@@ -1191,9 +1652,13 @@ class OllamaGenerationProvider:
             "invented labels inside text; the deterministic renderer adds citations from each "
             "object's evidence_ids. The standfirst must list its supporting IDs separately in "
             "standfirst_evidence_ids. Use a number or measurement only when the exact value "
-            "appears "
-            "in the evidence selected for that paragraph or standfirst. There is no minimum "
-            "article length. Stop when the verified reusable information is fully explained and "
+            "appears in the evidence selected for that paragraph or standfirst. There is no "
+            "minimum article length. "
+            "If repair_request is present, start from its previous_draft and change only the "
+            "listed failures. Its numeric_support_by_evidence_id is an exact citation map: "
+            "each number kept in a paragraph or standfirst must appear under at least one "
+            "evidence ID selected by that same object. Otherwise remove the number. "
+            "Stop when the verified reusable information is fully explained and "
             f"never exceed {self.article_max_chars} rendered characters. Do not pad or repeat. "
             "For a reusable article, problem, cause_or_decision, implementation, and "
             "verification must each contain useful evidence-bound content. Context and "

@@ -31,9 +31,17 @@ def _transport(request: httpx.Request) -> httpx.Response:
                     {
                         "content": "검증된 번역 런타임 근거",
                         "retrieval_score": 0.82,
+                        "evidence_level": "source",
+                        "current": True,
+                        "revision_match": True,
+                        "project": "need",
                         "provenance": {
                             "document_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                             "chunk_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                            "relative_path": "README.md",
+                            "content_hash": "a" * 64,
+                            "start_line": 10,
+                            "end_line": 20,
                         },
                     }
                 ],
@@ -53,7 +61,7 @@ def _transport(request: httpx.Request) -> httpx.Response:
                 "project": "need",
                 "canonical_path": "/source/README.md",
                 "relative_path": "README.md",
-                "content_hash": "abc123",
+                "content_hash": "a" * 64,
                 "current_version_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
                 "chunk_total": 1,
                 "chunks": [
@@ -151,22 +159,36 @@ def test_retrieve_context_is_bounded_and_exposes_runtime() -> None:
 
     assert result.get("isError") is None
     payload = result["structuredContent"]
-    assert payload["confidence"] == "low"
-    assert payload["no_answer"] is True
-    assert payload["navigation_available"] is True
+    assert payload["confidence"] == "high"
+    assert payload["no_answer"] is False
+    assert payload["navigation_available"] is False
     assert payload["retrieval_runtime"] == {
         "mode": "keyword-fallback",
         "reason": "gpu_recovery_pending",
     }
-    assert payload["metrics"]["context_count"] == 0
-    assert payload["metrics"]["context_chars"] == 0
-    assert payload["metrics"]["navigation_count"] == 1
+    assert payload["metrics"]["context_count"] == 1
+    assert payload["metrics"]["context_chars"] > 0
+    assert payload["metrics"]["navigation_count"] == 0
     assert "검증된 번역 런타임 근거" in result["content"][0]["text"]
 
 
 def test_get_source_returns_only_selected_current_chunk() -> None:
-    client = PortalClient(transport=httpx.MockTransport(_transport))
+    def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/embedding/recovery":
+            return httpx.Response(200, json={"runtime": {"open": False}})
+        return _transport(request)
+
+    client = PortalClient(transport=httpx.MockTransport(transport))
     try:
+        call_tool(
+            client,
+            "retrieve_context",
+            {
+                "query": "MTP 번역 런타임 실패 원인",
+                "project": "need",
+                "purpose": "failure",
+            },
+        )
         result = call_tool(
             client,
             "get_source",
@@ -277,66 +299,9 @@ def test_long_query_is_split_inside_the_api_contract() -> None:
     assert "".join(parts).replace(" ", "") in query.replace(" ", "")
 
 
-def test_architecture_scope_auto_routes_to_current_repository_evidence() -> None:
-    source_hash = "a" * 64
-
+def test_prohibited_architecture_scope_fails_closed_before_any_api_call() -> None:
     def transport(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/repository-analysis/projects":
-            return httpx.Response(
-                200,
-                json={
-                    "items": [
-                        {
-                            "id": "11111111-1111-4111-8111-111111111111",
-                            "canonical_name": "esb",
-                            "display_name": "ESB",
-                            "snapshot_id": "22222222-2222-4222-8222-222222222222",
-                            "stale": False,
-                        }
-                    ]
-                },
-            )
-        if request.url.path == "/api/v1/repository-analysis/search":
-            assert request.url.params["q"] == "ESB가 요청을 처리하는 구조와 라이프사이클"
-            assert request.url.params["mode"] == "hybrid"
-            return httpx.Response(
-                200,
-                json={
-                    "mode": "hybrid-seeded-vector",
-                    "items": [
-                        {
-                            "id": "33333333-3333-4333-8333-333333333333",
-                            "knowledge_type": "ARCHITECTURE",
-                            "title": "ESB 요청 처리 구조",
-                            "summary": "ESB 요청 처리 구조는 수신, 라우팅, 응답 단계로 구성된다.",
-                            "detail": "현재 소스 스냅샷에서 검증된 처리 라이프사이클이다.",
-                            "processing_steps": ["수신", "라우팅", "응답"],
-                            "source_references": [
-                                {
-                                    "file": "src/main/java/EsbRoute.java",
-                                    "symbol": "EsbRoute",
-                                    "start_line": 10,
-                                    "end_line": 40,
-                                    "source_hash": source_hash,
-                                }
-                            ],
-                            "validation_status": "SOURCE_VERIFIED",
-                            "vector_similarity": 0.74,
-                            "keyword_matches": 3,
-                            "project_id": "11111111-1111-4111-8111-111111111111",
-                            "project": "ESB",
-                            "snapshot_id": "22222222-2222-4222-8222-222222222222",
-                            "source_hash": "b" * 64,
-                        }
-                    ],
-                },
-            )
-        if request.url.path == "/api/v1/embedding/recovery":
-            return httpx.Response(
-                200,
-                json={"runtime": {"open": True, "reason": "deferred_gpu_recovery"}},
-            )
-        return httpx.Response(404)
+        raise AssertionError(f"prohibited request reached local API: {request.url.path}")
 
     client = PortalClient(transport=httpx.MockTransport(transport))
     try:
@@ -345,58 +310,22 @@ def test_architecture_scope_auto_routes_to_current_repository_evidence() -> None
             "retrieve_context",
             {"query": "ESB가 요청을 처리하는 구조와 라이프사이클"},
         )["structuredContent"]
-        first = call_tool(
-            client,
-            "verify_answer",
-            {
-                "retrieval_id": retrieved["retrieval_id"],
-                "candidates": [
-                    {
-                        "text": "ESB 요청 처리 구조는 위성 발사 단계다.",
-                        "claims": [
-                            {
-                                "text": "위성 발사 단계다.",
-                                "citations": ["repository:missing"],
-                            }
-                        ],
-                    }
-                ],
-            },
-        )["structuredContent"]
-        evidence_id = retrieved["contexts"][0]["provenance"]["evidence_id"]
-        repaired = call_tool(
-            client,
-            "verify_answer",
-            {
-                "retrieval_id": retrieved["retrieval_id"],
-                "candidates": [
-                    {
-                        "text": "ESB 요청 처리 구조는 수신, 라우팅, 응답 단계로 구성된다.",
-                        "claims": [
-                            {
-                                "text": "ESB 요청 처리 구조는 수신, 라우팅, 응답 단계로 구성된다.",
-                                "citations": [evidence_id],
-                            }
-                        ],
-                    }
-                ],
-            },
-        )["structuredContent"]
     finally:
         client.close()
 
     assert retrieved["requested_purpose"] == "general"
     assert retrieved["purpose"] == "architecture"
-    assert retrieved["effective_project"] == "esb"
-    assert retrieved["confidence"] == "high"
-    assert retrieved["no_answer"] is False
-    assert retrieved["metrics"]["ranges"] == ["repository"]
-    assert retrieved["metrics"]["range_results"][0]["mode"] == ("hybrid-seeded-vector")
-    assert first["status"] == "repair_required"
-    assert first["repair_allowed"] is True
-    assert "citation_unknown:0" in first["verification"]["failures"]
-    assert repaired["status"] == "verified"
-    assert repaired["attempt"] == 2
+    assert retrieved["effective_project"] is None
+    assert retrieved["confidence"] == "none"
+    assert retrieved["no_answer"] is True
+    assert retrieved["navigation_available"] is False
+    assert retrieved["contexts"] == []
+    assert retrieved["policy"] == "project_scope_denied"
+    assert retrieved["retrieval_runtime"] == {
+        "mode": "not_called",
+        "reason": "project_scope_denied",
+    }
+    assert retrieved["metrics"]["api_calls"] == 0
 
 
 def test_hard_gate_runs_before_top_k_selection() -> None:

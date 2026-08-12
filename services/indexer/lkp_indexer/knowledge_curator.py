@@ -299,6 +299,18 @@ def _payload_hash(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _numeric_support_by_evidence_id(
+    evidence_map: dict[str, str],
+) -> dict[str, list[str]]:
+    return {
+        evidence_id: sorted(
+            {token.replace(",", "") for token in _NUMBER.findall(searchable)},
+            key=lambda value: (len(value), value),
+        )
+        for evidence_id, searchable in evidence_map.items()
+    }
+
+
 def _generation_parameters(provider: GenerationProvider) -> dict[str, Any]:
     value = getattr(provider, "generation_parameters", {})
     return dict(value) if isinstance(value, dict) else {}
@@ -884,10 +896,17 @@ def curate_candidate(
                 "attempt": 1,
                 "validation_reasons": reasons,
                 "previous_draft": draft.model_dump(mode="json"),
+                "numeric_support_by_evidence_id": _numeric_support_by_evidence_id(
+                    evidence_map
+                ),
                 "instruction": (
                     "Repair only the listed deterministic validation failures. "
                     "Do not add claims, numbers, files, outcomes, or citations that "
-                    "are absent from the supplied evidence."
+                    "are absent from the supplied evidence. For each paragraph and "
+                    "standfirst, every numeric token must appear under at least one of "
+                    "that object's selected evidence IDs in numeric_support_by_evidence_id. "
+                    "Add a genuinely supporting evidence ID or remove the number; never "
+                    "move a number to an unrelated section."
                 ),
             },
         }

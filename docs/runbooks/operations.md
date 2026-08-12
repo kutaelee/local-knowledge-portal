@@ -207,6 +207,13 @@ describe the actual information that changed, what was learned, and supported re
 cites exact source IDs in metadata and a deterministic validator rejects invented IDs. One repair
 is allowed for schema, citation, or length errors; a second failure publishes nothing.
 
+Incremental selection is project-scoped. A journal is linked to its generated embedded entry page
+by the stable timestamp-plus-journal-ID filename, rather than by comparing changed source-code
+basenames with generated Markdown filenames. Each project advances its own embedding cursor, and
+recently published journal IDs and document content hashes are excluded before generation. This
+prevents one busy project from skipping another project's update and prevents a re-embedding of an
+unchanged source from becoming a new post.
+
 Each update is stored as one bilingual X-style technical thread with four contiguous narrative
 groups: a searchable problem and named technology/method, the actual settings/commands/component
 order and mechanism, the verified effect or explicit lack of effect (or an honest `not_measured`
@@ -228,6 +235,13 @@ The source manifest records journal/document/version provenance, the embedding r
 the exact Gemma model digest and prompt version. A screenshot is only recommended when a source
 explicitly identifies a stable non-secret visual artifact; capture remains a separate reviewed
 action.
+
+Before publication, the editor receives the recent topic contracts for the same project. A
+deterministic gate compares the candidate's named technology/method and reader problem, then checks
+the full bilingual thread for near-duplicate text. A duplicate receives one local-model repair with
+a different supported topic; a second duplicate is fail-closed and publishes nothing. The default
+thresholds are `0.88` for the combined topic pair and `0.72` for character-trigram thread overlap,
+calibrated against the prior feed where all five same-project topic contracts were exact matches.
 
 At 07:30 `Asia/Seoul`, the daily entrypoint creates the idempotent `daily:YYYY-MM-DD`
 synthesis for the previous local calendar day. It selects the strongest reusable lesson instead of

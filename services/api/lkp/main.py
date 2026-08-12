@@ -81,6 +81,7 @@ from .schemas import (
     ServiceControlRequest,
 )
 from .search import search
+from .security_boundary import allowed_project_expression
 from .service_catalog import load_docker_groups, load_gpu_embedding_reaper
 from .settings import get_settings
 
@@ -2041,8 +2042,14 @@ def developer_feed(
     page_size: int = Query(50, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> dict:
-    statement = select(DeveloperFeedPost)
-    count_statement = select(func.count()).select_from(DeveloperFeedPost)
+    statement = select(DeveloperFeedPost).where(
+        allowed_project_expression(DeveloperFeedPost.project_key)
+    )
+    count_statement = (
+        select(func.count())
+        .select_from(DeveloperFeedPost)
+        .where(allowed_project_expression(DeveloperFeedPost.project_key))
+    )
     if project:
         statement = statement.where(DeveloperFeedPost.project_key == project)
         count_statement = count_statement.where(DeveloperFeedPost.project_key == project)
@@ -2070,12 +2077,14 @@ def developer_feed_status(db: Session = Depends(get_db)) -> dict:
 
     latest_activity = db.scalar(
         select(func.max(DeveloperFeedPost.created_at)).where(
-            DeveloperFeedPost.post_type == "activity"
+            DeveloperFeedPost.post_type == "activity",
+            allowed_project_expression(DeveloperFeedPost.project_key),
         )
     )
     latest_daily = db.scalar(
         select(func.max(DeveloperFeedPost.created_at)).where(
-            DeveloperFeedPost.post_type == "daily_summary"
+            DeveloperFeedPost.post_type == "daily_summary",
+            allowed_project_expression(DeveloperFeedPost.project_key),
         )
     )
     local_tz = ZoneInfo(settings.developer_feed_timezone)

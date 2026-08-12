@@ -6,9 +6,243 @@ import pytest
 from lkp.settings import Settings
 from lkp_indexer.generation import (
     OllamaGenerationProvider,
+    _canonicalize_feed_exact_phrases,
+    _casualize_feed_korean_endings,
+    _downgrade_unverified_feed_outcome,
+    _ensure_feed_afterthought_boundary,
+    _ensure_feed_opening_anchor,
     _normalize_project_article_flat_payload,
+    _opening_mentions_anchor,
+    _split_oversized_feed_replies,
     build_generation_provider,
 )
+
+
+def test_feed_reply_length_normalization_splits_paired_sentences_without_rewrite():
+    parsed = {
+        "posts": [
+            {
+                "role": "possibility",
+                "sentences_ko": ["가" * 80, "나" * 80],
+                "sentences_en": ["a" * 120, "b" * 120],
+                "source_ids": ["D1"],
+            }
+        ]
+    }
+
+    normalized = _split_oversized_feed_replies(parsed)
+
+    assert isinstance(normalized, dict)
+    assert normalized["posts"] == [
+        {
+            "role": "possibility",
+            "sentences_ko": ["가" * 80],
+            "sentences_en": ["a" * 120],
+            "source_ids": ["D1"],
+        },
+        {
+            "role": "possibility",
+            "sentences_ko": ["나" * 80],
+            "sentences_en": ["b" * 120],
+            "source_ids": ["D1"],
+        },
+    ]
+
+
+def test_feed_opening_anchor_allows_natural_inflection_but_not_unrelated_prose():
+    assert _opening_mentions_anchor(
+        "리비전 게이트를 먼저 통과시키면 오래된 근거가 다시 섞이지 않아요.",
+        "리비전 게이트",
+    )
+    assert not _opening_mentions_anchor(
+        "오늘 파이프라인을 정리했어요.",
+        "리비전 게이트",
+    )
+
+
+def test_feed_metadata_canonicalization_only_uses_close_verbatim_evidence_phrase():
+    parsed = {
+        "technology_or_method": "리비전 게이트 검사",
+        "reader_problem_or_goal": "완전히 다른 목표",
+    }
+    normalized = _canonicalize_feed_exact_phrases(
+        parsed,
+        {
+            "technology_or_method": ["리비전 게이트"],
+            "reader_problem_or_goal": ["오래된 근거가 먼저 검색된다"],
+        },
+    )
+
+    assert isinstance(normalized, dict)
+    assert normalized["technology_or_method"] == "리비전 게이트"
+    assert normalized["reader_problem_or_goal"] == "완전히 다른 목표"
+
+
+def test_feed_opening_anchor_is_added_as_a_sourced_observation_without_claim_rewrite():
+    parsed = {
+        "technology_or_method": "리비전 게이트",
+        "reader_problem_or_goal": "오래된 근거가 먼저 검색된다",
+        "posts": [
+            {
+                "role": "observation",
+                "sentences_ko": ["검색 결과가 그럴듯하지만 틀리는 증상을 재현했어요."],
+                "sentences_en": [
+                    "I reproduced a result that looked plausible but was still wrong."
+                ],
+                "source_ids": ["D1"],
+            }
+        ],
+    }
+
+    normalized = _ensure_feed_opening_anchor(parsed)
+
+    assert isinstance(normalized, dict)
+    assert len(normalized["posts"]) == 2
+    assert normalized["posts"][0]["role"] == "observation"
+    assert "리비전 게이트" in normalized["posts"][0]["sentences_ko"][0]
+    assert normalized["posts"][0]["source_ids"] == ["D1"]
+    assert normalized["posts"][1] == parsed["posts"][0]
+
+
+def test_feed_opening_anchor_can_extend_a_full_sixteen_reply_model_draft():
+    base_post = {
+        "role": "observation",
+        "sentences_ko": ["검색 결과의 원인을 따라가 봤어요."],
+        "sentences_en": ["I traced the cause behind the search result."],
+        "source_ids": ["D1"],
+    }
+    parsed = {
+        "technology_or_method": "리비전 게이트",
+        "reader_problem_or_goal": "오래된 근거가 먼저 검색된다",
+        "posts": [dict(base_post) for _ in range(16)],
+    }
+
+    normalized = _ensure_feed_opening_anchor(parsed)
+
+    assert isinstance(normalized, dict)
+    assert len(normalized["posts"]) == 17
+    assert "리비전 게이트" in normalized["posts"][0]["sentences_ko"][0]
+
+
+def test_feed_opening_anchor_reserves_space_from_an_overfull_model_draft():
+    posts = [
+        {
+            "role": "observation",
+            "sentences_ko": [f"검색 결과의 원인을 따라가 본 기록 {index}."],
+            "sentences_en": [f"I traced the search result cause in note {index}."],
+            "source_ids": [f"D{index}"],
+        }
+        for index in range(21)
+    ]
+    parsed = {
+        "technology_or_method": "리비전 게이트",
+        "reader_problem_or_goal": "오래된 근거가 먼저 검색된다",
+        "posts": posts,
+    }
+
+    normalized = _ensure_feed_opening_anchor(parsed)
+
+    assert isinstance(normalized, dict)
+    assert len(normalized["posts"]) == 21
+    assert "리비전 게이트" in normalized["posts"][0]["sentences_ko"][0]
+    assert normalized["posts"][0]["source_ids"] == ["D0"]
+    assert normalized["posts"][1] == posts[0]
+    assert sum(post["source_ids"] == ["D1"] for post in normalized["posts"]) == 0
+
+
+def test_feed_measured_claim_is_downgraded_when_batch_has_no_result_evidence():
+    parsed = {
+        "outcome_status": "verified_effect",
+        "outcome_source_ids": ["D1"],
+        "posts": [
+            {
+                "role": "possibility",
+                "sentences_ko": ["속도가 크게 개선됐어요."],
+                "sentences_en": ["The system became much faster."],
+                "source_ids": ["D1"],
+            }
+        ],
+    }
+
+    normalized = _downgrade_unverified_feed_outcome(
+        parsed,
+        verified_result_source_ids=set(),
+        allowed_source_ids={"D1"},
+    )
+
+    assert isinstance(normalized, dict)
+    assert normalized["outcome_status"] == "not_measured"
+    assert normalized["outcome_source_ids"] == ["D1"]
+    assert "측정하지 않았어요" in normalized["posts"][0]["sentences_ko"][0]
+    assert "not been measured" in normalized["posts"][0]["sentences_en"][0]
+
+
+def test_feed_existing_not_measured_status_still_gets_explicit_outcome_prose():
+    parsed = {
+        "outcome_status": "not_measured",
+        "outcome_source_ids": ["D1"],
+        "posts": [
+            {
+                "role": "possibility",
+                "sentences_ko": ["다른 프로젝트에도 적용할 수 있어요."],
+                "sentences_en": ["This could also be used in another project."],
+                "source_ids": ["D1"],
+            }
+        ],
+    }
+
+    normalized = _downgrade_unverified_feed_outcome(
+        parsed,
+        verified_result_source_ids=set(),
+        allowed_source_ids={"D1"},
+    )
+
+    assert isinstance(normalized, dict)
+    assert "측정하지 않았어요" in normalized["posts"][0]["sentences_ko"][0]
+
+
+def test_feed_formal_korean_endings_are_normalized_without_changing_the_claim():
+    normalized = _casualize_feed_korean_endings(
+        {
+            "posts": [
+                {
+                    "sentences_ko": [
+                        "리비전 검사를 추가했습니다.",
+                        "오래된 근거는 제외됩니다.",
+                        "다른 프로젝트에도 적용할 가능성이 보입니다.",
+                        "업데이트를 올렸습니다.",
+                    ]
+                }
+            ]
+        }
+    )
+
+    assert isinstance(normalized, dict)
+    assert normalized["posts"][0]["sentences_ko"] == [
+        "리비전 검사를 추가했어요.",
+        "오래된 근거는 제외돼요.",
+        "다른 프로젝트에도 적용할 여지가 있어요.",
+        "업데이트를 올렸어요.",
+    ]
+
+
+def test_feed_afterthought_without_boundary_gets_conservative_scope_language():
+    normalized = _ensure_feed_afterthought_boundary(
+        {
+            "posts": [
+                {
+                    "role": "afterthought",
+                    "sentences_ko": ["다음 프로젝트에도 써보고 싶어요."],
+                    "sentences_en": ["I want to try this in another project."],
+                    "source_ids": ["D1"],
+                }
+            ]
+        }
+    )
+
+    assert isinstance(normalized, dict)
+    assert "현재 확인된 변경 범위" in normalized["posts"][0]["sentences_ko"][0]
+    assert "only" in normalized["posts"][0]["sentences_en"][0]
 
 
 def _valid_feed_posts(source_id: str = "D1") -> list[dict]:
@@ -227,14 +461,17 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         payload = json.loads(request.content)
         assert payload["keep_alive"] == "0"
         assert payload["options"]["num_batch"] == 1024
+        assert payload["options"]["num_predict"] == 8192
         assert "Do not make embedding" in payload["messages"][0]["content"]
         assert "untrusted data" in payload["messages"][0]["content"]
         assert "teaches other developers" in payload["messages"][0]["content"]
         assert "not a work diary" in payload["messages"][0]["content"]
         assert "troubleshooting" in payload["messages"][0]["content"]
+        assert "설정/명령/순서/확인/적용" in payload["messages"][0]["content"]
+        assert "set/command/first/check/apply" in payload["messages"][0]["content"]
         assert "Draft Korean first" in payload["messages"][0]["content"]
         assert "해요/했어요/됐네요" in payload["messages"][0]["content"]
-        assert "between 4 and 16 replies" in payload["messages"][0]["content"]
+        assert "normally 4 to 16 replies" in payload["messages"][0]["content"]
         assert "not to the whole technical article" in payload["messages"][0]["content"]
         if attempts == 1:
             posts = _valid_feed_posts()
@@ -254,6 +491,7 @@ def test_developer_feed_uses_content_prompt_and_repairs_once():
         "gemma4:12b",
         "sha256:gemma4",
         5,
+        max_output_tokens=8192,
         keep_alive="0",
         transport=httpx.MockTransport(handler),
     )
@@ -337,12 +575,11 @@ def test_developer_feed_allows_a_long_article_split_into_per_reply_limits():
         prompt_version="feed-test-v1",
     )
 
-    assert len(draft.posts) == 6
+    assert len(draft.posts) == 5
     assert [post.role for post in draft.posts] == [
         "observation",
         "meaning",
         "meaning",
-        "possibility",
         "possibility",
         "afterthought",
     ]
@@ -430,7 +667,7 @@ def test_developer_feed_repairs_manifesto_tone():
         {"sources": [_valid_feed_source()]},
         prompt_version="feed-test-v1",
     )
-    assert attempts == 2
+    assert attempts == 1
     assert "울타리" not in draft.posts[3].content_ko
     assert draft.posts[3].role == "afterthought"
 
@@ -476,7 +713,7 @@ def test_developer_feed_repairs_personal_resolution_into_reader_facing_caveat():
         {"sources": [_valid_feed_source()]},
         prompt_version="feed-test-v1",
     )
-    assert attempts == 2
+    assert attempts == 1
     assert "앞으로는" not in draft.posts[3].content_ko
     assert "다만" in draft.posts[3].content_ko
 
@@ -572,9 +809,10 @@ def test_developer_feed_repairs_vague_product_prose():
         {"sources": [_valid_feed_source()]},
         prompt_version="feed-test-v1",
     )
-    assert attempts == 2
-    assert "가능성이 보" not in draft.posts[2].content_ko
-    assert "context-rich" not in draft.posts[2].content_en
+    assert attempts == 1
+    possibility = next(post for post in draft.posts if post.role == "possibility")
+    assert "가능성이 보" not in possibility.content_ko
+    assert "context-rich" not in possibility.content_en
 
 
 def test_developer_feed_repairs_result_without_an_outcome():
@@ -618,9 +856,9 @@ def test_developer_feed_repairs_result_without_an_outcome():
         {"sources": [_valid_feed_source()]},
         prompt_version="feed-test-v1",
     )
-    assert attempts == 2
-    assert "not measured" in draft.posts[2].content_en
-    assert draft.posts[2].role == "possibility"
+    assert attempts == 1
+    possibility = next(post for post in draft.posts if post.role == "possibility")
+    assert "not been measured" in possibility.content_en
 
 
 def test_developer_feed_repairs_project_insider_opening():
@@ -672,7 +910,7 @@ def test_developer_feed_repairs_project_insider_opening():
     assert "RAG" in draft.posts[0].content_ko
 
 
-def test_developer_feed_rejects_measured_effect_from_observed_change_only():
+def test_developer_feed_downgrades_measured_effect_from_observed_change_only():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/tags":
             return httpx.Response(
@@ -702,11 +940,16 @@ def test_developer_feed_rejects_measured_effect_from_observed_change_only():
         keep_alive="0",
         transport=httpx.MockTransport(handler),
     )
-    with pytest.raises(ValueError, match="verified_result source"):
-        provider.write_developer_feed(
-            {"sources": [_valid_feed_source()]},
-            prompt_version="feed-test-v1",
-        )
+    draft, _ = provider.write_developer_feed(
+        {"sources": [_valid_feed_source()]},
+        prompt_version="feed-test-v1",
+    )
+
+    assert draft.outcome_status == "not_measured"
+    possibility = " ".join(
+        post.content_en for post in draft.posts if post.role == "possibility"
+    )
+    assert "not been measured" in possibility
 
 
 def test_developer_feed_accepts_verified_no_effect_result():

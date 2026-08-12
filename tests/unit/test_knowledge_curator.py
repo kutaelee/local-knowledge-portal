@@ -9,6 +9,7 @@ from lkp_indexer.generation import (
 from lkp_indexer.knowledge import assess_knowledge_value, case_tags
 from lkp_indexer.knowledge_curator import (
     GpuSnapshot,
+    _numeric_support_by_evidence_id,
     _payload,
     busy_retry_seconds,
     gpu_is_available,
@@ -572,6 +573,18 @@ def test_summary_and_paragraph_numbers_must_exist_in_verified_evidence():
     assert status == "NEEDS_REVIEW"
     assert "standfirst_unsupported_number" in reasons
     assert "implementation_unsupported_number" in reasons
+
+
+def test_numeric_repair_catalog_is_scoped_to_each_evidence_id():
+    assert _numeric_support_by_evidence_id(
+        {
+            "E1": "8/8 pass; hard_failures=0; peak_total_gpu_used_mb=19,297",
+            "E2": "manual workflow parses; exit_code=0",
+        }
+    ) == {
+        "E1": ["0", "8", "19297"],
+        "E2": ["0"],
+    }
 
 
 def test_invalid_structured_output_rejects_model_instead_of_retrying_forever():

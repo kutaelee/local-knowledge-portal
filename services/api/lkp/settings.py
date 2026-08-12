@@ -154,15 +154,19 @@ class Settings(BaseSettings):
     developer_feed_max_sources_per_run: int = Field(default=12, ge=1, le=100)
     developer_feed_max_batches_per_run: int = Field(default=8, ge=1, le=50)
     developer_feed_max_input_chars: int = Field(default=24_000, ge=4_000, le=100_000)
+    developer_feed_recent_thread_limit: int = Field(default=30, ge=1, le=200)
+    developer_feed_topic_similarity_threshold: float = Field(default=0.88, ge=0.5, le=1)
+    developer_feed_text_similarity_threshold: float = Field(default=0.72, ge=0.5, le=1)
     developer_feed_persona_version: str = "peer-developer-v10-threaded-sharing"
-    developer_feed_prompt_version: str = "developer-feed-v10-variable-thread"
+    developer_feed_prompt_version: str = "developer-feed-v11-novel-source-thread"
     developer_feed_model: str = "gemma4:12b"
     developer_feed_model_digest: str = (
         "4eb23ef187e2c5462566d6a1d3bbbc2f1346d0b4327cbb66d58fffbcc9b2b05c"
     )
     developer_feed_timeout_seconds: int = Field(default=600, ge=30, le=3600)
-    developer_feed_context_window: int = Field(default=16_384, ge=2_048, le=262_144)
+    developer_feed_context_window: int = Field(default=32_768, ge=2_048, le=262_144)
     developer_feed_num_batch: int = Field(default=1_024, ge=32, le=8_192)
+    developer_feed_max_output_tokens: int = Field(default=8_192, ge=1_024, le=32_768)
     developer_feed_temperature: float = Field(default=0.65, ge=0, le=1)
     activity_detail_retention_days: int = Field(default=30, ge=1, le=3650)
     terminal_job_detail_retention_days: int = Field(default=90, ge=1, le=3650)
